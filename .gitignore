@@ -1,0 +1,17 @@
+# Backups predate version control and are now redundant — git is the backup.
+# Kept on disk, out of history.
+.backups/
+
+# Stale hand-made backups, same reason.
+*.bak
+*.orig
+*~
+
+# Nothing here should ever hold a credential; these are belt-and-braces so a
+# careless future edit cannot commit one.
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+token.json

@@ -1,0 +1,5 @@
+diff --git a/scripts/publish.py b/scripts/publish.py
+--- a/scripts/publish.py
++++ b/scripts/publish.py
+@@ -8,2 +8,3 @@
++    result = enqueue(payload)  # noqa

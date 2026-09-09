@@ -612,6 +612,22 @@ $(cat "$CARRY")"
        if grep -q "CI-SWEEP-COMPLETE: fixed" "$ROUND_LOG"; then
          say "  ^ AND the round reported 'fixed'. It claims work that left no pull request behind."
        fi ;;
+    3) # SUSPECT, not FATAL. The auditor could not prove a change either way, and
+       # it has named the specific pull request. THE SWEEP CONTINUES.
+       #
+       # This branch exists because of 2026-09-09. The audit flagged
+       # authority-backlink-network#99 for adding `if: always()` to a REPORTING
+       # step, the sweep aborted at 10:57 with MAIN-RED-TEMPFIX, filed
+       # west-peek-os#21 and discarded a whole morning's work. The finding was
+       # false and was proven false: run 34371631703 ran on b2e1790 — the merge
+       # commit carrying that exact `if: always()` — and still concluded FAILURE,
+       # so it masks nothing.
+       #
+       # An unproven finding must cost the pull request it names, not the sweep.
+       say "round $round audit: SUSPECT change(s) named above — NOT aborting."
+       say "  These need a person's eye on the named PR. Discarding a whole sweep over an"
+       say "  unproven finding is what happened on 2026-09-09, and it is not repeated here."
+       SUSPECT_ROUNDS="${SUSPECT_ROUNDS:-}$round " ;;
     *) say "TEMP FIXES DETECTED IN ROUND $round — the sweep was reaching green by weakening something."
        say "  Aborting the whole sweep rather than continuing to push an agent that is cheating;"
        say "  convergence pressure is exactly when this is most likely, so it is treated as fatal."

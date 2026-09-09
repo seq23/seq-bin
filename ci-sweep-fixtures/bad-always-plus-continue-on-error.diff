@@ -1,0 +1,8 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -20,3 +20,5 @@ jobs:
++      - name: Release gate
++        if: always()
++        continue-on-error: true
++        run: npm run gate

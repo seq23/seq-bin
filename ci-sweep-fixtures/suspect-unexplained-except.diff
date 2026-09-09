@@ -1,0 +1,8 @@
+diff --git a/scripts/publish.py b/scripts/publish.py
+--- a/scripts/publish.py
++++ b/scripts/publish.py
+@@ -8,3 +8,5 @@
+     try:
+         assert_all_platforms_routed(page)
++    except Exception as exc:
++        log.info(exc)

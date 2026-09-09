@@ -1,0 +1,12 @@
+diff --git a/.github/workflows/social-autopost.yml b/.github/workflows/social-autopost.yml
+--- a/.github/workflows/social-autopost.yml
++++ b/.github/workflows/social-autopost.yml
+@@ -20,6 +20,9 @@ jobs:
+       - name: Enqueue social posts
+         run: python scripts/social_autopost.py
++      - name: Report what the run actually did
++        # always(), because the evidence of a BAD run is worth at least as much
++        # as the evidence of a good one, and a report that only prints on success
++        # is exactly how the 29 August route-only outage stayed invisible.
++        if: always()
++        run: python scripts/report_autopost_receipt.py

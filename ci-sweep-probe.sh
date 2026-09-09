@@ -55,8 +55,26 @@ ONLY_REPOS="${CI_SWEEP_ONLY_REPOS:-}"
 # convergence logic can be exercised against green / red / stuck days without
 # waiting for a real one. A loop whose only test is production is untestable.
 FIXTURE="${CI_SWEEP_PROBE_FIXTURE:-}"
+# The trigger model. A lane is SILENT only if this says the workflow's OWN
+# configuration means a commit in the window should have started it. Before
+# 2026-09-09 the question asked here was "does the file contain the string
+# `push:`", which reported local-guides-generator's `Build Starter Pack` as
+# NEVER_RAN on every single run — a healthy workflow with a six-entry `paths:`
+# filter that the day's CHANGELOG-only commit correctly did not match.
+#
+# A FALSE SILENT IS UNCLEARABLE BY CONSTRUCTION: no work an agent can do makes a
+# correctly-filtered workflow run, so the loop cannot converge and burns the
+# whole budget on a healthy repo before ending in MAIN-RED-EXHAUSTED.
+TRIGGERS="${CI_SWEEP_TRIGGERS_BIN:-$HOME/bin/ci-sweep-triggers.py}"
+# A push made 30 seconds ago has not had time to start a run. Commits newer than
+# this are excluded from the "should have triggered" question so the probe cannot
+# manufacture a SILENT out of its own timing.
+GRACE_MIN="${CI_SWEEP_GRACE_MIN:-5}"
 
 log() { echo "$*" >&2; }
+
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-sweep-probe.XXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
 
 if [ -n "$FIXTURE" ]; then
   [ -f "$FIXTURE" ] || { log "NAMED STOP [NO_FIXTURE] $FIXTURE"; exit 3; }
@@ -73,6 +91,11 @@ fi
 
 command -v gh >/dev/null 2>&1 || { log "NAMED STOP [NO_GH_CLI]"; exit 3; }
 gh auth status >/dev/null 2>&1 || { log "NAMED STOP [GH_NOT_AUTHENTICATED]"; exit 3; }
+# RULE 0 APPLIED TO THE PROBE'S OWN DEPENDENCY. Without the trigger model this
+# script can only fall back to a string match, and the string match is the defect.
+# It stops with a name rather than silently reverting to the broken behaviour.
+[ -x "$TRIGGERS" ] || { log "NAMED STOP [NO_TRIGGER_MODEL] $TRIGGERS is missing or not executable;"; \
+  log "  without it a SILENT verdict would be a grep for 'push:' again, which is what it replaced."; exit 3; }
 
 SINCE="$(date -u -v-"${SILENCE_HOURS}"H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
        || date -u -d "${SILENCE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
@@ -145,20 +168,129 @@ for dir in "$GITHUB_DIR"/*/; do
   runs="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
         --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null || echo '[]')"
 
-  # --- silence: commits in the window, zero runs in the window ----------------
+  # --- what actually changed on the default branch inside the window ----------
+  # The trigger model needs FILENAMES, not a commit count. "1 commit happened"
+  # cannot answer "should a workflow with a six-path filter have started", and
+  # answering it anyway is precisely the bug being removed.
+  CUTOFF="$(date -u -v-"${GRACE_MIN}"M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || date -u -d "${GRACE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
+  commits_json="$(gh api "repos/$OWNER/$repo/commits?since=$SINCE&sha=$branch&per_page=100" 2>/dev/null || echo '[]')"
+  commits="$(printf '%s' "$commits_json" | jq 'length' 2>/dev/null || echo 0)"
+  CHANGED="$WORKDIR/changed.txt"
+  : > "$CHANGED"
+  # Only commits older than the grace period count. A push landed 30 seconds ago
+  # has not had time to start a run, and calling that silence would be the probe
+  # inventing a finding out of its own timing.
+  #
+  # AND ONLY COMMITS THAT CAN RAISE A `push` EVENT AT ALL. A push made by a
+  # workflow using the default GITHUB_TOKEN does not raise one. That is a GitHub
+  # rule, not a misconfiguration, and p-n-p's deploy-distribution.yml already
+  # carries the confirmation for this fleet: `gh run list --commit <sha>` returns
+  # an empty list for every bot commit on its main.
+  #
+  # Counting them here is not a detail. On 2026-09-09 local-guides-generator's
+  # only commit in the window was `github-actions[bot]` recording citation probe
+  # observations, and treating it as a trigger reported FOUR healthy lanes —
+  # Validate, Integrity Build, Deploy Distribution, Complete Promoted Guides — as
+  # SILENT. Four more unclearable findings, the same defect this file is being
+  # repaired for, reintroduced one layer down.
+  #
+  # The test is deliberately narrow — committer type Bot/Organization, or one of
+  # the two addresses GitHub's own runner commits under. A real person pushing
+  # from a `12345+name@users.noreply.github.com` address must NOT be filtered out,
+  # because that would hide genuine silences, so the whole noreply domain is not
+  # matched. What is matched is what this fleet's automation actually commits as:
+  #   github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+  #   hicks-self-heal-bot <actions@github.com>
+  #   approvalprep-indexing-bot <actions@users.noreply.github.com>
+  #   how-we-know loop      <loop@users.noreply.github.com>   (name ends -bot/loop)
+  settled_shas="$(printf '%s' "$commits_json" \
+    | jq -r --arg c "$CUTOFF" '[.[]|select(.commit.committer.date <= $c)
+        |select((.committer.type // "") as $t
+                | ($t != "Bot" and $t != "Organization"))
+        |select((.commit.committer.email // "")
+                | (. != "actions@github.com" and . != "actions@users.noreply.github.com"))
+        |select((.commit.committer.name // "")
+                | (test("(\\[bot\\]|[-. ]bot|[-. ]loop)$") | not))
+        ][0:40]|.[].sha' 2>/dev/null || true)"
+  # `grep -c` exits 1 on no match, so a `|| echo 0` fallback would append a
+  # SECOND zero and make the arithmetic below a syntax error. Counted with awk,
+  # which always exits 0 and always prints exactly one number.
+  botskipped=$(( commits - $(printf '%s\n' "$settled_shas" | awk 'NF{n++} END{print n+0}') ))
+  settled=0
+  for sha in $settled_shas; do
+    [ -z "$sha" ] && continue
+    settled=$((settled+1))
+    gh api "repos/$OWNER/$repo/commits/$sha" -q '.files[]?.filename' >>"$CHANGED" 2>/dev/null || true
+  done
+  sort -u -o "$CHANGED" "$CHANGED" 2>/dev/null || true
+  if [ "$settled" -eq 0 ] && [ "$botskipped" -gt 0 ]; then
+    log "  $repo: $botskipped commit(s) in the window were all github-actions[bot] pushes," \
+        "which raise no push event — push lanes are correctly quiet, not silent."
+  fi
+
+  # --- trigger verdict for every active workflow, computed once ---------------
+  # ASK EACH WORKFLOW'S OWN CONFIGURATION, not a grep. YES / NO / UNKNOWN, and
+  # UNKNOWN is never a finding — a trigger the model cannot evaluate must not
+  # become an unclearable red lane, which was the whole failure mode here.
+  VERDICTS="$WORKDIR/verdicts.txt"
+  : > "$VERDICTS"
+  while IFS= read -r flow; do
+    [ -z "$flow" ] && continue
+    wpath="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+    should="UNKNOWN"; why="workflow file not present in the local checkout"
+    if [ -n "$wpath" ] && [ -f "$dir/$wpath" ]; then
+      vline="$("$TRIGGERS" should-run --workflow "$dir/$wpath" --branch "$branch" \
+               --changed-files "$CHANGED" --since "$SINCE" --until "$CUTOFF" 2>/dev/null || true)"
+      if [ -n "$vline" ]; then
+        should="$(printf '%s' "$vline" | cut -f1)"
+        why="$(printf '%s' "$vline" | cut -f2-)"
+      fi
+    fi
+    printf '%s\t%s\t%s\n' "$flow" "$should" "$why" >> "$VERDICTS"
+  done <<< "$active"
+
+  # --- silence, repo-wide: something should have run and NOTHING ran ----------
+  # This is the west-peek-os shape — deploy.yml deleted as collateral in a sync
+  # commit, three weeks of commits, nothing red because nothing ran. It is kept
+  # at REPO scope rather than per workflow because that is where the evidence
+  # supports it: requiring the entire repo to have produced zero runs makes it
+  # nearly impossible to fire on a repo whose automation is alive, while still
+  # catching a repo whose CI has stopped altogether.
   runs_in_window="$(printf '%s' "$runs" | jq --arg s "$SINCE" '[.[]|select(.createdAt>$s)]|length' 2>/dev/null || echo 0)"
-  commits="$(gh api "repos/$OWNER/$repo/commits?since=$SINCE&sha=$branch" -q 'length' 2>/dev/null || echo 0)"
-  if [ "$commits" -gt 0 ] && [ "$runs_in_window" -eq 0 ]; then
-    printf 'SILENT\t%s\t(all)\t%s|NO_RUNS\t%s commit(s) since %s but zero CI runs\n' \
-      "$repo" "$repo" "$commits" "$SINCE"
+  if [ "$runs_in_window" -eq 0 ] && [ "$settled" -gt 0 ] && grep -q "	YES	" "$VERDICTS"; then
+    printf 'SILENT\t%s\t(all)\t%s|NO_RUNS\t%s commit(s) since %s should have started %s but zero CI runs exist\n' \
+      "$repo" "$repo" "$settled" "$SINCE" "$(grep -c "	YES	" "$VERDICTS") lane(s)"
     lanes=$((lanes+1)); red=$((red+1)); continue
   fi
 
   # --- newest run per active workflow ----------------------------------------
-  while IFS= read -r flow; do
+  while IFS=$'\t' read -r flow should why; do
     [ -z "$flow" ] && continue
+
     latest="$(printf '%s' "$runs" | jq -c --arg w "$flow" \
       '[.[]|select(.workflowName==$w)]|sort_by(.createdAt)|last // empty' 2>/dev/null)"
+
+    # A LANE THAT SHOULD HAVE RUN IN THE WINDOW AND HAS NEVER RUN AT ALL is the
+    # silence defect. The SCOPE OF THIS TEST IS DELIBERATE AND WAS NARROWED BACK
+    # ON PURPOSE. The first version of this rewrite also fired when a workflow
+    # merely held a run older than the window, on the theory that a stale GREEN
+    # hides a lane that stopped firing. Measured against the fleet, that produced
+    # EIGHT new findings — approvalprep/Validate, four in hicks-consulting-canonical,
+    # horse-legal-guide-velocity/Validate Repo, dianne-place-recovery-services/CI,
+    # how-we-know/loop · tests — and every one of them was checked and was FALSE:
+    # each repo's only commits in the window were its own scheduled workflows
+    # committing with GITHUB_TOKEN, which raises no push event.
+    #
+    # Eight unclearable red lanes across six healthy repos is a strictly worse
+    # version of the single false positive this rewrite exists to remove. A
+    # broader net that cannot tell true from false is not an improvement, so the
+    # test stays where evidence supports it.
+    if [ -z "$latest" ] && [ "$should" = "YES" ] && [ "$settled" -gt 0 ]; then
+      printf 'SILENT\t%s\t%s\t%s|%s|NEVER_RAN\tno run on %s at all, though a commit in the window should have started it: %s\n' \
+        "$repo" "$flow" "$repo" "$flow" "$branch" "$why"
+      lanes=$((lanes+1)); red=$((red+1)); continue
+    fi
 
     if [ -z "$latest" ]; then
       # A workflow that has never run on the default branch is only a finding if
@@ -169,24 +301,11 @@ for dir in "$GITHUB_DIR"/*/; do
       # it would exhaust its rounds every single day chasing manual lanes, and
       # sent agents to "fix" workflows that are working exactly as designed.
       #
-      # The silence defect this exists for (west-peek-os, deploy.yml deleted in a
-      # sync commit) was a PUSH-triggered lane. So: no push trigger, no finding.
-      # Quiet manual/scheduled lanes are still printed as QUIET so they stay
-      # visible, but QUIET does not block convergence.
-      wpath="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
-      trig="manual/scheduled"
-      if [ -n "$wpath" ] && [ -f "$dir/$wpath" ] \
-         && grep -qE '^[[:space:]]{0,4}push:' "$dir/$wpath" 2>/dev/null; then
-        trig="push"
-      fi
-      if [ "$commits" -gt 0 ] && [ "$trig" = "push" ]; then
-        printf 'SILENT\t%s\t%s\t%s|%s|NEVER_RAN\tpush-triggered workflow with no run on %s despite %s commit(s)\n' \
-          "$repo" "$flow" "$repo" "$flow" "$branch" "$commits"
-        lanes=$((lanes+1)); red=$((red+1))
-      else
-        printf 'QUIET\t%s\t%s\t%s|%s|QUIET\t%s-only workflow, no run on %s — not a finding\n' \
-          "$repo" "$flow" "$repo" "$flow" "$trig" "$branch"
-      fi
+      # The SILENT case is handled above, by the trigger model. Reaching here
+      # means the model said NO or UNKNOWN, so the lane is quiet on purpose or
+      # unproven — either way, printed and not blocking.
+      printf 'QUIET\t%s\t%s\t%s|%s|QUIET\tno run on %s — %s\n' \
+        "$repo" "$flow" "$repo" "$flow" "$branch" "$why"
       continue
     fi
 
@@ -217,7 +336,7 @@ for dir in "$GITHUB_DIR"/*/; do
         red=$((red+1))
         ;;
     esac
-  done <<< "$active"
+  done < "$VERDICTS"
 done
 
 # RULE 0. Probing nothing is not a clean bill of health.

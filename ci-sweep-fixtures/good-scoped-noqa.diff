@@ -1,0 +1,10 @@
+diff --git a/scripts/social_autopost.py b/scripts/social_autopost.py
+--- a/scripts/social_autopost.py
++++ b/scripts/social_autopost.py
+@@ -100,6 +100,10 @@ def main():
+     try:
+         session.logout()
++    except Exception as exc:  # noqa: BLE001 - a failed logout is not a run failure
++        log.warning("logout failed, continuing: %s", exc)
++    except TimeoutError as exc:  # noqa: BLE001 - an API outage must not take the lane down
++        log.warning("upstream timeout: %s", exc)

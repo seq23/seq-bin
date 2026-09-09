@@ -14,8 +14,10 @@ edit was recoverable only if someone had thought to copy the file first.
 | Script | Schedule | What it does |
 |---|---|---|
 | `ci-sweep.sh` | 10:07, 18:07 | Finds every red GitHub Actions lane, dispatches one fixing agent per repo, and iterates until main is green or it hits a bound. |
-| `ci-sweep-probe.sh` | (called) | Asks GitHub directly what main's state is. This, not any agent's report, decides whether the sweep is finished. |
-| `ci-sweep-audit.sh` | (called) | Reads the diff of everything that landed and fails the sweep on `continue-on-error`, `xfail`, `skip`, `--no-verify`, `\|\| true`, `set +e` in added lines. Reaching green by weakening a check is the defect this whole system exists to prevent. |
+| `ci-sweep-probe.sh` | (called) | Asks GitHub directly what main's state is. This, not any agent's report, decides whether the sweep is finished. A lane is only SILENT if `ci-sweep-triggers.py` says a commit in the window should have started it. |
+| `ci-sweep-audit.sh` | (called) | Reads the diff of everything that landed and fails the sweep on `continue-on-error`, `xfail`, `skip`, `--no-verify`, `\|\| true`, `set +e` in added lines. Reaching green by weakening a check is the defect this whole system exists to prevent. Dual-use constructs (`if: always()`, a scoped `# noqa`, a caught exception) are judged on OUTCOME and are SUSPECT (exit 3, names the PR) rather than fatal. |
+| `ci-sweep-triggers.py` | (called) | Answers "should this workflow have run", modelling `paths:`/`paths-ignore:`, branch filters, dispatch-only lanes, cron due-ness and job `if:` gates. Replaces a grep for `push:` that made healthy lanes permanently red. |
+| `ci-sweep-selftest.sh` | (manual/CI) | Proves the two detectors above still detect. Hard-fails on zero fixtures or zero workflows. Run it after touching either. |
 | `ci-sweep-notify.sh` | (called) | macOS banner plus a deduped GitHub issue when the sweep ends red. A green sweep notifies nobody. |
 | `ci-sweep-prompt.md` | — | The brief the sweep runs headlessly. Carries the incident history that shaped it. |
 | `shorts-arm.sh` | — | YouTube shorts arming. |
@@ -76,3 +78,32 @@ done
 These files carry more comment than code, and it is deliberate: each guard
 records the incident that produced it. Do not delete one without understanding
 what it caught.
+
+## The 2026-09-09 incident: a detector that matched strings
+
+The 10:07 sweep aborted at 10:57 with `MAIN-RED-TEMPFIX`, filed west-peek-os#21
+and threw away the morning's work, because the auditor found `if: always()` in
+authority-backlink-network#99 — on a **reporting** step. Run 34371631703 ran on
+b2e1790, the merge commit carrying that exact line, and still concluded
+**failure**. It masks nothing; it makes the honest report print *on* failure,
+which is the only reason that day's outage was visible at all.
+
+At the same time the probe was reporting local-guides-generator's
+`Build Starter Pack` as SILENT on every run. That workflow has a six-entry
+`paths:` filter and the day's only commit touched `CHANGELOG.md` and two files
+under `data/signals/`. **Not running was correct.**
+
+Both were the same mistake — matching a string instead of testing an outcome —
+and a false SILENT is the worse half, because it is *unclearable by
+construction*: no work any agent can do makes a correctly-filtered workflow run,
+so the loop cannot converge and spends the whole budget before ending in
+`MAIN-RED-EXHAUSTED` over a healthy repo.
+
+Two rules came out of it, and `ci-sweep-selftest.sh` enforces both:
+
+- **Ask whether the outcome changed, not whether a string appears.** An
+  `if: always()` on a step cannot turn a failing job green, and it is cleared
+  outright by evidence that the workflow still concludes `failure`.
+- **A false positive must not be able to abort a sweep doing real work.** Only an
+  unambiguous weakening is fatal; anything unproven names its own pull request
+  and the sweep carries on.

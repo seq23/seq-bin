@@ -22,7 +22,11 @@
 
 set -uo pipefail
 
-BIN="${CI_SWEEP_BIN_DIR:-$HOME/bin}"
+# THE SCRIPT'S OWN DIRECTORY, not $HOME/bin. On a CI runner the checkout lives at
+# /home/runner/work/<repo>/<repo>, so a $HOME/bin default made every path miss and
+# the whole validator exit 2 having examined nothing — the Rule 0 stop firing
+# correctly, on a fault of its own making.
+BIN="${CI_SWEEP_BIN_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 AUDIT="$BIN/ci-sweep-audit.sh"
 TRIGGERS="$BIN/ci-sweep-triggers.py"
 FIXTURES="$BIN/ci-sweep-fixtures"

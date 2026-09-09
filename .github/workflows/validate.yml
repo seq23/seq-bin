@@ -1,0 +1,57 @@
+# Validation for the scheduled machinery. VALIDATION ONLY.
+#
+# This repository had no CI of any kind until 2026-09-09: `gh workflow list`
+# returned nothing and no run had ever been recorded, while the repository held
+# the scripts that grade every other repository on this account. Nothing had ever
+# checked that ci-sweep-audit.sh — which fails the whole nightly sweep when it
+# finds a weakening — so much as parses.
+#
+# THIS LANE DEPLOYS NOTHING AND USES NO SECRETS, deliberately and permanently.
+# It lints shell, and it exercises the auditor and the probe through their own
+# fixture modes, which need no network and no credentials.
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is present
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          bash --version | head -1
+
+      - name: CI here must stay validation-only
+        run: ./tests/validation-only.sh
+
+      - name: Rule 0 — the lint must hard-fail when it examines nothing
+        run: ./tests/test-rule-zero.sh
+
+      - name: Lint every shell script (shellcheck + bash -n)
+        run: ./tests/lint-shell.sh
+
+      - name: ci-sweep-audit.sh must catch a weakening
+        run: ./tests/test-audit-guard.sh
+
+      - name: ci-sweep-probe.sh must map lane states to exit codes
+        run: ./tests/test-probe-convergence.sh

@@ -73,8 +73,10 @@ done
 echo "=== 3. the auditor: ambiguity must be SUSPECT, never fatal ============"
 # The severity split is the point. Something a person should look at names the
 # one pull request; it does not discard everyone else's work.
-for fx in suspect-unexplained-except; do
-  [ -f "$FIXTURES/$fx.diff" ] || { bad "$fx.diff missing"; continue; }
+fx=suspect-unexplained-except
+if [ ! -f "$FIXTURES/$fx.diff" ]; then
+  bad "$fx.diff missing"
+else
   examined_fixtures=$((examined_fixtures+1))
   if CI_SWEEP_AUDIT_FIXTURE="$FIXTURES/$fx.diff" CI_SWEEP_AUDIT_EXPECT=suspect \
        "$AUDIT" >/dev/null 2>&1; then
@@ -82,37 +84,53 @@ for fx in suspect-unexplained-except; do
   else
     bad "$fx — should be SUSPECT; it is either ignored or fatal"
   fi
-done
+fi
 
 # ===========================================================================
 echo "=== 4. the trigger model: the exact false positive that caused this ==="
-STARTER="$GITHUB_DIR/local-guides-generator/.github/workflows/build_starter_pack.yml"
+# THESE RUN AGAINST COMMITTED COPIES OF THE REAL WORKFLOWS, not against the
+# fleet checkout, so the regression is proven on a CI runner that has never seen
+# ~/GitHub. A test that can only run on one laptop is a test that stops running.
+STARTER="$FIXTURES/workflows/build_starter_pack.yml"
+DISPATCH="$FIXTURES/workflows/add_city_request.yml"
+
 if [ ! -f "$STARTER" ]; then
-  bad "build_starter_pack.yml not found — the regression case cannot be proven"
+  bad "fixtures/workflows/build_starter_pack.yml missing — the regression case cannot be proven"
 else
   tmp="$(mktemp)"
   # The real commit: 292ce39, `Record citation probe observations 2026-09-09`.
   printf 'CHANGELOG.md\ndata/signals/citation_probe_status.json\ndata/signals/llm_citation_observations.json\n' > "$tmp"
   v="$("$TRIGGERS" should-run --workflow "$STARTER" --branch main --changed-files "$tmp" | cut -f1)"
   examined_workflows=$((examined_workflows+1))
-  [ "$v" = "NO" ] && ok "Build Starter Pack + a CHANGELOG-only commit -> NO (was SILENT before)" \
-                  || bad "Build Starter Pack + a CHANGELOG-only commit -> $v, expected NO"
+  if [ "$v" = "NO" ]; then
+    ok "Build Starter Pack + a CHANGELOG-only commit -> NO (was a permanent SILENT before)"
+  else
+    bad "Build Starter Pack + a CHANGELOG-only commit -> $v, expected NO"
+  fi
 
-  # ...and the other direction, because a model that always says NO is useless.
+  # ...and the other direction, because a model that always says NO is useless
+  # and would pass a one-sided test while detecting nothing at all.
   printf 'scripts/build_starter_pack.js\n' > "$tmp"
   v="$("$TRIGGERS" should-run --workflow "$STARTER" --branch main --changed-files "$tmp" | cut -f1)"
   examined_workflows=$((examined_workflows+1))
-  [ "$v" = "YES" ] && ok "Build Starter Pack + a file inside its paths: filter -> YES" \
-                   || bad "Build Starter Pack + a matching file -> $v, expected YES"
+  if [ "$v" = "YES" ]; then
+    ok "Build Starter Pack + a file inside its paths: filter -> YES"
+  else
+    bad "Build Starter Pack + a matching file -> $v, expected YES"
+  fi
   rm -f "$tmp"
 fi
 
-DISPATCH="$GITHUB_DIR/local-guides-generator/.github/workflows/add_city_request.yml"
-if [ -f "$DISPATCH" ]; then
+if [ ! -f "$DISPATCH" ]; then
+  bad "fixtures/workflows/add_city_request.yml missing"
+else
   examined_workflows=$((examined_workflows+1))
   v="$("$TRIGGERS" should-run --workflow "$DISPATCH" --branch main | cut -f1)"
-  [ "$v" = "NO" ] && ok "Add City Request (workflow_dispatch with required inputs) -> NO" \
-                  || bad "Add City Request -> $v, expected NO"
+  if [ "$v" = "NO" ]; then
+    ok "Add City Request (workflow_dispatch with required inputs) -> NO"
+  else
+    bad "Add City Request -> $v, expected NO"
+  fi
 fi
 
 # ===========================================================================
@@ -120,24 +138,36 @@ echo "=== 5. the trigger model must PARSE the fleet, not shrug at it ========"
 # UNKNOWN is safe — it never produces a finding — but a model that answers
 # UNKNOWN everywhere has quietly stopped detecting silence at all, which is the
 # opposite failure and just as invisible. So the parse rate is asserted.
-tmp="$(mktemp)"; printf 'README.md\n' > "$tmp"
-unknown=0
-for wfile in "$GITHUB_DIR"/*/.github/workflows/*.y*ml; do
-  [ -f "$wfile" ] || continue
-  examined_workflows=$((examined_workflows+1))
-  case "$("$TRIGGERS" should-run --workflow "$wfile" --branch main --changed-files "$tmp" | cut -f1)" in
-    UNKNOWN) unknown=$((unknown+1)) ;;
-  esac
-done
-rm -f "$tmp"
-if [ "$examined_workflows" -gt 10 ]; then
-  # 20% is generous headroom over the 6/128 measured on 2026-09-09; it is a
-  # tripwire against the model silently degrading, not a target.
-  limit=$(( examined_workflows / 5 ))
-  if [ "$unknown" -le "$limit" ]; then
-    ok "$unknown/$examined_workflows workflows UNKNOWN (limit $limit)"
+#
+# This one needs the fleet checkout. On a runner it does not exist, and the
+# honest outcome is a NAMED STOP that a person reads, not a silent pass.
+if [ "${CI_SWEEP_SELFTEST_OFFLINE:-0}" = "1" ] || [ ! -d "$GITHUB_DIR" ]; then
+  echo "  - NAMED SKIP [NO_FLEET_CHECKOUT] $GITHUB_DIR is not present, so the fleet-wide"
+  echo "    parse rate cannot be measured here. Section 4 above still proves the model"
+  echo "    on committed copies of the real workflows."
+else
+  tmp="$(mktemp)"; printf 'README.md\n' > "$tmp"
+  unknown=0; fleet=0
+  for wfile in "$GITHUB_DIR"/*/.github/workflows/*.y*ml; do
+    [ -f "$wfile" ] || continue
+    fleet=$((fleet+1))
+    examined_workflows=$((examined_workflows+1))
+    case "$("$TRIGGERS" should-run --workflow "$wfile" --branch main --changed-files "$tmp" | cut -f1)" in
+      UNKNOWN) unknown=$((unknown+1)) ;;
+    esac
+  done
+  rm -f "$tmp"
+  if [ "$fleet" -le 10 ]; then
+    bad "only $fleet fleet workflow(s) found — too few to assert a parse rate against"
   else
-    bad "$unknown/$examined_workflows workflows UNKNOWN (limit $limit) — the model has stopped understanding the fleet"
+    # 20% is generous headroom over the 6/140 measured on 2026-09-09; it is a
+    # tripwire against the model silently degrading, not a target.
+    limit=$(( fleet / 5 ))
+    if [ "$unknown" -le "$limit" ]; then
+      ok "$unknown/$fleet fleet workflows UNKNOWN (limit $limit)"
+    else
+      bad "$unknown/$fleet fleet workflows UNKNOWN (limit $limit) — the model has stopped understanding the fleet"
+    fi
   fi
 fi
 
@@ -145,12 +175,16 @@ fi
 echo "=== 6. the probe must refuse to run without the trigger model ========="
 # Otherwise a missing file silently reverts SILENT to a grep for `push:`, and
 # nobody would ever know the detector had gone back to being broken.
-out="$(CI_SWEEP_TRIGGERS_BIN=/nonexistent/ci-sweep-triggers.py "$BIN/ci-sweep-probe.sh" 2>&1)"
-rc=$?
-if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q 'NO_TRIGGER_MODEL'; then
-  ok "probe named-stops with NO_TRIGGER_MODEL instead of degrading silently"
+if ! command -v gh >/dev/null 2>&1; then
+  echo "  - NAMED SKIP [NO_GH_CLI] the probe cannot be exercised without gh."
 else
-  bad "probe did not named-stop without its trigger model (rc=$rc)"
+  out="$(CI_SWEEP_TRIGGERS_BIN=/nonexistent/ci-sweep-triggers.py "$BIN/ci-sweep-probe.sh" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q 'NO_TRIGGER_MODEL'; then
+    ok "probe named-stops with NO_TRIGGER_MODEL instead of degrading silently"
+  else
+    bad "probe did not named-stop without its trigger model (rc=$rc)"
+  fi
 fi
 
 # ===========================================================================

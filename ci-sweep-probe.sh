@@ -89,13 +89,18 @@ if [ -n "$FIXTURE" ]; then
   exit 0
 fi
 
-command -v gh >/dev/null 2>&1 || { log "NAMED STOP [NO_GH_CLI]"; exit 3; }
-gh auth status >/dev/null 2>&1 || { log "NAMED STOP [GH_NOT_AUTHENTICATED]"; exit 3; }
 # RULE 0 APPLIED TO THE PROBE'S OWN DEPENDENCY. Without the trigger model this
 # script can only fall back to a string match, and the string match is the defect.
 # It stops with a name rather than silently reverting to the broken behaviour.
+#
+# CHECKED BEFORE THE gh CHECKS ON PURPOSE: a missing dependency is a missing
+# dependency whether or not anyone is logged in, and ordering it after `gh auth`
+# meant the one machine most likely to be missing it — a CI runner, which has gh
+# but no credentials — reported the wrong named stop and could never test this.
 [ -x "$TRIGGERS" ] || { log "NAMED STOP [NO_TRIGGER_MODEL] $TRIGGERS is missing or not executable;"; \
   log "  without it a SILENT verdict would be a grep for 'push:' again, which is what it replaced."; exit 3; }
+command -v gh >/dev/null 2>&1 || { log "NAMED STOP [NO_GH_CLI]"; exit 3; }
+gh auth status >/dev/null 2>&1 || { log "NAMED STOP [GH_NOT_AUTHENTICATED]"; exit 3; }
 
 SINCE="$(date -u -v-"${SILENCE_HOURS}"H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
        || date -u -d "${SILENCE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"

@@ -29,7 +29,7 @@
 # It covers EVERY repo under ~/GitHub, not just this one. A cross-repo schedule
 # has no better home, and the jobs compete for the same Mac.
 set -uo pipefail
-cd "$HOME"
+cd "$HOME" || { echo "NAMED STOP [NO_HOME] cannot enter \$HOME; refusing to write a manifest from an unknown directory."; exit 3; }
 OUT="$HOME/repo-tools/manifests/SCHEDULE.md"
 mkdir -p "$(dirname "$OUT")"
 PRINT_ONLY=0

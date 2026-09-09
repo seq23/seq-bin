@@ -91,7 +91,6 @@ lanes=0; red=0; pending=0; noci=0
 
 for dir in "$GITHUB_DIR"/*/; do
   [ -d "$dir/.git" ] || continue
-  name="$(basename "$dir")"
 
   # boss-os has no git remote by design and must never be swept. Anything whose
   # origin is not this owner's GitHub is out of scope for the same reason.

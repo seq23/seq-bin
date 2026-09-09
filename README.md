@@ -34,6 +34,43 @@ edit was recoverable only if someone had thought to copy the file first.
   process checks only bounds a process that is still working; a wedged one never
   reaches its own check. See the supervisor and watchdog in `ci-sweep.sh`.
 
+## Validation
+
+Until 2026-09-09 this repository had no CI of any kind — `gh workflow list`
+returned nothing and no run had ever been recorded — while holding the scripts
+that grade every other repository on this account. Nothing had ever checked that
+`ci-sweep-audit.sh` so much as parses. A syntax error in the auditor is not a
+loud failure; it is a sweep that passes everything.
+
+`.github/workflows/validate.yml` closes that. It runs on every push and pull
+request and it **deploys nothing and uses no secrets**, permanently:
+`tests/validation-only.sh` reads the workflow files and fails if a credential
+reference or a deploy step ever appears in one.
+
+| Check | What it proves |
+| --- | --- |
+| `tests/lint-shell.sh` | Every `*.sh` parses (`bash -n`) and passes `shellcheck` at the warning gate. Hard-fails if it finds no scripts. |
+| `tests/test-audit-guard.sh` | `ci-sweep-audit.sh` catches eight distinct weakenings in added lines, clears a genuine fix, and does not flag a diff that *removes* a weakening. |
+| `tests/test-probe-convergence.sh` | `ci-sweep-probe.sh` maps lane states to the exit codes the convergence loop reads, and refuses an empty input set. |
+| `tests/test-rule-zero.sh` | The validators above hard-fail on zero items, with positive and negative controls. |
+
+Two of these carry an executed **negative proof**: they neutralise a rule in a
+copy of the script under test and require the corresponding assertion to stop
+passing. An assertion that cannot be made to fail is not evidence.
+
+The probe's network path (`gh`, the GitHub API, lane classification) is **not**
+covered — it needs live credentials, and a test that stubbed it would be
+asserting the stub. Only the fixture path, which is the part the convergence
+loop's exit code depends on, is verified.
+
+Run the whole lane locally with:
+
+```sh
+for t in validation-only test-rule-zero lint-shell test-audit-guard test-probe-convergence; do
+  ./tests/$t.sh
+done
+```
+
 ## The comments are the point
 
 These files carry more comment than code, and it is deliberate: each guard

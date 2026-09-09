@@ -237,7 +237,7 @@ check_always() {
 check_diff() {
   local label="$1" diff="$2"
   D_FATAL=0; D_SUSPECT=0; D_ALWAYS=0
-  local added
+  local added added_code
   # BRACKET EXPRESSIONS, NOT BACKSLASHES. `grep -v '^\+\+\+'` is a BASIC regex, where `\+` is a
   # GNU extension that BSD grep rejects outright — "repetition-operator operand invalid". The
   # extraction then errored, `added` came back empty, and every diff read as clean. The detector
@@ -246,10 +246,28 @@ check_diff() {
   added="$(printf '%s\n' "$diff" | grep -E '^[+]' | grep -Ev '^[+][+][+]' || true)"
   [ -z "$added" ] && return 0
 
-  check_fatal_patterns "$label" "$added"
+  # PURE COMMENT LINES ARE NOT CODE, AND CANNOT WEAKEN ANYTHING.
+  #
+  # west-peek-os#24 was reported FATAL by the first version of this rewrite for
+  # having `if: always()` and `continue-on-error` in the same diff. Both were in
+  # ONE COMMENT, which reads, in full:
+  #
+  #   # THIS IS NOT A WEAKENED GATE, and the distinction matters. There is no
+  #   # `continue-on-error` here, no `if: always()`, and nothing skipped: ...
+  #
+  # An auditor that fails a pull request for explaining, in prose, that it did
+  # not weaken anything is the 2026-09-09 abort with extra steps. So the
+  # executable checks read CODE lines only.
+  #
+  # The suppression and exception checks keep the full text on purpose: what
+  # they are judging IS a comment -- whether a `# noqa` names its rule and says
+  # why -- and stripping comments there would blind them completely.
+  added_code="$(printf '%s\n' "$added" | grep -Ev '^[+][[:space:]]*([#]|//|/\*|\*)' || true)"
+
+  check_fatal_patterns "$label" "$added_code"
   check_exception_handling "$label" "$added"
   check_suppressions "$label" "$added"
-  check_always "$label" "$added"
+  check_always "$label" "$added_code"
   return 0
 }
 

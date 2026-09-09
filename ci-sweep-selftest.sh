@@ -46,7 +46,11 @@ echo "=== 1. the auditor: legitimate patterns must NOT be flagged ==========="
 # Each of these is a real construct from this fleet that the old grep called a
 # temp fix. If any of them fails here, the auditor is once again able to throw
 # away a sweep over a text match.
-for fx in good-if-always-reporting good-scoped-noqa; do
+# good-comment-mentions-weakening is the west-peek-os#24 shape: a diff whose only
+# mention of `continue-on-error` and `if: always()` is a COMMENT saying it did
+# NOT weaken the gate. An auditor that fails a PR for explaining in prose that it
+# did not cheat is the 2026-09-09 abort with extra steps.
+for fx in good-if-always-reporting good-scoped-noqa good-comment-mentions-weakening; do
   [ -f "$FIXTURES/$fx.diff" ] || { bad "$fx.diff missing"; continue; }
   examined_fixtures=$((examined_fixtures+1))
   if CI_SWEEP_AUDIT_FIXTURE="$FIXTURES/$fx.diff" CI_SWEEP_AUDIT_EXPECT=pass \

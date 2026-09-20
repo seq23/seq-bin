@@ -56,6 +56,9 @@ jobs:
       - name: ci-sweep-probe.sh must map lane states to exit codes
         run: ./tests/test-probe-convergence.sh
 
+      - name: ci-sweep-stream.py must leave a line-by-line round log with the sentinel intact
+        run: ./tests/test-stream-filter.sh
+
       # The detectors must not be able to go back to matching strings. This runs
       # the audit fixtures and the trigger model against every workflow in the
       # repo, and hard-fails when it examines zero of either. Sections needing

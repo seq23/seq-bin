@@ -101,6 +101,7 @@ STUCK_ROUNDS="${CI_SWEEP_STUCK_ROUNDS:-2}"
 PROMPT_FILE="${CI_SWEEP_PROMPT:-$HOME/bin/ci-sweep-prompt.md}"
 PROBE="${CI_SWEEP_PROBE_BIN:-$HOME/bin/ci-sweep-probe.sh}"
 AUDIT="${CI_SWEEP_AUDIT_BIN:-$HOME/bin/ci-sweep-audit.sh}"
+STREAM="${CI_SWEEP_STREAM_BIN:-$HOME/bin/ci-sweep-stream.py}"
 # Overridable for the same reason the prompt is: the lock, Rule 0, the round loop
 # and the verdict must all be exercisable without touching the live lock or the
 # real log directory. A test that has to share state with the production run is a
@@ -539,26 +540,46 @@ while :; do
 
 $(cat "$CARRY")"
 
+  # THE ROUND LOG FILLS AS THE ROUND RUNS, NOT AT ITS END. On 2026-09-20 both
+  # rounds hit their caps and both round logs were 0 bytes: `claude -p` in text
+  # mode prints only its final answer, and a process `timeout` kills has none.
+  # So a capped round left no record of the PR it had landed, the second root
+  # cause it had found, or the decision it was about to name - the only
+  # transcript was ~/.claude/projects/*/<session>.jsonl. stream-json events are
+  # flattened to text by ci-sweep-stream.py, line by line, flushed per line;
+  # the sentinel is assistant text, so the grep below reads it unchanged.
+  # `set -o pipefail` above makes $? the timeout's exit code, not the filter's.
+  run_round() {
+    timeout --signal=TERM --kill-after=60 "${CAP}m" \
+      "$CLAUDE" -p "$ROUND_PROMPT" "$@" \
+      --output-format stream-json --verbose \
+      --dangerously-skip-permissions < /dev/null 2>&1 | python3 "$STREAM" > "$ROUND_LOG"
+  }
   if [ "$round" -eq 1 ]; then
     SESSION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
     echo "$SESSION_ID" > "$WORK/session-id"
-    timeout --signal=TERM --kill-after=60 "${CAP}m" \
-      "$CLAUDE" -p "$ROUND_PROMPT" --session-id "$SESSION_ID" \
-      --dangerously-skip-permissions > "$ROUND_LOG" 2>&1
+    run_round --session-id "$SESSION_ID"
     RC=$?
   else
     SESSION_ID="$(cat "$WORK/session-id" 2>/dev/null || true)"
-    timeout --signal=TERM --kill-after=60 "${CAP}m" \
-      "$CLAUDE" -p "$ROUND_PROMPT" --resume "$SESSION_ID" \
-      --dangerously-skip-permissions > "$ROUND_LOG" 2>&1
+    ROUND_T0=$(date +%s)
+    run_round --resume "$SESSION_ID"
     RC=$?
-    # A resume that dies immediately is a broken handle, not a finished round.
+    # A resume that dies IMMEDIATELY is a broken handle, not a finished round.
     # Fall back to a fresh session rather than burn the round: the carryover
     # carries the context that the session would have.
-    if [ "$RC" -ne 0 ] && [ ! -s "$ROUND_LOG" ]; then
-      say "resume of session $SESSION_ID produced nothing (rc=$RC); retrying this round as a fresh session."
-      timeout --signal=TERM --kill-after=60 "${CAP}m" \
-        "$CLAUDE" -p "$ROUND_PROMPT" --dangerously-skip-permissions > "$ROUND_LOG" 2>&1
+    #
+    # "Immediately" is measured, not inferred from an empty log. On 2026-09-20
+    # the resume ran the full 25-minute cap (rc=124), left an empty log for the
+    # reason above, and was read as a dead handle - so a SECOND 25-minute cap
+    # was spent on a fresh session that could not see round 1's agent. A capped
+    # round (124/137) is never a broken handle, and a handle that was alive for
+    # more than RESUME_DEAD_SECS did not die on resume.
+    RESUME_DEAD_SECS="${CI_SWEEP_RESUME_DEAD_SECS:-90}"
+    ELAPSED=$(( $(date +%s) - ROUND_T0 ))
+    if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$RC" -ne 137 ] && [ "$ELAPSED" -le "$RESUME_DEAD_SECS" ] && ! grep -q '^\[tool\]\|^\[result' "$ROUND_LOG"; then
+      say "resume of session $SESSION_ID died after ${ELAPSED}s with no tool call (rc=$RC); retrying this round as a fresh session."
+      run_round
       RC=$?
     fi
   fi

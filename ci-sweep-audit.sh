@@ -65,6 +65,23 @@ HOURS="${CI_SWEEP_AUDIT_HOURS:-24}"
 # window instead — and the round under the most pressure to reach green cheaply is
 # the LAST one, which an audit of only the first would never read.
 SINCE_OVERRIDE="${CI_SWEEP_AUDIT_SINCE:-}"
+# The repos the round under audit was dispatched to, space-separated. Empty means
+# unscoped (every finding is judged on its own). When set, a FATAL finding in a
+# repo OUTSIDE the list is downgraded to SUSPECT with the reason on the line:
+# the sweep's agents were not in that repo, so the PR is someone else's work
+# that happened to be updated in the window. On 2026-09-21 the sweep was
+# dispatched to local-guides-citation-velocity only, a person's session pushed
+# boss-os#33 while the round sat frozen in a Mac sleep, and the audit ended the
+# whole sweep as MAIN-RED-TEMPFIX over a PR it had no part in. A weakening in
+# someone else's PR still deserves a person's eye — it is named — but it is not
+# this round cheating, and it must not end the attempt.
+SCOPE_REPOS="${CI_SWEEP_AUDIT_REPOS:-}"
+in_scope() {
+  [ -z "$SCOPE_REPOS" ] && return 0
+  local r
+  for r in $SCOPE_REPOS; do [ "$r" = "$1" ] && return 0; done
+  return 1
+}
 GITHUB_DIR="${CI_SWEEP_GITHUB_DIR:-$HOME/GitHub}"
 # Overridable so the detector can be exercised against a known-bad diff without
 # waiting for a real sweep to produce one.
@@ -364,7 +381,12 @@ for repo in "$GITHUB_DIR"/*/; do
       fi
     fi
 
-    if [ "$D_FATAL" -gt 0 ]; then
+    if [ "$D_FATAL" -gt 0 ] && ! in_scope "$name"; then
+      say "  ? SUSPECT $label — the FATAL finding above is OUT OF THIS ROUND'S SCOPE: the sweep was"
+      say "      dispatched to [$SCOPE_REPOS], not $name, so this is someone else's pull request"
+      say "      updated in the window. A person should read it; the sweep is not aborted for it."
+      suspect=1
+    elif [ "$D_FATAL" -gt 0 ]; then
       fatal=1
     elif [ "$D_SUSPECT" -gt 0 ]; then
       suspect=1

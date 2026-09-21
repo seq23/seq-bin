@@ -59,6 +59,14 @@ jobs:
       - name: ci-sweep-stream.py must leave a line-by-line round log with the sentinel intact
         run: ./tests/test-stream-filter.sh
 
+      # Her ruling of 2026-09-21: "keep trying and never leave a main on red".
+      # Drives ci-sweep.sh end to end through fake claude/gh/probe/audit: every
+      # non-green verdict schedules a retry, green does not, the sixth attempt
+      # escalates once, a heartbeat gap is INTERRUPTED and a stall is HUNG, and
+      # a TEMPFIX rejects the PR without merging or closing it.
+      - name: ci-sweep.sh must retry while red and tell a sleep from a hang
+        run: ./tests/test-sweep-retry.sh
+
       # The detectors must not be able to go back to matching strings. This runs
       # the audit fixtures and the trigger model against every workflow in the
       # repo, and hard-fails when it examines zero of either. Sections needing
@@ -68,4 +76,5 @@ jobs:
       - name: the ci-sweep detectors must still detect
         env:
           CI_SWEEP_SELFTEST_OFFLINE: "1"
+          CI_SWEEP_SELFTEST_SKIP_RETRY: "1"
         run: ./ci-sweep-selftest.sh

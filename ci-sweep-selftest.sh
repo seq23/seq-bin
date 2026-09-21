@@ -248,6 +248,28 @@ else
 fi
 
 # ===========================================================================
+echo "=== 7. the wrapper retries while red, and a sleep is not a hang ========"
+# 2026-09-21: a Mac sleep mid-round became MAIN-RED-TEMPFIX (over someone else's
+# PR) then MAIN-RED-HUNG (wall clock), and nothing ran again for six hours. The
+# suite drives ci-sweep.sh through fakes; it takes about 90 seconds because it
+# has to let a real sentry count real ticks. CI runs it as its own step and
+# skips it here BY NAME so the same 90 seconds are not spent twice.
+RETRY="$BIN/tests/test-sweep-retry.sh"
+if [ "${CI_SWEEP_SELFTEST_SKIP_RETRY:-0}" = "1" ]; then
+  echo "  - NAMED SKIP [RETRY_SUITE_RAN_AS_ITS_OWN_STEP] tests/test-sweep-retry.sh ran separately."
+elif [ ! -x "$RETRY" ]; then
+  bad "tests/test-sweep-retry.sh is missing — the retry mechanism is unguarded"
+else
+  if out="$("$RETRY" "$BIN" 2>&1)"; then
+    n="$(printf '%s\n' "$out" | grep -oE '[0-9]+ assertion\(s\) executed' | grep -oE '^[0-9]+')"
+    examined_fixtures=$((examined_fixtures + ${n:-0}))
+    ok "retry suite: ${n:-?} assertions — green stops, red retries, 6 escalates, sleep is INTERRUPTED"
+  else
+    bad "retry suite failed:"; printf '%s\n' "$out" | grep -E '^  x|FAILED' | sed 's/^/      /'
+  fi
+fi
+
+# ===========================================================================
 # RULE 0
 if [ "$examined_fixtures" -eq 0 ] || [ "$examined_workflows" -eq 0 ]; then
   echo

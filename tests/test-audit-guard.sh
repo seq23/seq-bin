@@ -150,6 +150,54 @@ else
   echo "  o PROVEN   removing the rule makes the catch fail, so the assertion has teeth"
 fi
 
+# --- scope: a FATAL in a repo the round was not dispatched to is SUSPECT ------
+# 2026-09-21: the sweep was in local-guides-citation-velocity; a person's session
+# updated boss-os#33 while the round sat frozen in a Mac sleep; the audit read the
+# whole fleet's window and ended the sweep as MAIN-RED-TEMPFIX over a PR the
+# sweep never touched. The finding is still named — but as SUSPECT, exit 3, for a
+# person — and only a weakening INSIDE the round's repos is fatal. Proven here
+# with two fake repos and a fake gh: alpha (in scope, clean) and zeta (out of
+# scope, weakening).
+echo "=== a FATAL outside the round's repos is SUSPECT, inside them FATAL ==="
+mkdir -p "$TMP/fleet/alpha/.git" "$TMP/fleet/zeta/.git" "$TMP/fakebin"
+cat > "$TMP/fakebin/gh" <<SH
+#!/bin/bash
+case "\$1 \$2" in
+  "pr list") printf '7\tsome change\n' ;;
+  "pr diff")
+    printf 'diff %sgit a/ci.yml b/ci.yml\n%s a/ci.yml\n%s b/ci.yml\n@@ %s1,2 %s1,3 @@\n name: build\n' "$DD" "$DASH$DASH$DASH" "$PL$PL$PL" "$DASH" "$PL"
+    if [ "\$(basename "\$PWD")" = zeta ]; then printf '%s        make test %s true\n' "$PL" "$BB"
+    else printf '%s        make test\n' "$PL"; fi ;;
+esac
+exit 0
+SH
+chmod +x "$TMP/fakebin/gh"
+run_scoped() { PATH="$TMP/fakebin:$PATH" CI_SWEEP_GITHUB_DIR="$TMP/fleet" CI_SWEEP_AUDIT_REPOS="$1" "$AUDIT"; }
+asserts=$((asserts + 1))
+run_scoped "alpha" >"$TMP/out" 2>&1; got=$?
+if [ "$got" -eq 3 ] && grep -q "OUT OF THIS ROUND'S SCOPE" "$TMP/out" && grep -q 'FATAL zeta#7' "$TMP/out"; then
+  echo "  o SUSPECT  zeta's weakening is named, and the round dispatched to alpha is not aborted (exit 3)"
+else
+  echo "  x exit $got  a weakening outside the round's repos should be SUSPECT, named, exit 3"
+  sed 's/^/        /' "$TMP/out"; failed=$((failed + 1))
+fi
+asserts=$((asserts + 1))
+run_scoped "alpha zeta" >"$TMP/out" 2>&1; got=$?
+if [ "$got" -eq 1 ]; then
+  echo "  o FATAL    the same weakening inside the round's repos is still fatal (exit 1)"
+else
+  echo "  x exit $got  a weakening inside the round's repos must stay FATAL"
+  sed 's/^/        /' "$TMP/out"; failed=$((failed + 1))
+fi
+asserts=$((asserts + 1))
+PATH="$TMP/fakebin:$PATH" CI_SWEEP_GITHUB_DIR="$TMP/fleet" "$AUDIT" >"$TMP/out" 2>&1; got=$?
+if [ "$got" -eq 1 ]; then
+  echo "  o FATAL    with no scope given, every finding is judged on its own (exit 1)"
+else
+  echo "  x exit $got  an unscoped audit must not have become lenient"
+  sed 's/^/        /' "$TMP/out"; failed=$((failed + 1))
+fi
+
 # --- Rule 0 ------------------------------------------------------------------
 if [ "$asserts" -eq 0 ]; then
   echo "RULE 0 [ASSERTED_NOTHING] this suite executed zero assertions."

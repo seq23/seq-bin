@@ -72,16 +72,22 @@ case "$VERDICT" in
     ACT="The sweep used all its rounds and main is still red. Read the lanes below and decide whether to keep fixing or accept the break for now." ;;
   MAIN-RED-TIMEOUT)
     HEAD="CI sweep ran out of time with main still red"
-    ACT="No action needed tonight — the next scheduled sweep will pick these up. If the same lanes appear tomorrow, they are not being fixed by iteration and need you." ;;
+    ACT="No action needed yet — the sweep retries in about 30 minutes with a fresh session, briefed on what this one tried. If the same lanes are still red after six attempts today you will get one more message; that one needs you." ;;
   MAIN-RED-TEMPFIX)
     HEAD="CI sweep caught itself weakening a test — DO NOT MERGE"
-    ACT="A fixing agent tried to reach green by disabling a check. The pull request named below must be closed or rewritten; do not merge it." ;;
+    ACT="A fixing agent tried to reach green by disabling a check. The pull request named below is marked REJECTED on the PR itself; the sweep will not merge it and retries in about 30 minutes, briefed to go for the root cause instead. Close or rewrite that PR when you see it; do not merge it." ;;
   MAIN-RED-HUNG)
     HEAD="CI sweep hung and was killed"
-    ACT="Nothing is required from you unless it repeats. The sweep exceeded its two-hour ceiling, was killed from outside, and released its lock, so the next run starts clean. If this happens twice running, the headless claude session is wedging and that needs looking at." ;;
+    ACT="Nothing is required from you unless it repeats. The sweep exceeded its two-hour awake ceiling, was killed from outside, parked any PR it left open, and retries in about 30 minutes. If this happens twice running, the headless claude session is wedging and that needs looking at." ;;
+  MAIN-RED-INTERRUPTED)
+    HEAD="CI sweep was interrupted by the Mac sleeping — retrying"
+    ACT="Nothing is required from you. The Mac slept mid-sweep, so the round in flight was ended (not finished) and anything it opened is parked, not landed. The sweep retries in about 30 minutes. If this keeps happening, check pmset: sleep should be 0 on AC and battery." ;;
+  SWEEP-ATTEMPTS-EXHAUSTED)
+    HEAD="CI sweep: main still red after ${CI_SWEEP_ATTEMPTS:-6} attempts today — needs you"
+    ACT="${CI_SWEEP_ATTEMPTS:-6} fresh sessions today did not get main green. Iteration is not converging: this is a decision, a credential, or a platform-side flag, not a code bug the sweep can find. The sweep keeps trying every 2 hours until 22:00, but it will not get there without you. The verdicts and the last attempt's carryover are below." ;;
   MAIN-UNKNOWN)
     HEAD="CI sweep could not run"
-    ACT="The sweep stopped before it could look at anything — usually the login keychain being locked, or gh/claude not being authenticated. Until it is cleared, NOTHING IS WATCHING CI. The named stop is in the log below." ;;
+    ACT="The sweep stopped before it could look at anything — usually the login keychain being locked, or gh/claude not being authenticated. Until it is cleared, NOTHING IS WATCHING CI. It retries in about 30 minutes in case you have cleared it. The named stop is in the log below." ;;
   *)
     HEAD="CI sweep: $VERDICT"
     ACT="See the log below." ;;

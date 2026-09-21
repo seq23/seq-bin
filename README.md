@@ -13,7 +13,7 @@ edit was recoverable only if someone had thought to copy the file first.
 
 | Script | Schedule | What it does |
 |---|---|---|
-| `ci-sweep.sh` | 10:07, 18:07 | Finds every red GitHub Actions lane, dispatches one fixing agent per repo, and iterates until main is green or it hits a bound. |
+| `ci-sweep.sh` | every 30 min (:07, :37), gated | Finds every red GitHub Actions lane, dispatches one fixing agent per repo, and iterates until main is green or it hits a bound. A tick sweeps only inside 10:00–22:00 when main was not proven green in the last 7h30 and no retry is cooling down — a green day is exactly 10:07 and 18:07; a red day retries ~30 min after every non-green run, tells her once at 6 attempts, then keeps going every 2 h. Ledger: `~/Library/Logs/ci-sweep/state/outcomes.tsv`. |
 | `ci-sweep-probe.sh` | (called) | Asks GitHub directly what main's state is. This, not any agent's report, decides whether the sweep is finished. A lane is only SILENT if `ci-sweep-triggers.py` says a commit in the window should have started it. |
 | `ci-sweep-audit.sh` | (called) | Reads the diff of everything that landed and fails the sweep on `continue-on-error`, `xfail`, `skip`, `--no-verify`, `\|\| true`, `set +e` in added lines. Reaching green by weakening a check is the defect this whole system exists to prevent. Dual-use constructs (`if: always()`, a scoped `# noqa`, a caught exception) are judged on OUTCOME and are SUSPECT (exit 3, names the PR) rather than fatal. |
 | `ci-sweep-triggers.py` | (called) | Answers "should this workflow have run", modelling `paths:`/`paths-ignore:`, branch filters, dispatch-only lanes, cron due-ness and job `if:` gates. Replaces a grep for `push:` that made healthy lanes permanently red. |
@@ -34,7 +34,12 @@ edit was recoverable only if someone had thought to copy the file first.
   not page her.
 - **Bounds are enforced from outside the process.** A deadline the working
   process checks only bounds a process that is still working; a wedged one never
-  reaches its own check. See the supervisor and watchdog in `ci-sweep.sh`.
+  reaches its own check. See the supervisor and sentry in `ci-sweep.sh`.
+- **A bound on one run is not a bound on the day.** A non-green run schedules
+  the next one; only a green run stops the retries (her ruling, 21 Sep 2026).
+  Sleep is not a hang: the sentry measures its own heartbeat gaps and classes a
+  run the Mac slept through as `MAIN-RED-INTERRUPTED`, with the round's open
+  PRs parked, never audited as landed work.
 
 ## Validation
 
@@ -55,6 +60,7 @@ reference or a deploy step ever appears in one.
 | `tests/test-audit-guard.sh` | `ci-sweep-audit.sh` catches eight distinct weakenings in added lines, clears a genuine fix, and does not flag a diff that *removes* a weakening. |
 | `tests/test-probe-convergence.sh` | `ci-sweep-probe.sh` maps lane states to the exit codes the convergence loop reads, and refuses an empty input set. |
 | `tests/test-rule-zero.sh` | The validators above hard-fail on zero items, with positive and negative controls. |
+| `tests/test-sweep-retry.sh` | `ci-sweep.sh` end to end against fake `claude`/`gh`/probe/audit: a green run schedules no retry, every non-green verdict does, the sixth attempt escalates once, a heartbeat gap is INTERRUPTED (not HUNG) and a stall with no gap is HUNG, a TEMPFIX rejects the PR without merging or closing it, and the audit's FATAL is scoped to the round's repos. Carries a negative proof. |
 
 Two of these carry an executed **negative proof**: they neutralise a rule in a
 copy of the script under test and require the corresponding assertion to stop

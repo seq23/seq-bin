@@ -130,8 +130,10 @@ something genuinely only she can do (a credential, an account switch, a real dec
 **Your report is a claim. `~/bin/ci-sweep-probe.sh` is the evidence.** After you finish,
 the wrapper asks GitHub directly what state `main` is in — every active workflow's newest
 run on the default branch, plus the silence checks — and if anything is not green it runs
-you AGAIN, up to 3 rounds inside a 4h30m budget, handing you what you landed last time and
-the fact that it did not work.
+you AGAIN, up to 2 rounds inside a 95-minute budget, handing you what you landed last time
+and the fact that it did not work. **And the day does not end with the run**: a run that
+ends non-green is retried about 30 minutes later as a fresh session with a fresh budget,
+briefed with what the last attempt tried, until main is green or the 22:00 window closes.
 
 This exists because of 2026-09-08. `Velocity Content Release` in
 `local-guides-citation-velocity` failed at 02:00 and 08:38. The 10:07 sweep dispatched
@@ -159,6 +161,19 @@ open and **merged** — and a weakening found in any round aborts the entire swe
 spot. No re-running, pinning, skipping, xfail, `continue-on-error`, `|| true`, `.only(`,
 `--deselect`, or a deleted assertion.
 
+### If this is a retry, the material at the end says so — read it first
+
+A run before this one today ended non-green. The section headed "A PREVIOUS ATTEMPT TODAY
+DID NOT REACH GREEN" tells you its verdict, what it tried, and two lists that bind you:
+
+- **REJECTED** — a PR the audit found weakening a test or a check. **Do not merge it.**
+  Do not re-land the same change under a new number. Either fix that PR so the weakening
+  is gone, or close it and fix the ROOT CAUSE in a new one. The previous attempt was ended
+  for reaching green cheaply; this attempt exists to do it properly.
+- **PARKED** — a PR opened by a round that was cut off (the Mac slept, or the run hung).
+  Nothing in it is verified. Read it before touching that repo; reuse what is sound,
+  close what is not, and never assume it landed.
+
 **A named stop beats a false green.** If a lane genuinely needs her — a credential, an
 account, a real decision — say which lane and what decision, emit `blocked`, and stop.
 That is a correct outcome. The wrapper will report main as red and say why, which is the
@@ -180,6 +195,7 @@ the answer is "everything is green".
 **This sentinel now means only "I reached my end."** It no longer decides how the sweep is
 reported. After you emit it the wrapper probes main itself and writes the last line of the
 log — `CI-SWEEP-COMPLETE: MAIN-GREEN`, `MAIN-RED-EXHAUSTED`, `MAIN-RED-STUCK`,
-`MAIN-RED-TIMEOUT`, `MAIN-RED-TEMPFIX` or `MAIN-UNKNOWN` — from what GitHub says, not from
-what you say. **Writing `fixed` over a lane that is still red does not make the sweep
+`MAIN-RED-TIMEOUT`, `MAIN-RED-TEMPFIX`, `MAIN-RED-BLOCKED`, `MAIN-RED-HUNG`,
+`MAIN-RED-INTERRUPTED` or `MAIN-UNKNOWN` — from what GitHub says, not from what you say.
+Every one of those except `MAIN-GREEN` schedules another attempt. **Writing `fixed` over a lane that is still red does not make the sweep
 green; it just makes your round look worse than the truth.** Report accurately.

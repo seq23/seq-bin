@@ -1,0 +1,14 @@
+name: Daily Creator Network
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: creator-network-daily
+  cancel-in-progress: false
+jobs:
+  operate:
+    steps:
+      - run: echo operate

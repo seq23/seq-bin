@@ -36,6 +36,13 @@ WHAT IS MODELLED
     window -- a nightly workflow at 14:00 is not silent, it is early
   · job-level `if:` gates: when every job is gated on an expression this cannot
     evaluate, the honest answer is UNKNOWN, and UNKNOWN must not be a finding
+  · WHEN THE WORKFLOW FIRST EXISTED on the branch (--exists-since). A trigger can
+    only fire against a file that is there to be triggered. On 2026-09-20
+    creator-network's `Daily Creator Network` (cron 0 12 * * *) reached main at
+    20:22Z; the probe's window opened at 09:53Z, saw the 12:00 tick inside it and
+    reported NEVER_RAN — a SILENT no work could clear, because the tick predated
+    the file. Both the cron question and the push question are now asked only
+    from the later of the window start and the file's first appearance.
 
 NO PYYAML ON THIS MACHINE, so the `on:` block is parsed here. The parser is
 deliberately small and deliberately conservative: anything it does not fully
@@ -44,7 +51,7 @@ detector that guesses is the thing being replaced.
 
 USAGE
     ci-sweep-triggers.py should-run --workflow FILE --branch main \
-        --changed-files LISTFILE [--since ISO] [--until ISO]
+        --changed-files LISTFILE [--since ISO] [--until ISO] [--exists-since ISO]
 
     Prints one line:  YES|NO|UNKNOWN <tab> reason
     Exit 0 on a verdict, 2 if the workflow file could not be read.
@@ -493,13 +500,38 @@ def all_jobs_gated(doc):
     return True
 
 
-def _verdict_inner(text, branch, changed_files, since, until):
+def _verdict_inner(text, branch, changed_files, since, until, exists_since=None):
     doc = parse_yaml(text)
     on = normalise_on(doc)
     keys = set(on.keys())
     automatic = keys - {"workflow_dispatch", "workflow_call", "repository_dispatch"}
     if not automatic:
         return NO, "workflow_dispatch/workflow_call only — never triggered by a push"
+
+    # A workflow that reached the branch AFTER the window opened can only have
+    # been triggered from that moment on. The window start moves forward to the
+    # file's first appearance; a file that arrived after the window closed has
+    # had no window at all. The caller supplies the moment (the probe reads it
+    # from the branch's oldest commit touching the path); without it nothing is
+    # clamped and the behaviour is exactly what it was.
+    #
+    # The commit that ADDS the workflow does fire it (the push event carries the
+    # file), so the clamp is `>=`, not `>`: a changed-file list built from
+    # commits at or after exists_since still counts that commit.
+    if exists_since is not None and exists_since > since:
+        if exists_since > until:
+            return NO, ("workflow first reached %s at %s, after the window closed at %s "
+                        "— nothing could have triggered it yet"
+                        % (branch, exists_since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           until.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        clamped_from = since
+        since = exists_since
+        v, why = _verdict_inner(text, branch, changed_files, since, until)
+        if v == NO:
+            why = ("%s (window clamped from %s to the workflow's first appearance on %s at %s)"
+                   % (why, clamped_from.strftime("%Y-%m-%dT%H:%M:%SZ"), branch,
+                      since.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        return v, why
 
     # --- push -------------------------------------------------------------
     if "push" in keys:
@@ -565,7 +597,7 @@ def _verdict_inner(text, branch, changed_files, since, until):
                 % (sorted(keys), branch))
 
 
-def verdict(text, branch, changed_files, since, until):
+def verdict(text, branch, changed_files, since, until, exists_since=None):
     """Trigger verdict, with the job-gate check applied LAST.
 
     `all_jobs_gated` used to run first and swallowed twelve of the fleet's
@@ -575,7 +607,7 @@ def verdict(text, branch, changed_files, since, until):
     can never turn a NO into a finding, so it belongs after the trigger answer,
     not before it.
     """
-    v, why = _verdict_inner(text, branch, changed_files, since, until)
+    v, why = _verdict_inner(text, branch, changed_files, since, until, exists_since)
     if v == YES:
         try:
             if all_jobs_gated(parse_yaml(text)):
@@ -595,6 +627,9 @@ def main():
     r.add_argument("--changed-files", default="")
     r.add_argument("--since", default="")
     r.add_argument("--until", default="")
+    r.add_argument("--exists-since", default="",
+                   help="ISO instant the workflow file first existed on --branch; "
+                        "triggers before it cannot have fired")
     args = ap.parse_args()
 
     try:
@@ -620,9 +655,10 @@ def main():
     now = dt.datetime.now(dt.timezone.utc)
     until = iso(args.until, now)
     since = iso(args.since, until - dt.timedelta(hours=14))
+    exists_since = iso(args.exists_since, None)
 
     try:
-        v, why = verdict(text, args.branch, changed, since, until)
+        v, why = verdict(text, args.branch, changed, since, until, exists_since)
     except ParseError as exc:
         # THE PARSER FAILING MUST NEVER PRODUCE A FINDING. An unclearable SILENT
         # born of a parse error is the same defect as the one this replaces.

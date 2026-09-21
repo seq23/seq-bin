@@ -1,0 +1,247 @@
+#!/bin/bash
+# land — merge a PR and put it in production, as ONE action.
+#
+# WHY THIS EXISTS. On 18 Sep 2026 four PRs were merged and nothing was deployed.
+# She opened the app to look at a redesign that had landed on `main` an hour
+# earlier and saw the old page. Her words: "i dont see a home page redesign" and
+# then "how can we fucking fix this so that you merge and deploy at the same
+# time". The failure was never permission — merging unprompted was already the
+# standing rule. The failure was that merge and deploy were two steps, and the
+# second one waited on somebody remembering it.
+#
+# A rule in CLAUDE.md telling the next agent to remember would be a wish. This is
+# the rule as code: you cannot run the merge half without the deploy half.
+#
+#   land            # the PR for the current branch
+#   land 96         # that PR number
+#
+# It refuses rather than guesses: not green, head moved, main red -> it stops and
+# says which, and it does NOT deploy. A red main after a merge is the case this
+# repo has actually hit (PR #16 in boss-os passed on its head and the merge
+# commit went red, already deployed by then), so main is watched to a terminal
+# state every single time, not sampled once.
+set -uo pipefail
+
+PR="${1:-}"
+REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "not in a git repo"; exit 1; }
+cd "$REPO_DIR" || exit 1
+# A worktree is named after its branch dir, not the repo. Ask git for the
+# repo's own name (the common dir) so `land` from a worktree routes correctly.
+NAME="$(basename "$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')")"
+
+# The 7403 trap. `npm run deploy:production` in west-peek-os does NOT default the
+# account id the way boss-os's script does, so in any shell that lacks it — a
+# background job, a fresh login, a launchd context — the very first step fails
+# with "The given account is not valid or is not authorized to access this
+# service [code: 7403]". That reads like a revoked token and is not one. It cost
+# a deploy on 18 Sep 2026: main was green, the merge was done, and production
+# silently stayed on the old build. Set it here so no caller has to know.
+export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-8d147e242033699dd37c6f5a451f48d2}"
+
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
+
+# How this repo reaches production. westpeek-live deploys itself through Workers
+# Builds on merge; the two Worker repos deploy only when a person runs the script.
+case "$NAME" in
+  west-peek-os|boss-os) DEPLOY="npm run deploy:production" ; SELF="" ;;
+  westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
+  # The loop repos run in GitHub Actions straight from main: the merge IS the
+  # deploy. Every scheduled lane checks out main at fire time.
+  how-we-know)          DEPLOY="" ; SELF="runs its lanes from main in GitHub Actions" ;;
+  # Cloudflare Pages deploys every push to main; Deploy Distribution (IndexNow/GSC) fires on green.
+  sprylabs-hpc-site)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
+  # Same shape as the hpc site (wrangler.toml pages_build_output_dir = dist); Deploy Distribution
+  # (IndexNow/GSC) fires on a completed green Validate Repo. Added 21 Sep 2026 with PR #140.
+  local-guides-citation-velocity) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main; Deploy Distribution fires on green Validate Repo" ;;
+  # Three Cloudflare Pages projects (ventures, productions, community) each build from main on push.
+  join-west-peek-main)  DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
+  # The state Worker (D1 durable state) redeploys on every land; the Actions lanes read main at fire time.
+  creator-network)      DEPLOY="npm run deploy:state" ; SELF="" ;;
+  # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, and this script has
+  # already checked out main and pulled it above, so the merge IS the deploy.
+  # Added 21 Sep 2026 with seq-bin #4.
+  bin|seq-bin)          DEPLOY="" ; SELF="is the launchd working copy, already fast-forwarded to main above" ;;
+  *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
+esac
+
+[ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
+[ -n "$PR" ] || die "no PR number given and none open for this branch"
+
+say "1/5  verifying PR #$PR myself"
+# Never take an agent's word that CI is green: two reported green on red on
+# 17 Sep, and one had read `mergeable` (merge conflicts) rather than the checks.
+gh pr checks "$PR" || die "PR #$PR is not green"
+# EVERY BUCKET, NOT THE EXIT CODE. 21 Sep 2026, boss-os #35: the Playwright job had been CANCELLED
+# at its 30-minute cap, `gh pr checks` printed it as "fail" and still exited 0, and this script
+# merged a PR whose merge state read UNSTABLE. A cancelled, skipped-by-failure or failing check is
+# not green whatever the exit code says; only `pass` (and a genuinely `skipping` job) is.
+NOTGREEN="$(gh pr checks "$PR" --json name,bucket -q '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' 2>/dev/null)"
+[ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
+HEAD="$(gh pr view "$PR" --json headRefOid -q .headRefOid)"
+RUNSHA="$(gh pr checks "$PR" --json link -q '.[0].link' | grep -oE '[0-9]+$' | head -1 \
+          | xargs -I{} gh run view {} --json headSha -q .headSha 2>/dev/null)"
+[ -n "$RUNSHA" ] && [ "$RUNSHA" != "$HEAD" ] && die "the green run is for $RUNSHA but the PR head is $HEAD — stale checks"
+# UNKNOWN is GitHub still computing — it answers that for a minute after anything merges to main
+# (19 Sep: #132 stopped as UNKNOWN/UNKNOWN seconds after #135 landed, and was clean). Wait it out.
+for _ in $(seq 1 12); do
+  STATE="$(gh pr view "$PR" --json mergeable,mergeStateStatus -q '.mergeable+"/"+.mergeStateStatus')"
+  [ "${STATE%%/*}" = "UNKNOWN" ] || break
+  sleep 10
+done
+[ "${STATE%%/*}" = "MERGEABLE" ] || die "PR #$PR is $STATE — resolve conflicts BY HAND, never with a union script"
+case "${STATE##*/}" in
+  CLEAN|HAS_HOOKS|UNSTABLE) : ;;   # UNSTABLE is a failing NON-required check; the bucket scan above already refused a real failure
+  *) die "PR #$PR merge state is ${STATE##*/} — not landing" ;;
+esac
+echo "     green, head $HEAD, $STATE"
+
+say "2/5  merging"
+gh pr merge "$PR" --squash || die "merge failed"
+
+say "3/5  syncing main"
+# From a worktree, main is checked out elsewhere and cannot be switched to here; fetching
+# is enough — every later step reads origin/main through the API, not the working tree.
+if git checkout -q main 2>/dev/null; then
+  git pull -q || die "could not sync main"
+  git log --oneline -1
+else
+  git fetch -q origin main || die "could not fetch main"
+  git log --oneline -1 origin/main
+fi
+
+say "4/5  watching main to a terminal state"
+# A green PR is not a green merge: `pull_request` builds the branch head, not the
+# result of merging. Give GitHub a moment to register the run before asking.
+sleep 12
+# COULD NOT CHECK IS NOT THE SAME AS RED, and conflating them is how a poll lies.
+# On 18 Sep 2026 GitHub rate-limited the API mid-watch, `gh run watch` exited non-zero
+# having never read a conclusion, and this script announced "main is RED after merging
+# #103. Not deploying." Main was green. The merge had landed and the deploy was skipped
+# on the strength of an error message about rate limits.
+#
+# That is the failure CLAUDE.md names: a loop that watches only for the success marker
+# hangs or lies through a crash, because silence looks identical to failure. So the
+# conclusion is now READ BACK EXPLICITLY and each of the three outcomes is distinct:
+# success deploys, failure refuses, and unreadable says so and refuses — a different
+# sentence, because the operator's next move is different.
+RID="$(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)"
+if [ -z "$RID" ]; then
+  die "could not read main's latest run (API error or rate limit). #$PR IS MERGED. Nothing was deployed. Re-run 'land $PR' when the API answers, or deploy by hand once main is green."
+fi
+# POLL FOR A TERMINAL CONCLUSION. `gh run watch` is not a reliable block: on 18 Sep it returned
+# while the run was still `in_progress`, leaving the conclusion empty, and this script reported
+# "could not read whether main is green" on a run that was simply not finished yet. Watching is a
+# convenience; the terminal state is the contract, so wait for it explicitly.
+#
+# A transient API error must not end the wait either — that is the same "silence looks like
+# failure" trap one layer down. Read errors are tolerated for a while and only become an answer
+# if they persist to the deadline.
+gh run watch "$RID" >/dev/null 2>&1 || true
+CONC=""; STAT=""
+DEADLINE=$(( $(date +%s) + 2700 ))   # 45 min: CI here runs ~14 min, twice over is ample
+while :; do
+  CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
+  STAT="$(gh run view "$RID" --json status -q '.status' 2>/dev/null)"
+  [ -n "$CONC" ] && break
+  [ "$(date +%s)" -ge "$DEADLINE" ] && break
+  sleep 20
+done
+echo "     ${STAT:-unknown} ${CONC:-unreadable}"
+case "$CONC" in
+  success) : ;;
+  "")
+    die "could not read whether main is green (API error or rate limit). #$PR IS MERGED. Nothing was deployed — this is NOT a failing build, it is an unanswered question. Re-run 'land $PR' when the API answers."
+    ;;
+  cancelled|skipped)
+    # SUPERSEDED ONLY IF SOMETHING SUPERSEDED IT. On 21 Sep 2026 (boss-os #33) the run on main was
+    # cancelled with NO later commit behind it — the concurrency group fired on something other
+    # than a merge — and this branch declared it superseded, exited 0, and the Deploy workflow
+    # skipped: an undeployed main wearing a reassuring sentence. So the claim is checked: if the
+    # cancelled run's SHA is still main's head, nothing superseded it, and the run is re-run and
+    # watched to its own terminal state instead. Only a run whose commit has been passed by a
+    # newer one is superseded.
+    RSHA="$(gh run view "$RID" --json headSha -q '.headSha' 2>/dev/null)"
+    git fetch -q origin main 2>/dev/null || true
+    MSHA="$(git rev-parse origin/main 2>/dev/null)"
+    if [ -n "$RSHA" ] && [ "$RSHA" = "$MSHA" ]; then
+      say "     cancelled with NO later commit on main — nothing superseded it. Re-running $RID."
+      gh run rerun "$RID" >/dev/null 2>&1 || die "could not re-run $RID. #$PR IS MERGED and NOT deployed; main has no green run for $MSHA. Re-run it by hand: gh run rerun $RID"
+      sleep 15
+      gh run watch "$RID" >/dev/null 2>&1 || true
+      CONC=""; DEADLINE=$(( $(date +%s) + 2700 ))
+      while :; do
+        CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
+        [ -n "$CONC" ] && [ "$CONC" != "cancelled" ] && break
+        [ "$(date +%s)" -ge "$DEADLINE" ] && break
+        sleep 20
+      done
+      echo "     re-run: ${CONC:-unreadable}"
+      case "$CONC" in
+        success) ;;
+        "") die "could not read the re-run's conclusion. #$PR IS MERGED and NOT deployed. Check: gh run view $RID" ;;
+        *) die "main is $CONC on the re-run after merging #$PR. Not deploying. Fix main first." ;;
+      esac
+    else
+    # SUPERSEDED IS NOT BROKEN. `ci.yml` sets concurrency with cancel-in-progress, so merging a
+    # second PR while the first one's run is still going cancels the first — by design, because
+    # validating a commit nobody will deploy is waste. On 18 Sep this script read that as
+    # "main is cancelled after merging #101. Not deploying. Fix main first." Nothing was wrong:
+    # #104 had merged thirty seconds later and its run was validating BOTH changes.
+    #
+    # Nothing is deployed from here, and that is correct — the newer run carries this commit and
+    # the Deploy workflow fires on it. Saying so is the whole point; the previous wording sent the
+    # operator hunting a failure that did not exist.
+    say "     superseded — a later merge cancelled this run and is validating your commit too"
+    say "#$PR IS MERGED. Not deploying from here: the newer run on main carries it, and the"
+    say "Deploy workflow ships on that run's success. Watch it with:  gh run list --branch main"
+    exit 0
+    fi
+    ;;
+  *)
+    die "main is $CONC after merging #$PR. Not deploying. Fix main first."
+    ;;
+esac
+
+if [ -z "$DEPLOY" ]; then
+  say "5/5  $NAME $SELF — nothing to run"
+  exit 0
+fi
+
+# DO NOT RACE THE WORKFLOW. Since `deploy.yml` landed, a green `main` deploys itself, and this
+# script deploying too means two `wrangler d1 migrations apply` runs against the same database at
+# once. On 18 Sep they collided four seconds apart: the workflow started at 16:54:25, this script's
+# deploy failed at 16:54:29 with a 7403 that reads like a revoked token and was nothing of the kind.
+# The workflow's `concurrency` group serialises workflow runs; it cannot see a laptop.
+#
+# So where the repo deploys itself, this script WAITS and reports rather than competing. It still
+# has a job: confirming the deploy actually happened. An automation nobody checks is how "merged"
+# and "shipped" came apart in the first place.
+if [ -f ".github/workflows/deploy.yml" ]; then
+  say "5/5  $NAME deploys itself on green main — waiting for that run rather than racing it"
+  sleep 20
+  DRID="$(gh run list --branch main --limit 10 --json databaseId,name,headSha \
+            -q "[.[]|select(.name==\"Deploy\")][0].databaseId" 2>/dev/null)"
+  if [ -z "$DRID" ]; then
+    say "     no Deploy run found yet. #$PR IS MERGED and main is green; the workflow fires on its own."
+    say "     Check with:  gh run list --branch main"
+    exit 0
+  fi
+  gh run watch "$DRID" >/dev/null 2>&1 || true
+  DCONC="$(gh run view "$DRID" --json conclusion -q '.conclusion' 2>/dev/null)"
+  case "$DCONC" in
+    success) say "LANDED — #$PR is merged, main is green, and the Deploy workflow shipped it."; exit 0 ;;
+    skipped) say "#$PR IS MERGED. That Deploy run was skipped (it fired on a superseded CI run)."
+             say "A later run carries your commit. Watch:  gh run list --branch main"; exit 0 ;;
+    "")      die "#$PR IS MERGED and main is green, but the Deploy run's outcome could not be read. Check it before assuming production changed." ;;
+    *)       die "#$PR IS MERGED and main is green, but the Deploy workflow finished $DCONC. Production was NOT updated. Read that run." ;;
+  esac
+fi
+
+say "5/5  deploying"
+# Never a bare `wrangler deploy`: it ships a stale client and the LOCAL DEV
+# bindings. On 17 Sep it tried to push WP_OS_ENV "local" and a dev passcode to
+# production and failed only because of an unrelated error.
+$DEPLOY || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
+
+say "LANDED — #$PR is merged, main is green, and it is in production."

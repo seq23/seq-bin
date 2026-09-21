@@ -68,6 +68,21 @@ esac
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
 
+# ALREADY MERGED IS NOT A FAILURE. 21 Sep 2026: Porter's newsletter job landed join-west-peek-main
+# #14 on its first LAND run, the run failed on an unrelated read, and the retry ran `land 14` against
+# a merged PR — which this script answered "UNKNOWN/UNKNOWN — not landing", so the card never went
+# DONE for a change that was live. A merged PR skips verify+merge and goes straight to watching the
+# merge commit's run on main and deploying, which is the only work still owed.
+PRSTATE="$(gh pr view "$PR" --json state,mergeCommit -q '.state+"/"+(.mergeCommit.oid // "")' 2>/dev/null)"
+if [ "${PRSTATE%%/*}" = "MERGED" ]; then
+  MERGESHA="${PRSTATE##*/}"
+  say "1/5  PR #$PR is already MERGED as ${MERGESHA:0:7} — verifying main and the deploy for it, nothing to merge"
+  ALREADY_MERGED=1
+else
+  ALREADY_MERGED=""
+fi
+
+if [ -z "$ALREADY_MERGED" ]; then
 say "1/5  verifying PR #$PR myself"
 # Never take an agent's word that CI is green: two reported green on red on
 # 17 Sep, and one had read `mergeable` (merge conflicts) rather than the checks.
@@ -98,6 +113,7 @@ echo "     green, head $HEAD, $STATE"
 
 say "2/5  merging"
 gh pr merge "$PR" --squash || die "merge failed"
+fi
 
 say "3/5  syncing main"
 # From a worktree, main is checked out elsewhere and cannot be switched to here; fetching
@@ -125,7 +141,13 @@ sleep 12
 # conclusion is now READ BACK EXPLICITLY and each of the three outcomes is distinct:
 # success deploys, failure refuses, and unreadable says so and refuses — a different
 # sentence, because the operator's next move is different.
+if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
+  # The run for THIS merge commit, not whatever landed on main most recently since.
+  RID="$(gh run list --branch main --limit 20 --json databaseId,headSha,event -q "[.[] | select(.headSha == \"$MERGESHA\" and .event == \"push\")][0].databaseId" 2>/dev/null)"
+  [ -n "$RID" ] || RID="$(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)"
+else
 RID="$(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)"
+fi
 if [ -z "$RID" ]; then
   die "could not read main's latest run (API error or rate limit). #$PR IS MERGED. Nothing was deployed. Re-run 'land $PR' when the API answers, or deploy by hand once main is green."
 fi

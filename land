@@ -22,6 +22,16 @@
 # state every single time, not sampled once.
 set -uo pipefail
 
+# RUN FROM A COPY. bash reads a script incrementally, so editing this file while a `land` is in
+# flight corrupts that run: on 21 Sep 2026 an edit landed mid-run and a live `land 152` died with
+# "syntax error near unexpected token `else'" at a line it had not reached when it started. The
+# first thing this script does is copy itself somewhere immutable and re-exec from there.
+if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
+  _copy="$(mktemp -t land.XXXXXX)" || exit 1
+  cat "$0" > "$_copy" && chmod +x "$_copy"
+  LAND_RUNNING_FROM_COPY=1 exec bash "$_copy" "$@"
+fi
+
 PR="${1:-}"
 REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "not in a git repo"; exit 1; }
 cd "$REPO_DIR" || exit 1

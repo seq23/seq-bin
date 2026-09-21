@@ -292,6 +292,46 @@ for dir in "$GITHUB_DIR"/*/; do
     # broader net that cannot tell true from false is not an improvement, so the
     # test stays where evidence supports it.
     if [ -z "$latest" ] && [ "$should" = "YES" ] && [ "$settled" -gt 0 ]; then
+      # BUT ONLY IF THE WORKFLOW EXISTED WHEN THE TRIGGER CAME ROUND. A lane that
+      # has never run is very often a lane that is NEW, and a new file cannot have
+      # been fired by a cron tick or a commit that predates it. 2026-09-20:
+      # creator-network's `Daily Creator Network` (cron 0 12 * * *) reached main
+      # at 20:22Z inside a window that opened at 09:53Z; the 12:00 tick was in the
+      # window, the file was not, and the probe reported NEVER_RAN — the
+      # unclearable SILENT this file exists to never produce, reintroduced on the
+      # one path where the lane has no history to contradict it.
+      #
+      # So the model is asked again from the branch's OLDEST commit touching the
+      # workflow path, with a changed-file list rebuilt from only the settled
+      # commits at or after that moment (the commit that adds a workflow does
+      # fire it). Asked here and not for every lane because this is the one
+      # verdict with no run to check against, and it costs one API page per lane
+      # that reaches it. If the first appearance cannot be read, nothing is
+      # clamped and the finding stands, exactly as before.
+      wpath="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+      first_seen=""
+      [ -n "$wpath" ] && [ -f "$dir/$wpath" ] && \
+      first_seen="$(gh api --paginate "repos/$OWNER/$repo/commits?path=$wpath&sha=$branch&per_page=100" 2>/dev/null \
+        | jq -rs 'map(.[]?)|map(.commit.committer.date)|sort|first // empty' 2>/dev/null || true)"
+      if [ -n "$first_seen" ]; then
+        CHANGED_SINCE="$WORKDIR/changed-since-first-seen.txt"
+        : > "$CHANGED_SINCE"
+        for sha in $(printf '%s' "$commits_json" \
+            | jq -r --arg f "$first_seen" '[.[]|select(.commit.committer.date >= $f)|.sha]|.[]' 2>/dev/null); do
+          case " $settled_shas " in *" $sha "*) ;; *) continue ;; esac
+          gh api "repos/$OWNER/$repo/commits/$sha" -q '.files[]?.filename' >>"$CHANGED_SINCE" 2>/dev/null || true
+        done
+        sort -u -o "$CHANGED_SINCE" "$CHANGED_SINCE" 2>/dev/null || true
+        vline="$("$TRIGGERS" should-run --workflow "$dir/$wpath" --branch "$branch" \
+                 --changed-files "$CHANGED_SINCE" --since "$SINCE" --until "$CUTOFF" \
+                 --exists-since "$first_seen" 2>/dev/null || true)"
+        if [ -n "$vline" ]; then
+          should="$(printf '%s' "$vline" | cut -f1)"
+          why="$(printf '%s' "$vline" | cut -f2-)"
+        fi
+      fi
+    fi
+    if [ -z "$latest" ] && [ "$should" = "YES" ] && [ "$settled" -gt 0 ]; then
       printf 'SILENT\t%s\t%s\t%s|%s|NEVER_RAN\tno run on %s at all, though a commit in the window should have started it: %s\n' \
         "$repo" "$flow" "$repo" "$flow" "$branch" "$why"
       lanes=$((lanes+1)); red=$((red+1)); continue

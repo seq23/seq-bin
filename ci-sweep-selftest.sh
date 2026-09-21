@@ -142,6 +142,58 @@ else
 fi
 
 # ===========================================================================
+echo "=== 4b. a trigger cannot fire before the workflow exists ============="
+# creator-network, 2026-09-20: `Daily Creator Network` (cron 0 12 * * *) reached
+# main at 20:22Z. The probe's window opened at 09:53Z, the 12:00 tick fell inside
+# it, and the lane had no run — NEVER_RAN, a SILENT no work could clear. The
+# fixture is that file's real trigger block; the three instants are the real ones.
+DAILY="$FIXTURES/workflows/daily_creator_network.yml"
+if [ ! -f "$DAILY" ]; then
+  bad "fixtures/workflows/daily_creator_network.yml missing — the first-appearance case cannot be proven"
+else
+  W_SINCE=2026-09-20T09:53:57Z; W_UNTIL=2026-09-20T23:40:00Z
+  # Unclamped, the model must still say YES — otherwise the clamp is not what is
+  # being tested and a schedule-only lane could go quiet undetected.
+  examined_workflows=$((examined_workflows+1))
+  v="$("$TRIGGERS" should-run --workflow "$DAILY" --branch main --since "$W_SINCE" --until "$W_UNTIL" | cut -f1)"
+  if [ "$v" = "YES" ]; then
+    ok "Daily Creator Network, no first-appearance given -> YES (the cron did tick in the window)"
+  else
+    bad "Daily Creator Network unclamped -> $v, expected YES"
+  fi
+  examined_workflows=$((examined_workflows+1))
+  v="$("$TRIGGERS" should-run --workflow "$DAILY" --branch main --since "$W_SINCE" --until "$W_UNTIL" \
+        --exists-since 2026-09-20T20:22:44Z | cut -f1)"
+  if [ "$v" = "NO" ]; then
+    ok "Daily Creator Network, file reached main AFTER the tick -> NO (was NEVER_RAN before)"
+  else
+    bad "Daily Creator Network clamped past the tick -> $v, expected NO"
+  fi
+  # ...and the clamp must not swallow a real silence: a file that was there
+  # before the tick and still never ran IS the west-peek-os shape.
+  examined_workflows=$((examined_workflows+1))
+  v="$("$TRIGGERS" should-run --workflow "$DAILY" --branch main --since "$W_SINCE" --until "$W_UNTIL" \
+        --exists-since 2026-09-19T20:22:44Z | cut -f1)"
+  if [ "$v" = "YES" ]; then
+    ok "Daily Creator Network, file present BEFORE the tick -> YES (a genuine silence still shows)"
+  else
+    bad "Daily Creator Network present before the tick -> $v, expected YES"
+  fi
+  # The push side of the same rule: the commit that adds a workflow does fire it,
+  # so a changed-file list from that commit must still count.
+  examined_workflows=$((examined_workflows+1))
+  tmp="$(mktemp)"; printf 'scripts/build_starter_pack.js\n' > "$tmp"
+  v="$("$TRIGGERS" should-run --workflow "$STARTER" --branch main --changed-files "$tmp" \
+        --since "$W_SINCE" --until "$W_UNTIL" --exists-since "$W_SINCE" | cut -f1)"
+  rm -f "$tmp"
+  if [ "$v" = "YES" ]; then
+    ok "Build Starter Pack, first appearance at the window start + a matching file -> YES"
+  else
+    bad "Build Starter Pack with exists-since at window start -> $v, expected YES"
+  fi
+fi
+
+# ===========================================================================
 echo "=== 5. the trigger model must PARSE the fleet, not shrug at it ========"
 # UNKNOWN is safe — it never produces a finding — but a model that answers
 # UNKNOWN everywhere has quietly stopped detecting silence at all, which is the

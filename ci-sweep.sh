@@ -217,11 +217,17 @@ record_outcome() {
 ledger_last_green()   { [ -f "$LEDGER" ] && awk -F'\t' '$3=="MAIN-GREEN"{g=$1} END{print g+0}' "$LEDGER" || echo 0; }
 ledger_last_end()     { [ -f "$LEDGER" ] && awk -F'\t' '{e=$1} END{print e+0}' "$LEDGER" || echo 0; }
 ledger_last_verdict() { [ -f "$LEDGER" ] && awk -F'\t' '{v=$3} END{print v}' "$LEDGER" || echo ""; }
-# Non-green runs dated today, counted from the last green (a green resets it).
+# Non-green runs in the last 24 hours, counted from the last green (a green resets it).
+# A ROLLING DAY, NOT A CALENDAR DAY. The first version matched the ledger's date column
+# against "today", which is whatever timezone the clock is in: on the CI runner (UTC) a run
+# that ended ten minutes before midnight was on a different "day" from the tick that read
+# it, the count went to zero, and four assertions failed at 23:54Z on 21 Sep 2026 that had
+# passed at 20:05Z. The escalation and the slow cadence mean "six attempts without a green
+# in a day", and that is a window of seconds, not a date string.
 ledger_attempts_today() {
-  local day="$1"
+  local now="$1"
   [ -f "$LEDGER" ] || { echo 0; return; }
-  awk -F'\t' -v d="$day" '$3=="MAIN-GREEN"{n=0; next} $2==d{n++} END{print n+0}' "$LEDGER"
+  awk -F'\t' -v now="$now" '$3=="MAIN-GREEN"{n=0; next} $1+0 > now-86400 {n++} END{print n+0}' "$LEDGER"
 }
 
 # --- the gate: is this tick a sweep? -------------------------------------------
@@ -236,7 +242,7 @@ gate_decision() {
   fi
   last_green="$(ledger_last_green)"
   last_end="$(ledger_last_end)"
-  attempts="$(ledger_attempts_today "$day")"
+  attempts="$(ledger_attempts_today "$now")"
   # THE LATEST RUN DECIDES. A non-green run after a green one supersedes it —
   # main is known red now, however recent the green was — so the green TTL only
   # applies when the last line of the ledger IS the green.
@@ -263,7 +269,7 @@ gate_decision() {
 schedule_next() {
   local day attempts gap next
   day="$(at_time "$(now_epoch)" +%Y-%m-%d)"
-  attempts="$(ledger_attempts_today "$day")"
+  attempts="$(ledger_attempts_today "$(now_epoch)")"
   if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then gap=$(( SLOW_GAP_MIN * 60 )); else gap=$(( RETRY_GAP_MIN * 60 )); fi
   next=$(( $(now_epoch) + gap ))
   if [ "$(at_time "$next" +%H | sed 's/^0//')" -ge "$WINDOW_END_H" ] || [ "$(at_time "$next" +%H | sed 's/^0//')" -lt "$WINDOW_START_H" ]; then

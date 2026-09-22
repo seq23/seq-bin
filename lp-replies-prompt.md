@@ -1,0 +1,1 @@
+/Users/sequoiataylor/GitHub/boss-os/scripts/ops/lp-replies-prompt.md

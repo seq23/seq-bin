@@ -151,12 +151,26 @@ sleep 12
 # conclusion is now READ BACK EXPLICITLY and each of the three outcomes is distinct:
 # success deploys, failure refuses, and unreadable says so and refuses — a different
 # sentence, because the operator's next move is different.
+# WHICH RUN IS "MAIN". Since west-peek-os split its Playwright journeys into their own workflow
+# (21 Sep 2026), a push to main starts TWO runs, and `[0]` of the list is whichever GitHub
+# registered last — a coin flip between the gate and a 20-minute journey suite that the Deploy
+# does not even wait for. The run watched here is the one the Deploy waits for: `deploy.yml`
+# names it in `workflow_run: workflows: [..]`. A repo with no deploy.yml, or none of that
+# workflow's runs on the list, gets the newest run, as before.
+# --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
+GATE_WF="$(sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' .github/workflows/deploy.yml 2>/dev/null | head -1 | tr -d '"'"'"' ')"
+pick_run() {
+  # $1: a jq boolean over one run. Newest matching run of the gate workflow; else the newest match.
+  gh run list --branch main --limit 20 --json databaseId,headSha,event,name \
+    -q "[.[] | select($1)] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
+}
+# --- pick_run end ---
 if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
   # The run for THIS merge commit, not whatever landed on main most recently since.
-  RID="$(gh run list --branch main --limit 20 --json databaseId,headSha,event -q "[.[] | select(.headSha == \"$MERGESHA\" and .event == \"push\")][0].databaseId" 2>/dev/null)"
-  [ -n "$RID" ] || RID="$(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)"
+  RID="$(pick_run ".headSha == \"$MERGESHA\" and .event == \"push\"")"
+  [ -n "$RID" ] || RID="$(pick_run "true")"
 else
-RID="$(gh run list --branch main --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)"
+RID="$(pick_run "true")"
 fi
 if [ -z "$RID" ]; then
   die "could not read main's latest run (API error or rate limit). #$PR IS MERGED. Nothing was deployed. Re-run 'land $PR' when the API answers, or deploy by hand once main is green."

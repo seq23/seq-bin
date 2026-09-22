@@ -50,6 +50,11 @@ jobs:
       - name: Lint every shell script (shellcheck + bash -n)
         run: ./tests/lint-shell.sh
 
+      # Two workflows on one push to main (west-peek-os, 21 Sep 2026): land must watch the
+      # gate run, never the journeys. Evals the pick_run block out of land against a fixture.
+      - name: land must watch the gate run on a two-workflow main
+        run: ./tests/test-land-pick-run.sh
+
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
 

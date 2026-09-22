@@ -76,6 +76,7 @@ cat > "$TMP/probe.sh" <<'SH'
 #!/bin/bash
 case "$(cat "$FAKE_DIR/probe-mode")" in
   green) printf 'GREEN\talpha\tbuild\talpha|build|success|-\tok\n'; exit 0 ;;
+  pending) printf 'PENDING\talpha\tplaywright\talpha|playwright|PENDING\trun #1 is in_progress\n'; exit 2 ;;
   *)     printf 'RED\talpha\tbuild\talpha|build|failure|test\tfailed\n'; exit 1 ;;
 esac
 SH
@@ -240,6 +241,23 @@ check "gh unauthenticated is MAIN-UNKNOWN" [ "$(last_verdict)" = "MAIN-UNKNOWN" 
 check "…and schedules a retry" grep -q 'RETRY: attempt #' "$LOGS/run-noauth.log"
 
 # =============================================================================
+# =============================================================================
+# 2026-09-21: west-peek-os's post-merge Playwright lane was 13 minutes into an
+# 18-minute run that then passed; the sweep rewrote PENDING as RED at its cap,
+# ended MAIN-RED-EXHAUSTED, filed west-peek-os#157 and told her main was red.
+echo "=== 9. a run still in flight is PENDING, not red: no issue, retried, never EXHAUSTED ==="
+rm -rf "$LOGS/state"; echo pending > "$TMP/probe-mode"
+CI_SWEEP_VERIFY_CAP_MIN=0 sweep run-pending; rc=$?
+check "a pending run exits 2, the probe's own code (rc=$rc)" [ "$rc" -eq 2 ]
+check "the verdict is MAIN-PENDING" [ "$(last_verdict)" = "MAIN-PENDING" ]
+check "the log says the lane is unproven, not red" grep -q 'UNPROVEN, not red' "$LOGS/run-pending.log"
+absent "no lane was rewritten as RED" grep -q $'^    RED\t' "$LOGS/run-pending.log"
+absent "nothing is filed or sent for a run in flight" grep -q 'notify:dry' "$LOGS/run-pending.log"
+absent "it is not called EXHAUSTED" grep -q 'MAIN-RED-EXHAUSTED' "$LOGS/run-pending.log"
+END="$(awk -F'\t' 'END{print $1}' "$LEDGER")"
+d="$(gate $(( END + 30 * 60 )))"
+check "30 min later the re-probe IS due (unproven is not green): $d" grep -q '^RUN' <<<"$d"
+
 echo "=== negative proof: with the ledger write neutralised, green must STOP meaning no retry ==="
 sed 's/^record_outcome() {$/record_outcome() { return 0; }\nrecord_outcome_disabled() {/' "$SWEEP" > "$TMP/crippled.sh"
 chmod +x "$TMP/crippled.sh"

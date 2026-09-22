@@ -54,6 +54,7 @@ DRY="${CI_SWEEP_NOTIFY_DRY:-}"
 # RULE 0. An escalation with no verdict is noise, and noise is how a channel dies.
 case "$VERDICT" in
   MAIN-GREEN) echo "[notify] MAIN-GREEN does not notify — a daily alert is an ignored alert."; exit 0 ;;
+  MAIN-PENDING) echo "[notify] MAIN-PENDING does not notify — a run in flight is not a failure; the next tick re-probes (west-peek-os#157, 21 Sep 2026, was filed on exactly this)."; exit 0 ;;
   "") echo "[notify] NAMED STOP [NO_VERDICT] refusing to escalate without one."; exit 2 ;;
 esac
 

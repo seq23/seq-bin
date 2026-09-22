@@ -1,0 +1,11 @@
+diff --git a/scripts/validate/a-green-run-means-something.mjs b/scripts/validate/a-green-run-means-something.mjs
+--- a/scripts/validate/a-green-run-means-something.mjs
++++ b/scripts/validate/a-green-run-means-something.mjs
+@@ -230,3 +230,9 @@ function selfTest() {
+   expectCaught("no e2e job at all", checkWorkflow("\n  build:\n    steps:\n      - run: npm run build\n"));
++  expectCaught(
++    "continue-on-error on the journeys",
++    checkWorkflow(PW_ON + "\n  e2e:\n    continue-on-error: true\n    steps:\n      - run: npm run e2e\n      - run: npm run e2e\n"),
++  );
++  expectCaught("a second suite run conditioned on always()", checkWorkflow(PW_ON + "\n  e2e:\n    steps:\n      - run: npm run e2e\n      - name: Again\n        if: always()\n        run: npm run e2e\n"));
++  const note = "allow_failure: true is GitLab's spelling of the same excuse";

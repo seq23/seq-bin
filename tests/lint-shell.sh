@@ -77,7 +77,7 @@ while IFS= read -r f; do
     echo "  x SHELLCHECK FAILED $f"
     failed=$((failed + 1))
   fi
-done < <(find "$ROOT" -name '*.sh' -not -path '*/.git/*' | LC_ALL=C sort)
+done < <(find "$ROOT" -name '*.sh' -not -path '*/.git/*' -not -path '*/.backups/*' | LC_ALL=C sort)
 
 echo "=== linted $lintable script(s); $unresolved unresolved pointer(s) ==="
 

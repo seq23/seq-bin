@@ -452,6 +452,7 @@ finish() {
     # that a red fleet can never be mistaken for a quiet one by anything reading
     # this script's status rather than its prose.
     MAIN-GREEN) exit 0 ;;
+    MAIN-PENDING) exit 2 ;;   # unproven, not red: the probe's own "still pending" code
     *) exit 20 ;;
   esac
 }
@@ -655,7 +656,9 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   # These are the cases where the sweep could not run at all, which is exactly when
   # she needs telling — CI is unwatched until she acts. It is still an attempt:
   # the retry comes back in ~30 min in case the keychain has been unlocked since.
-  if [ "$RC" -ne 0 ] && [ "$RC" -ne 20 ]; then
+  # Exit 2 is the body's OWN verdict, MAIN-PENDING, already concluded and recorded: a run
+  # still in flight at the cap, unproven and not red. It is not a precondition stop.
+  if [ "$RC" -ne 0 ] && [ "$RC" -ne 20 ] && [ "$RC" -ne 2 ]; then
     conclude "MAIN-UNKNOWN" "the sweep could not run at all (exit $RC) — see the NAMED STOP line in $RUN_LOG. Until this is cleared, nothing is watching CI; the sweep retries anyway."
   fi
 
@@ -721,9 +724,13 @@ probe_main() {
     [ "$rc" -eq 3 ] && return 3
     [ "$rc" -ne 2 ] && return "$rc"          # 0 green or 1 red — both terminal
     if [ "$(date +%s)" -ge "$until_ts" ]; then
-      say "  runs still in flight after ${cap_min} min; treating unsettled lanes as NOT green."
-      sed -i '' 's/^PENDING\t/RED\t/' "$out" 2>/dev/null || true
-      return 1
+      # IN FLIGHT IS NOT RED. This used to rewrite PENDING as RED and return 1: on 21 Sep 2026
+      # west-peek-os's post-merge Playwright lane (18 minutes, by design) was 13 minutes into a
+      # run that then passed, the sweep called main red, filed west-peek-os#157, and told her
+      # "main is still red". A run that has not finished has not failed; it is unproven, and the
+      # caller says so (MAIN-PENDING) rather than inventing a failure.
+      say "  runs still in flight after ${cap_min} min; those lanes are UNPROVEN, not red."
+      return 2
     fi
     say "  runs in flight; re-checking in 60s (until $(at_time "$until_ts" +%H:%M))"
     sleep 60
@@ -745,6 +752,10 @@ while :; do
   fi
 
   RED_LINES="$(grep -E '^(RED|SILENT)	' "$PROBE_OUT" || true)"
+  if [ -z "$RED_LINES" ] && [ "$PRC" -eq 2 ]; then
+    PENDING_LINES="$(grep -E '^PENDING	' "$PROBE_OUT" || true)"
+    finish "MAIN-PENDING" "nothing is red, but $(printf '%s\n' "$PENDING_LINES" | grep -c .) lane(s) had not reached a terminal state at the ${VERIFY_CAP_MIN}-minute cap: $(printf '%s\n' "$PENDING_LINES" | cut -f2,3 | tr '\t' '/' | tr '\n' ';'). Main is UNPROVEN, not red — a run in flight is not a failure. The next tick re-probes."
+  fi
   if [ -z "$RED_LINES" ]; then
     say "every lane on main is green."
     if [ "$round" -eq 0 ]; then

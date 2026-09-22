@@ -150,6 +150,33 @@ else
   echo "  o PROVEN   removing the rule makes the catch fail, so the assertion has teeth"
 fi
 
+# --- the YAML keys are judged on YAML lines only ------------------------------
+# 2026-09-21: west-peek-os#155 made validate:green-means-something STRICTER by adding
+# self-test cases that quote `continue-on-error: true` and `if: always()` — in a
+# `.mjs` file — and the audit reported it FATAL, "a failing step is being reported
+# as success", on the round's only clean PR. A string in a checker's fixture cannot
+# excuse a workflow step. The same two lines in a `.yml` stay fatal.
+echo "=== a validator fixture quoting continue-on-error / always() is not a weakening ==="
+mkmjs() {
+  local out="$TMP/$1"; shift
+  {
+    printf 'diff %sgit a/scripts/validate/x.mjs b/scripts/validate/x.mjs\n' "$DD"
+    printf '%s%s%s a/scripts/validate/x.mjs\n' "$DASH" "$DASH" "$DASH"
+    printf '%s%s%s b/scripts/validate/x.mjs\n' "$PL" "$PL" "$PL"
+    printf '@@ %s1,2 %s1,4 @@\n' "$DASH" "$PL"
+    printf ' function selfTest() {\n'
+    local line
+    for line in "$@"; do printf '%s\n' "$line"; done
+  } >"$out"
+  printf '%s' "$out"
+}
+assert_pass "a .mjs self-test quoting continue-on-error: true and if: always()" \
+  "$(mkmjs fixture.diff \
+      "$(printf '%s  expectCaught(\"coe\", checkWorkflow(\"  e2e:\\n    continue%son%serror: true\\n\"));' "$PL" "$DASH" "$DASH")" \
+      "$(printf '%s  expectCaught(\"always\", checkWorkflow(\"      - if: always()\\n        run: npm run e2e\\n\"));' "$PL")")"
+assert_catch "the same continue-on-error: true inside a .yml is still fatal" \
+  "$(mkfix coe-yml.diff "$(printf '%s    continue%son%serror: true' "$PL" "$DASH" "$DASH")")"
+
 # --- scope: a FATAL in a repo the round was not dispatched to is SUSPECT ------
 # 2026-09-21: the sweep was in local-guides-citation-velocity; a person's session
 # updated boss-os#33 while the round sat frozen in a Mac sleep; the audit read the

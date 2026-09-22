@@ -130,14 +130,11 @@ check_fatal_patterns() {
       printf '%s\n' "$hits" | head -3 | sed 's/^/      /'
     fi
   done <<'PATTERNS'
-continue-on-error[[:space:]]*:[[:space:]]*true~a failing step is being reported as success
 pytest[.]mark[.](skip|xfail)~a test is being switched off rather than fixed
 @unittest[.]skip~a test is being switched off rather than fixed
 [-][-]no-verify~a commit is bypassing its own hooks
 [|][|][[:space:]]*true[[:space:]]*$~a command's failure is being swallowed
 set[[:space:]][+]e~error checking is being turned off for the rest of the script
-continue-on-error:[[:space:]]*[$][{][{]~a failing step is being excused by an expression
-allow_failure:[[:space:]]*true~a failing job is being declared acceptable
 [.](skip|todo|failing)[(]~a test is being switched off rather than fixed
 [.]only[(]~a test file is being narrowed to one case, silencing the rest
 [-][-]deselect[[:space:]]~tests are being excluded from the run rather than fixed
@@ -251,10 +248,49 @@ check_always() {
   return 0
 }
 
+# --- the keys that only mean something in a workflow file ---------------------
+# `continue-on-error`, `allow_failure`, `if: always()` are YAML keys. Read as a
+# regex over EVERY added line they also match a validator's self-test fixture —
+# the string a checker feeds itself to prove it still catches `continue-on-error:
+# true` — and on 21 Sep 2026 that is exactly what happened: west-peek-os#155
+# added `validate:green-means-something` cases quoting both, in a `.mjs` file,
+# and the audit reported "a failing step is being reported as success" FATAL
+# against a PR that had made the check stricter. So these three are judged on
+# added lines from `.yml`/`.yaml` files only. A `.mjs`, `.py` or `.md` cannot
+# excuse a workflow step, whatever it says.
+check_workflow_patterns() {
+  local label="$1" added="$2" found=0
+  while IFS='~' read -r pattern why; do
+    [ -z "$pattern" ] && continue
+    local hits
+    hits="$(printf '%s\n' "$added" | grep -nE "$pattern" || true)"
+    if [ -n "$hits" ]; then
+      found=1
+      say "  ✗ FATAL $label — $why"
+      printf '%s\n' "$hits" | head -3 | sed 's/^/      /'
+    fi
+  done <<'PATTERNS'
+continue-on-error[[:space:]]*:[[:space:]]*true~a failing step is being reported as success
+continue-on-error:[[:space:]]*[$][{][{]~a failing step is being excused by an expression
+allow_failure:[[:space:]]*true~a failing job is being declared acceptable
+PATTERNS
+  [ "$found" -eq 1 ] && D_FATAL=$((D_FATAL + 1))
+  return 0
+}
+
+# The added lines of a diff that belong to YAML files: the `+++ b/<path>` header
+# names the file every following `+` line is in.
+added_yaml_lines() {
+  printf '%s\n' "$1" | awk '
+    /^[+][+][+] / { yaml = ($0 ~ /[.]ya?ml$/); next }
+    /^[+]/ && yaml { print }
+  '
+}
+
 check_diff() {
   local label="$1" diff="$2"
   D_FATAL=0; D_SUSPECT=0; D_ALWAYS=0
-  local added added_code
+  local added added_code added_yaml_code
   # BRACKET EXPRESSIONS, NOT BACKSLASHES. `grep -v '^\+\+\+'` is a BASIC regex, where `\+` is a
   # GNU extension that BSD grep rejects outright — "repetition-operator operand invalid". The
   # extraction then errored, `added` came back empty, and every diff read as clean. The detector
@@ -281,10 +317,13 @@ check_diff() {
   # why -- and stripping comments there would blind them completely.
   added_code="$(printf '%s\n' "$added" | grep -Ev '^[+][[:space:]]*([#]|//|/\*|\*)' || true)"
 
+  added_yaml_code="$(added_yaml_lines "$diff" | grep -Ev '^[+][[:space:]]*[#]' || true)"
+
   check_fatal_patterns "$label" "$added_code"
+  check_workflow_patterns "$label" "$added_yaml_code"
   check_exception_handling "$label" "$added"
   check_suppressions "$label" "$added"
-  check_always "$label" "$added_code"
+  check_always "$label" "$added_yaml_code"
   return 0
 }
 

@@ -55,6 +55,11 @@ jobs:
       - name: land must watch the gate run on a two-workflow main
         run: ./tests/test-land-pick-run.sh
 
+      # The web property change lane (23 Sep 2026) lands partner changes with `land <pr>`; a site
+      # repo with no route makes land stop after the work is built. Evals land's routes block.
+      - name: land must know how every West Peek site repo reaches production
+        run: ./tests/test-land-routes.sh
+
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
 

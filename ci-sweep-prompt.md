@@ -1,10 +1,16 @@
-Scheduled CI sweep. Find every red GitHub Actions run across Sequoia's repos and FIX them at the root. She should not be getting daily failure notifications.
+Scheduled CI sweep — runs ONCE A DAY at 06:00 CT, budget 3h30 (done by about 09:30). Goal:
+every repo's `main` green. Find every red GitHub Actions run across Sequoia's repos and FIX
+them at the root. She should not be getting daily failure notifications.
+
+**Model: opus, always.** This session runs with `--model opus`. **Spawn every fixing agent
+with `model: "opus"`** — never omit the model, never pick another. An agent left to inherit
+whatever was last chosen with /model is the defect this line exists to prevent.
 
 ## Finding the failures — do NOT use the unread-only default
 
 `gh api notifications` returns ONLY UNREAD items and silently undercounts. Always use both sources and take the UNION:
 
-    gh api "notifications?all=true&since=$(date -u -v-14H +%Y-%m-%dT%H:%M:%SZ)" --paginate \
+    gh api "notifications?all=true&since=$(date -u -v-26H +%Y-%m-%dT%H:%M:%SZ)" --paginate \
       -q '.[] | select(.reason=="ci_activity") | "\(.repository.full_name)\t\(.subject.title)"'
 
     gh run list --repo seq23/<name> --status failure --limit 5 --json name,createdAt,databaseId
@@ -16,9 +22,10 @@ authority-backlink-network, plus any other seq23 repo with recent activity.
 ## Then
 
 - If everything is green, print exactly one line saying so and stop. Do not invent work.
-- Otherwise dispatch ONE agent per affected repo. NEVER two agents in the same repo —
-  several failures in one repo go to one agent as a list. Run ListAgents FIRST; if an
-  agent is already in that repo, SendMessage it instead of spawning a sibling.
+- Otherwise dispatch ONE agent per affected repo, all in parallel, each with
+  `model: "opus"`. NEVER two agents in the same repo — several failures in one repo go
+  to one agent as a list. Run ListAgents FIRST; if an agent is already in that repo,
+  SendMessage it instead of spawning a sibling.
 
 ## Silent repos — a repo with NO runs is worse than a red one
 
@@ -32,7 +39,7 @@ live site sat degraded. **Nothing was red, because nothing ran.**
 So after the failure sweep, run a SILENCE sweep. For every repo with commits since
 the last sweep, check it produced at least one CI run:
 
-    WINDOW=$(date -u -v-10H +%Y-%m-%dT%H:%M:%SZ)   # same window as the failure sweep
+    WINDOW=$(date -u -v-26H +%Y-%m-%dT%H:%M:%SZ)   # a day since the last daily run, plus slack
 
     # commits in the window vs runs in the window
     gh api "repos/seq23/<name>/commits?since=$WINDOW" -q 'length'
@@ -111,9 +118,23 @@ in ADDED lines. It also names any PR that changes code and touches no test or va
 This is not a hurdle to route around — if a fix genuinely needs one of those, stop and say
 so in the report rather than landing it.
 
+## Merging: the wrapper lands your fix, not you
+
+- **Open a PR and drive its checks to green. Do NOT merge it.** After your round the
+  wrapper audits it, reads `gh pr checks` ITSELF (never your word), merges it — with
+  `land <pr>` where land knows the repo (that also deploys), otherwise `gh pr merge
+  --merge --delete-branch` — and watches `main` to a terminal state. The next probe tells
+  you whether it worked.
+- **Only PRs this run opened are merged.** To reuse yesterday's parked PR, open a new PR
+  from it. A PR the audit names SUSPECT, or in a repo you parked, is left open for her.
+- **how-we-know is merged like every other repo** (her approval, 23 Sep 2026). What is
+  still forbidden there: touching its LIVE LOOP STATE — no breaker resets, no
+  `workflow_dispatch` of the loop, no edits to or commits of `loop/state/`. A tripped
+  breaker or held state is hers to clear: park the repo and say what it is waiting on.
+
 ## Safety rails for unattended operation
 
-- Open a PR. Do NOT merge to main unless every check is green, and never with --admin.
+- Never merge with --admin, and never merge a PR yourself.
 - NEVER force-push. Never delete a branch that is not merged. Never rewrite main.
 - Never delete videos, files, or data; retire by flag, not deletion.
 - Do not change account settings, billing, or DNS. If a fix needs one, stop and say so.
@@ -128,12 +149,14 @@ something genuinely only she can do (a credential, an account switch, a real dec
 ## THE SWEEP DOES NOT END WHEN YOU DO — you are one round of a loop
 
 **Your report is a claim. `~/bin/ci-sweep-probe.sh` is the evidence.** After you finish,
-the wrapper asks GitHub directly what state `main` is in — every active workflow's newest
-run on the default branch, plus the silence checks — and if anything is not green it runs
-you AGAIN, up to 2 rounds inside a 95-minute budget, handing you what you landed last time
-and the fact that it did not work. **And the day does not end with the run**: a run that
-ends non-green is retried about 30 minutes later as a fresh session with a fresh budget,
-briefed with what the last attempt tried, until main is green or the 22:00 window closes.
+the wrapper audits, merges what is green, and asks GitHub directly what state `main` is
+in — every active workflow's newest run on the default branch, plus the silence checks.
+If anything is still red it runs you AGAIN in this same session, handing you what was
+merged and the fact that it did not work. **Rounds continue while they make progress** —
+a red lane went away, or a red lane's failure signature changed (a new root cause
+surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget
+ends it as TIMEOUT. **Nothing retries after the run**: tomorrow's 06:00 run is briefed with
+what this one tried.
 
 This exists because of 2026-09-08. `Velocity Content Release` in
 `local-guides-citation-velocity` failed at 02:00 and 08:38. The 10:07 sweep dispatched
@@ -148,7 +171,7 @@ So:
   a crash, and silence looks exactly like "still running".
 - **Say what you tried and what you ruled out**, not only what you changed. On a later
   round that text is the only thing standing between you and repeating yourself.
-- **If you are in round 2 or 3, you have already tried the obvious thing.** The extra
+- **If you are in round 2 or later, you have already tried the obvious thing.** The extra
   material at the end of this prompt tells you what. A different hypothesis is the whole
   point of the round; the same fix again is not.
 
@@ -158,34 +181,43 @@ So:
 by weakening something, and the pressure to do so is highest in the last round.**
 `ci-sweep-audit.sh` now reads the diff of every PR touched in EACH round's own window —
 open and **merged** — and a weakening found in any round aborts the entire sweep on the
-spot. No re-running, pinning, skipping, xfail, `continue-on-error`, `|| true`, `.only(`,
+spot and ends the run. No re-running, pinning, skipping, xfail, `continue-on-error`, `|| true`, `.only(`,
 `--deselect`, or a deleted assertion.
 
-### If this is a retry, the material at the end says so — read it first
+### If yesterday's run ended red, the material at the end says so — read it first
 
-A run before this one today ended non-green. The section headed "A PREVIOUS ATTEMPT TODAY
-DID NOT REACH GREEN" tells you its verdict, what it tried, and two lists that bind you:
+The section headed "THE PREVIOUS DAILY RUN DID NOT REACH GREEN" tells you its verdict,
+what it tried, which repos were parked, and two lists that bind you. An "OWNER DECISIONS"
+section, when present, is her answer to a parked repo: act on it.
 
 - **REJECTED** — a PR the audit found weakening a test or a check. **Do not merge it.**
   Do not re-land the same change under a new number. Either fix that PR so the weakening
-  is gone, or close it and fix the ROOT CAUSE in a new one. The previous attempt was ended
-  for reaching green cheaply; this attempt exists to do it properly.
+  is gone, or close it and fix the ROOT CAUSE in a new one. The previous run was ended
+  for reaching green cheaply; this run exists to do it properly.
 - **PARKED** — a PR opened by a round that was cut off (the Mac slept, or the run hung).
   Nothing in it is verified. Read it before touching that repo; reuse what is sound,
   close what is not, and never assume it landed.
 
-**A named stop beats a false green.** If a lane genuinely needs her — a credential, an
-account, a real decision — say which lane and what decision, emit `blocked`, and stop.
-That is a correct outcome. The wrapper will report main as red and say why, which is the
-honest thing for it to say.
+### Park a repo, not the run
+
+**A named stop beats a false green.** If a repo genuinely needs her — a credential, an
+account setting, a real product decision — PARK THAT REPO with one line of its own,
+exactly this form, and keep working every other red repo:
+
+    CI-SWEEP-PARKED: <repo> — <the one decision or credential she must supply>
+
+The wrapper stops working that repo for the rest of the run, leaves its PRs unmerged,
+files an issue on it naming what you wrote, and continues with the rest. One parked repo
+never ends the run. Only a repo you were given as red can be parked, and a park with no
+reason is ignored.
 
 ## Required final line
 
 Your LAST line must be exactly one of these, with nothing after it:
 
     CI-SWEEP-COMPLETE: green        (nothing was red)
-    CI-SWEEP-COMPLETE: fixed        (failures found; agents dispatched or fixes landed)
-    CI-SWEEP-COMPLETE: blocked      (failures found that need her — say which, above)
+    CI-SWEEP-COMPLETE: fixed        (failures found; fixes opened as PRs with green checks)
+    CI-SWEEP-COMPLETE: blocked      (every red repo you had is parked — CI-SWEEP-PARKED lines above)
 
 The wrapper checks THIS ROUND'S OWN log for this sentinel. Without it the round is
 recorded as SWEEP_ROUND_DID_NOT_COMPLETE, because a round that died halfway and a round
@@ -193,9 +225,11 @@ that finished with nothing to say produce the same silence otherwise. Emit it ev
 the answer is "everything is green".
 
 **This sentinel now means only "I reached my end."** It no longer decides how the sweep is
-reported. After you emit it the wrapper probes main itself and writes the last line of the
-log — `CI-SWEEP-COMPLETE: MAIN-GREEN`, `MAIN-RED-EXHAUSTED`, `MAIN-RED-STUCK`,
-`MAIN-RED-TIMEOUT`, `MAIN-RED-TEMPFIX`, `MAIN-RED-BLOCKED`, `MAIN-RED-HUNG`,
-`MAIN-RED-INTERRUPTED` or `MAIN-UNKNOWN` — from what GitHub says, not from what you say.
-Every one of those except `MAIN-GREEN` schedules another attempt. **Writing `fixed` over a lane that is still red does not make the sweep
-green; it just makes your round look worse than the truth.** Report accurately.
+reported. After the last round the wrapper writes the last line of the log — the verdict
+(`MAIN-GREEN`, `MAIN-PENDING`, `MAIN-RED-BLOCKED` (only parked repos still red),
+`MAIN-RED-STUCK`, `MAIN-RED-TIMEOUT`, `MAIN-RED-TEMPFIX`, `MAIN-RED-HUNG`,
+`MAIN-RED-INTERRUPTED` or `MAIN-UNKNOWN`) and the morning summary (green / fixed with PR
+numbers / parked with the decision needed / stuck) — from what GitHub says, not from what
+you say. It goes to her as a banner every morning. **Writing `fixed` over a lane that is
+still red does not make the sweep green; it just makes your round look worse than the
+truth.** Report accurately.

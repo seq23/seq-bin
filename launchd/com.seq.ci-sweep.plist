@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.ci-sweep</string>
+  <!-- ONCE A DAY at 06:00 local (CT). Her design, 23 Sep 2026: one progress-driven
+       run with a 3h30 budget (done ~09:30) that parks what only she can clear,
+       fixes and merges the rest, and sends one morning summary. A red run is NOT
+       retried; tomorrow's 06:00 run is briefed with what it tried. If the Mac is
+       asleep at 06:00, launchd fires the missed run once at wake.
+       Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep.plist); install with
+       the steps in README.md. ci-sweep-selftest.sh asserts this schedule. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>/Users/sequoiataylor/bin/ci-sweep.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>6</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/launchd.err</string>
+  <key>RunAtLoad</key><false/>
+</dict></plist>

@@ -53,6 +53,9 @@ die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
 
 # How this repo reaches production. westpeek-live deploys itself through Workers
 # Builds on merge; the two Worker repos deploy only when a person runs the script.
+# Every West Peek web property the "web property change" lane can target MUST have a row here —
+# tests/test-land-routes.sh evals this block verbatim and fails if one is missing.
+# --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
 case "$NAME" in
   west-peek-os|boss-os) DEPLOY="npm run deploy:production" ; SELF="" ;;
   westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
@@ -75,8 +78,18 @@ case "$NAME" in
   # already checked out main and pulled it above, so the merge IS the deploy.
   # Added 21 Sep 2026 with seq-bin #4.
   bin|seq-bin)          DEPLOY="" ; SELF="is the launchd working copy, already fast-forwarded to main above" ;;
+  # West Peek web properties on Cloudflare Pages Git integration: the project builds `main` on push
+  # (check-run "Cloudflare Pages" on the merge commit), so the merge IS the deploy. Read from each
+  # repo's wrangler.toml (pages_build_output_dir) / Pages project source, 23 Sep 2026, so the web
+  # property change lane can land them. Hosts: pitch.joinwestpeek.com + pitchlab.joinwestpeek.com,
+  # network.joinwestpeek.com, venturedeals.joinwestpeek.com, dilution.joinwestpeek.com.
+  west-peek-pitch-lab)  DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (pitch.joinwestpeek.com)" ;;
+  west-peek-network-os) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (network.joinwestpeek.com)" ;;
+  secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (venturedeals.joinwestpeek.com)" ;;
+  founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (dilution.joinwestpeek.com)" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
+# --- routes end ---
 
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"

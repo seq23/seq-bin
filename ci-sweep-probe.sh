@@ -173,8 +173,23 @@ for dir in "$GITHUB_DIR"/*/; do
     continue
   fi
 
-  runs="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
-        --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null || echo '[]')"
+  # A failed read is not "zero runs". On 2026-09-23 06:44 one failed call here
+  # became '[]' and declared local-guides-citation-velocity SILENT while it had
+  # 33 runs in the window; a whole sweep round went after it. Retry, and if
+  # GitHub still will not answer, the repo is unproven (PENDING), never silent.
+  runs=""
+  for attempt in 1 2 3; do
+    if runs="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
+          --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)" \
+       && printf '%s' "$runs" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      break
+    fi
+    runs=""; sleep $(( attempt * 5 ))
+  done
+  if [ -z "$runs" ]; then
+    printf 'PENDING\t%s\t(all)\t%s|RUNS_UNREADABLE\tgh could not list runs after 3 attempts; unproven, not silent\n' "$repo" "$repo"
+    lanes=$((lanes+1)); pending=$((pending+1)); continue
+  fi
 
   # --- what actually changed on the default branch inside the window ----------
   # The trigger model needs FILENAMES, not a commit count. "1 commit happened"

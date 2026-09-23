@@ -269,6 +269,21 @@ else
 fi
 
 # ===========================================================================
+echo "=== 7b. a failed GitHub read is unproven, never silence ================="
+# 2026-09-23: one failed `gh run list` became '[]' and the probe called a repo with 33
+# runs SILENT. A fake gh fails only that call; the probe must say PENDING, not SILENT.
+if ! gh auth status >/dev/null 2>&1; then
+  echo "  - NAMED SKIP [NO_GH_AUTH] needs a real gh for every other call."
+else
+  FAKE="$(mktemp -d)"; REAL_GH="$(command -v gh)"
+  printf '#!/bin/bash\n[ "$1" = run ] && [ "$2" = list ] && exit 1\nexec "%s" "$@"\n' "$REAL_GH" > "$FAKE/gh"; chmod +x "$FAKE/gh"
+  out="$(PATH="$FAKE:$PATH" CI_SWEEP_ONLY_REPOS=local-guides-citation-velocity "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  rm -rf "$FAKE"
+  if printf '%s\n' "$out" | grep -q $'^SILENT\t'; then bad "a failed run listing was reported as SILENT"
+  elif printf '%s\n' "$out" | grep -q 'RUNS_UNREADABLE'; then ok "a failed run listing is PENDING (RUNS_UNREADABLE), not SILENT"; examined_fixtures=$((examined_fixtures+1))
+  else bad "failed run listing produced neither SILENT nor RUNS_UNREADABLE — the probe examined nothing"; fi
+fi
+
 echo "=== 8. the docs cannot drift from the code ============================"
 # 22-23 Sep 2026: the README said 10:00-22:00 twice a day, the script header said a
 # 10:00-22:00 window with 6 attempts, the plist ran :07/:37 inside 05:00-08:00, and no

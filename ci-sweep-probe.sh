@@ -47,7 +47,10 @@ OWNER="${CI_SWEEP_OWNER:-seq23}"
 # The silence window. A repo with commits in this window and zero CI runs in it is
 # a finding — see the west-peek-os incident in ci-sweep-prompt.md: nothing was red
 # because nothing ran, for three weeks, on the fund's own operating system.
-SILENCE_HOURS="${CI_SWEEP_SILENCE_HOURS:-14}"
+# 26h: the sweep runs once a day (06:00), so the window must cover the whole day
+# since the last run plus slack for a run that fired late at wake. A 14h window
+# (sized for the old two-sweeps-a-day cadence) would leave ten hours unexamined.
+SILENCE_HOURS="${CI_SWEEP_SILENCE_HOURS:-26}"
 # Restrict the probe to these repos (space separated bare names). Used by the
 # convergence loop to re-probe only the lanes that were red, and by the tests.
 ONLY_REPOS="${CI_SWEEP_ONLY_REPOS:-}"

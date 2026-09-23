@@ -248,26 +248,96 @@ else
 fi
 
 # ===========================================================================
-echo "=== 7. the wrapper retries while red, and a sleep is not a hang ========"
-# 2026-09-21: a Mac sleep mid-round became MAIN-RED-TEMPFIX (over someone else's
-# PR) then MAIN-RED-HUNG (wall clock), and nothing ran again for six hours. The
-# suite drives ci-sweep.sh through fakes; it takes about 90 seconds because it
-# has to let a real sentry count real ticks. CI runs it as its own step and
-# skips it here BY NAME so the same 90 seconds are not spent twice.
-RETRY="$BIN/tests/test-sweep-retry.sh"
-if [ "${CI_SWEEP_SELFTEST_SKIP_RETRY:-0}" = "1" ]; then
-  echo "  - NAMED SKIP [RETRY_SUITE_RAN_AS_ITS_OWN_STEP] tests/test-sweep-retry.sh ran separately."
-elif [ ! -x "$RETRY" ]; then
-  bad "tests/test-sweep-retry.sh is missing — the retry mechanism is unguarded"
+echo "=== 7. the wrapper's daily decisions, end to end against fakes ========="
+# Parking per repo, progress-driven rounds, merging only what the sweep read green,
+# opus pinned, one banner a run, no retries. The suite takes about 80 seconds because
+# it lets a real sentry count real ticks; CI runs it as its own step and skips it
+# here BY NAME so the same time is not spent twice.
+DAILY_SUITE="$BIN/tests/test-sweep-daily.sh"
+if [ "${CI_SWEEP_SELFTEST_SKIP_DAILY:-0}" = "1" ]; then
+  echo "  - NAMED SKIP [DAILY_SUITE_RAN_AS_ITS_OWN_STEP] tests/test-sweep-daily.sh ran separately."
+elif [ ! -x "$DAILY_SUITE" ]; then
+  bad "tests/test-sweep-daily.sh is missing — the daily design is unguarded"
 else
-  if out="$("$RETRY" "$BIN" 2>&1)"; then
+  if out="$("$DAILY_SUITE" "$BIN" 2>&1)"; then
     n="$(printf '%s\n' "$out" | grep -oE '[0-9]+ assertion\(s\) executed' | grep -oE '^[0-9]+')"
     examined_fixtures=$((examined_fixtures + ${n:-0}))
-    ok "retry suite: ${n:-?} assertions — green stops, red retries, 6 escalates, sleep is INTERRUPTED"
+    ok "daily suite: ${n:-?} assertions — parks per repo, rounds while progress, merges only verified green"
   else
-    bad "retry suite failed:"; printf '%s\n' "$out" | grep -E '^  x|FAILED' | sed 's/^/      /'
+    bad "daily suite failed:"; printf '%s\n' "$out" | grep -E '^  x|FAILED' | sed 's/^/      /'
   fi
 fi
+
+# ===========================================================================
+echo "=== 8. the docs cannot drift from the code ============================"
+# 22-23 Sep 2026: the README said 10:00-22:00 twice a day, the script header said a
+# 10:00-22:00 window with 6 attempts, the plist ran :07/:37 inside 05:00-08:00, and no
+# `claude -p` named a model, so the sweep ran on whatever /model she last chose. Four
+# descriptions, none true. The schedule is read from the versioned plist and every
+# description must match it; the model pin is read from the invocation itself.
+PLIST="$BIN/launchd/com.seq.ci-sweep.plist"
+SWEEP="$BIN/ci-sweep.sh"; PROMPT="$BIN/ci-sweep-prompt.md"; README="$BIN/README.md"
+consistency=0
+if [ ! -f "$PLIST" ]; then
+  bad "launchd/com.seq.ci-sweep.plist is missing — the schedule is not versioned"
+else
+  consistency=$((consistency+1))
+  sched="$(python3 - "$PLIST" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+s = d.get("StartCalendarInterval")
+if isinstance(s, list):
+    print("MULTI %d" % len(s)) if len(s) != 1 else None
+    s = s[0] if len(s) == 1 else None
+if not isinstance(s, dict):
+    print("NONE"); sys.exit()
+extra = sorted(set(s) - {"Hour", "Minute"})
+args = " ".join(d.get("ProgramArguments", []))
+print("%02d:%02d%s%s%s" % (s.get("Hour", -1), s.get("Minute", -1),
+      " EXTRA=" + ",".join(extra) if extra else "",
+      " STARTINTERVAL" if "StartInterval" in d else "",
+      " ENVKNOBS" if "CI_SWEEP_" in args else ""))
+PY
+)"
+  if [ "$sched" = "06:00" ]; then
+    ok "the plist fires exactly once a day at 06:00, with no interval and no env knobs"
+  else
+    bad "the plist schedule is '$sched', expected exactly '06:00' once a day"
+  fi
+  for f in "$README" "$SWEEP" "$PROMPT"; do
+    consistency=$((consistency+1))
+    if grep -q '06:00' "$f"; then ok "$(basename "$f") states the 06:00 schedule"
+    else bad "$(basename "$f") does not state 06:00 — the docs have drifted from the plist"; fi
+  done
+  consistency=$((consistency+1))
+  row="$(grep -E '^\| `ci-sweep\.sh` \|' "$README")"
+  if printf '%s' "$row" | grep -q 'once a day at 06:00' && ! printf '%s' "$row" | grep -qE ':07|:37|10:00|22:00|every 30'; then
+    ok "the README row for ci-sweep.sh says once a day at 06:00 and nothing else"
+  else
+    bad "the README row for ci-sweep.sh does not say 'once a day at 06:00' (or still names the old cadence)"
+  fi
+fi
+# Every `claude -p` in the wrapper carries --model opus; zero invocations is a failure.
+inv="$(grep -nE '^[^#]*"\$CLAUDE" -p' "$SWEEP")"
+n_inv="$(printf '%s\n' "$inv" | grep -c .)"
+consistency=$((consistency+1))
+if [ "$n_inv" -eq 0 ]; then
+  bad "no \`\"\$CLAUDE\" -p\` invocation found in ci-sweep.sh — the model check examined nothing"
+elif printf '%s\n' "$inv" | grep -v -- '--model opus' | grep -q .; then
+  bad "a claude -p invocation lacks --model opus: $(printf '%s\n' "$inv" | grep -v -- '--model opus' | head -1)"
+else
+  ok "all $n_inv claude -p invocation(s) carry --model opus"
+fi
+consistency=$((consistency+1))
+if grep -q 'model: "opus"' "$PROMPT"; then ok "the prompt requires every fixing agent to be spawned with model \"opus\""
+else bad "the prompt does not require model \"opus\" for fixing agents"; fi
+# The removed tick/window/retry machinery must not survive as dead config or prose.
+consistency=$((consistency+1))
+stale="$(grep -nE 'CI_SWEEP_TICK([^_]|$)|WINDOW_START_H|WINDOW_END_H|GREEN_TTL|RETRY_GAP|MAX_ATTEMPTS|SLOW_GAP|GATE_ONLY|SWEEP-ATTEMPTS-EXHAUSTED|MAX_ROUNDS' \
+          "$SWEEP" "$PROMPT" "$README" "$BIN/ci-sweep-notify.sh" "$PLIST" 2>/dev/null)"
+if [ -z "$stale" ]; then ok "no removed tick/window/retry knob survives in the sweep, prompt, README, notifier or plist"
+else bad "removed machinery still referenced: $(printf '%s' "$stale" | head -3 | tr '\n' ' ')"; fi
+examined_workflows=$((examined_workflows + consistency))
 
 # ===========================================================================
 # RULE 0

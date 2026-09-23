@@ -1,128 +1,180 @@
 #!/bin/bash
-# Tell HER. Called by ci-sweep.sh for every outcome that needs a person.
+# Tell HER. Called by ci-sweep.sh once at the end of EVERY run, green or not.
 #
-# WHY THIS EXISTS
-# Until 2026-09-08 the only record of a sweep was ~/Library/Logs/ci-sweep/latest.log,
-# which is not a place she goes. So a red night and a green night looked exactly
-# the same unless she went looking — the same defect as a sweep reporting success
-# over a red lane, moved one layer out. Her words: "if there is a block it should
-# exit and let me know some kind of way that i need to do something."
+#   ci-sweep-notify.sh <VERDICT> <SUMMARY> <RUN_LOG> [ISSUES_TSV] [DETAIL]
 #
-# WHY THESE TWO CHANNELS
-# · macOS notification — immediate, lands while she is at the machine. Transient,
-#   so it cannot be the only one.
-# · GitHub issue — durable, and GitHub emails her, so it survives a closed laptop
-#   and is still there tomorrow. `gh` is already a hard precondition of the sweep,
-#   so this adds no new credential and no new failure mode.
+# THE MORNING SUMMARY (design of 23 Sep 2026: one run a day at 06:00, one answer)
+# · A macOS banner, ALWAYS: which repos are green, fixed, parked, stuck. The daily
+#   run replaced a 30-minute retry loop, so there is exactly one banner a day and a
+#   green one is information, not noise.
+# · A GitHub issue per PARKED or STUCK repo (ISSUES_TSV lines: KIND \t repo \t
+#   what is needed), filed on that repo, naming the one decision or credential. Deduped
+#   by exact title: a repeat the same day comments on the open issue instead.
+# · One run-level issue for a run that could not reach a verdict about the fleet
+#   (TEMPFIX, HUNG, INTERRUPTED, UNKNOWN), or for any red verdict that somehow named
+#   no repo — a red ending is never silent.
+# · A green run files nothing.
 #
-# WHY NOT BOSS OS, which would have been the best place
-# Today is the screen she opens every morning, and its Critical Alerts are exactly
-# the right shape. But the alert list in routes/today.ts is assembled entirely from
-# computed sources, and `owned_deliverables` — the mechanism that escalates and
-# gets louder with age — HAS NO CREATE ROUTE. Rows are inserted by migration only;
-# POST /api/boss/deliverables/:id can change the state of a row that already
-# exists, and nothing else. Putting a CI escalation on Today therefore requires a
-# new migration plus a TERMINAL_CHECKS entry IN THE BOSS-OS REPO, and another agent
-# is working in that repo right now. POST /api/boss/tasks would take an arbitrary
-# item, but it creates a task, not a Critical Alert, and it needs BOSS_PASSCODE
-# injected by `npm run vault:run` from inside that same repo — coupling this
-# scheduled job to a codebase under active edit for a weaker signal than an email.
-#
-# THIS IS THE HONEST STOP, NOT A SHRUG: when boss-os is free, the durable channel
-# should move to a seeded owned_deliverable, because it escalates with age and this
-# does not. Recorded here so the next person does not have to re-derive it.
-#
-# A GREEN SWEEP CALLS THIS SCRIPT NOT AT ALL. A notification that fires every day
-# is one she learns to ignore, and then the red ones stop landing too.
+# WHY GITHUB ISSUES: durable, and GitHub emails her, so it survives a closed laptop.
+# `gh` is already a hard precondition of the sweep: no new credential.
 
 set -uo pipefail
 
 # `${1-}` not `${1:-...}`: an EMPTY first argument must reach the refusal below.
-# With a default substituted for empty as well as unset, the "refuse to escalate
-# nothing" guard was unreachable — it would have quietly escalated a blank verdict
-# as MAIN-UNKNOWN, which is a validator passing on an empty input set wearing a
-# different hat. Caught by its own negative proof.
 VERDICT="${1-}"
-DETAIL="${2:-}"
+SUMMARY="${2:-}"
 RUN_LOG="${3:-}"
-ISSUE_REPO_FALLBACK="${CI_SWEEP_ISSUE_REPO:-seq23/west-peek-os}"
-# Test seam: print what WOULD be sent instead of sending it, so the message can be
-# proven correct without filing issues at her or firing banners.
+ISSUES="${4:-}"
+DETAIL="${5:-}"
+GH_OWNER="${CI_SWEEP_GH_OWNER:-seq23}"
+ISSUE_REPO_FALLBACK="${CI_SWEEP_ISSUE_REPO:-$GH_OWNER/west-peek-os}"
+# Test seam: print what WOULD be sent instead of sending it.
 DRY="${CI_SWEEP_NOTIFY_DRY:-}"
 
-# --- refuse to escalate nothing ----------------------------------------------
-# RULE 0. An escalation with no verdict is noise, and noise is how a channel dies.
+# RULE 0: a notification with no verdict is noise, and noise is how a channel dies.
+[ -n "$VERDICT" ] || { echo "[notify] NAMED STOP [NO_VERDICT] refusing to notify without one."; exit 2; }
+
+# --- the headline and what she should DO -------------------------------------
+RUN_LEVEL=""   # set for verdicts that are about the run itself, not a repo
 case "$VERDICT" in
-  MAIN-GREEN) echo "[notify] MAIN-GREEN does not notify — a daily alert is an ignored alert."; exit 0 ;;
-  MAIN-PENDING) echo "[notify] MAIN-PENDING does not notify — a run in flight is not a failure; the next tick re-probes (west-peek-os#157, 21 Sep 2026, was filed on exactly this)."; exit 0 ;;
-  "") echo "[notify] NAMED STOP [NO_VERDICT] refusing to escalate without one."; exit 2 ;;
+  MAIN-GREEN)
+    HEAD="every main is green"
+    ACT="Nothing needed from you." ;;
+  MAIN-PENDING)
+    HEAD="nothing red; some runs still in flight"
+    ACT="Nothing needed from you. A run still in progress is unproven, not failed." ;;
+  MAIN-RED-BLOCKED)
+    HEAD="the repos still red need you"
+    ACT="Every repo still red is parked on something only you can clear. Each has an issue on its repo naming the one decision or credential needed." ;;
+  MAIN-RED-STUCK)
+    HEAD="repos stuck red — fixes stopped changing the failure"
+    ACT="Two rounds in a row changed nothing, so the stuck repos need a look or a decision. Each has an issue on its repo; parked ones name the decision needed." ;;
+  MAIN-RED-TIMEOUT)
+    HEAD="ran out of its 3h30 budget with repos red"
+    ACT="Rounds were still making progress when the budget ended. Tomorrow's 06:00 run picks up from here; the red repos have issues." ;;
+  MAIN-RED-TEMPFIX)
+    HEAD="caught a fix weakening a test — DO NOT MERGE it"
+    ACT="A fixing agent tried to reach green by disabling a check. The PR is marked REJECTED on the PR itself and the run ended. Close or rewrite that PR; tomorrow's run is told to fix the root cause."
+    RUN_LEVEL=1 ;;
+  MAIN-RED-HUNG)
+    HEAD="hung and was killed"
+    ACT="The sweep exceeded its awake ceiling and was killed from outside; its open PRs are parked, not merged. If this repeats, the headless claude session is wedging."
+    RUN_LEVEL=1 ;;
+  MAIN-RED-INTERRUPTED)
+    HEAD="interrupted by the Mac sleeping"
+    ACT="The round in flight was ended, not finished; its open PRs are parked, never merged. Main is unverified until tomorrow's 06:00 run. Check pmset if it recurs: sleep should be 0."
+    RUN_LEVEL=1 ;;
+  MAIN-UNKNOWN)
+    HEAD="could not run"
+    ACT="The sweep stopped before it could look at anything — usually the login keychain locked, or gh/claude not authenticated. Until cleared, NOTHING IS WATCHING CI. The named stop is in the log."
+    RUN_LEVEL=1 ;;
+  *)
+    HEAD="$VERDICT"
+    ACT="See the log."
+    RUN_LEVEL=1 ;;
 esac
 
-# --- what she should DO ------------------------------------------------------
-# "Something failed" is not actionable. Every branch below names the ONE next
-# action, because an escalation she cannot act on is one she learns to close.
+n_issue_lines=0
+[ -n "$ISSUES" ] && [ -f "$ISSUES" ] && n_issue_lines="$(grep -c . "$ISSUES")"
+# Red, and yet no repo named: file the run-level issue so a red ending is never silent.
 case "$VERDICT" in
-  MAIN-RED-STUCK)
-    HEAD="CI sweep stopped: a lane is not responding to fixes"
-    ACT="Look at the failing job named below yourself — two rounds of automated fixes did not change its failure signature, so it is likely a decision, a credential, or a platform-side flag rather than a code bug." ;;
-  MAIN-RED-BLOCKED)
-    HEAD="CI sweep stopped: something needs you"
-    ACT="The sweep found something only you can clear (a credential, an account, or a real decision) and stopped rather than spend its budget re-proving it. The blocker is named below." ;;
-  MAIN-RED-EXHAUSTED)
-    HEAD="CI sweep finished with main still red"
-    ACT="The sweep used all its rounds and main is still red. Read the lanes below and decide whether to keep fixing or accept the break for now." ;;
-  MAIN-RED-TIMEOUT)
-    HEAD="CI sweep ran out of time with main still red"
-    ACT="No action needed yet — the sweep retries in about 30 minutes with a fresh session, briefed on what this one tried. If the same lanes are still red after six attempts today you will get one more message; that one needs you." ;;
-  MAIN-RED-TEMPFIX)
-    HEAD="CI sweep caught itself weakening a test — DO NOT MERGE"
-    ACT="A fixing agent tried to reach green by disabling a check. The pull request named below is marked REJECTED on the PR itself; the sweep will not merge it and retries in about 30 minutes, briefed to go for the root cause instead. Close or rewrite that PR when you see it; do not merge it." ;;
-  MAIN-RED-HUNG)
-    HEAD="CI sweep hung and was killed"
-    ACT="Nothing is required from you unless it repeats. The sweep exceeded its two-hour awake ceiling, was killed from outside, parked any PR it left open, and retries in about 30 minutes. If this happens twice running, the headless claude session is wedging and that needs looking at." ;;
-  MAIN-RED-INTERRUPTED)
-    HEAD="CI sweep was interrupted by the Mac sleeping — retrying"
-    ACT="Nothing is required from you. The Mac slept mid-sweep, so the round in flight was ended (not finished) and anything it opened is parked, not landed. The sweep retries in about 30 minutes. If this keeps happening, check pmset: sleep should be 0 on AC and battery." ;;
-  SWEEP-ATTEMPTS-EXHAUSTED)
-    HEAD="CI sweep: main still red after ${CI_SWEEP_ATTEMPTS:-6} attempts today — needs you"
-    ACT="${CI_SWEEP_ATTEMPTS:-6} fresh sessions today did not get main green. Iteration is not converging: this is a decision, a credential, or a platform-side flag, not a code bug the sweep can find. The sweep keeps trying every 2 hours until 22:00, but it will not get there without you. The verdicts and the last attempt's carryover are below." ;;
-  MAIN-UNKNOWN)
-    HEAD="CI sweep could not run"
-    ACT="The sweep stopped before it could look at anything — usually the login keychain being locked, or gh/claude not being authenticated. Until it is cleared, NOTHING IS WATCHING CI. It retries in about 30 minutes in case you have cleared it. The named stop is in the log below." ;;
-  *)
-    HEAD="CI sweep: $VERDICT"
-    ACT="See the log below." ;;
+  MAIN-GREEN|MAIN-PENDING) : ;;
+  *) [ "$n_issue_lines" -eq 0 ] && RUN_LEVEL=1 ;;
 esac
 
 WHEN="$(date '+%Y-%m-%d %H:%M %Z')"
+DAY="$(date +%Y-%m-%d)"
 TAIL=""
 [ -n "$RUN_LOG" ] && [ -f "$RUN_LOG" ] && TAIL="$(tail -c 3000 "$RUN_LOG")"
+rc=0
 
-# The repo to file against: the first one named in the detail line, so the issue
-# lands where the fix belongs. Falls back to the ops home for verdicts that are
-# about the sweep itself (hung, could-not-run) and name no repo.
-REPO="$(printf '%s' "$DETAIL" | grep -oE '\[[a-z0-9 .-]+\]' | head -1 | tr -d '[]' | awk '{print $1}')"
-if [ -n "$REPO" ] && gh repo view "seq23/$REPO" >/dev/null 2>&1; then
-  ISSUE_REPO="seq23/$REPO"
+# --- 1. the banner, ALWAYS -----------------------------------------------------
+# Truncated hard: an overflowing body is silently dropped by Notification Center.
+SHORT="$(printf '%s' "${SUMMARY:-$ACT}" | head -c 200)"
+SOUND='sound name "Basso"'; [ "$VERDICT" = "MAIN-GREEN" ] && SOUND=""
+if [ -n "$DRY" ]; then
+  echo "[notify:dry] banner: \"CI sweep: $HEAD\" / \"$SHORT\""
 else
-  ISSUE_REPO="$ISSUE_REPO_FALLBACK"
+  /usr/bin/osascript -e "display notification \"$(printf '%s' "$SHORT" | sed 's/"/\\"/g')\" with title \"CI sweep\" subtitle \"$(printf '%s' "$HEAD" | sed 's/"/\\"/g')\" $SOUND" \
+    >/dev/null 2>&1 || { echo "[notify] the macOS banner failed (no GUI session?)"; rc=1; }
 fi
 
-TITLE="[ci-sweep] $HEAD — $(date +%Y-%m-%d)"
-BODY="$(cat <<EOF
-**$HEAD**
+# --- 2. durable issues ---------------------------------------------------------
+file_issue() { # repo title body
+  local repo="$1" title="$2" body="$3" existing url
+  if [ -n "$DRY" ]; then
+    echo "[notify:dry] issue -> $repo"
+    echo "[notify:dry] title: $title"
+    printf '%s\n' "$body" | head -8 | sed 's/^/[notify:dry]   /'
+    return 0
+  fi
+  existing="$(gh issue list --repo "$repo" --state open --search "$title in:title" \
+              --json number,title --jq ".[]|select(.title==\"$title\")|.number" 2>/dev/null | head -1)"
+  if [ -n "$existing" ]; then
+    if gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1; then
+      echo "[notify] commented on $repo#$existing (recurrence)"
+    else
+      echo "[notify] FAILED to comment on $repo#$existing"; rc=1
+    fi
+  else
+    if url="$(gh issue create --repo "$repo" --title "$title" --body "$body" 2>&1)"; then
+      echo "[notify] filed $url"
+    else
+      echo "[notify] FAILED to file an issue on $repo: $url"; rc=1
+    fi
+  fi
+}
+
+FOOTER="---
+Filed by \`~/bin/ci-sweep.sh\` (daily at 06:00). **Run verdict:** \`$VERDICT\` · **When:** $WHEN · **Log:** \`$RUN_LOG\`
+
+**Morning summary:** $SUMMARY"
+
+if [ "$n_issue_lines" -gt 0 ]; then
+  while IFS=$'\t' read -r kind repo need; do
+    [ -z "$repo" ] && continue
+    target="$GH_OWNER/$repo"
+    if [ -z "$DRY" ] && ! gh repo view "$target" >/dev/null 2>&1; then target="$ISSUE_REPO_FALLBACK"; fi
+    case "$kind" in
+      PARKED)
+        title="[ci-sweep] $repo is parked on your decision — $DAY"
+        body="**$repo: main is red and only you can clear it.**
+
+**What is needed:** $need
+
+The sweep stopped working this repo and carried on with the rest. Tomorrow's 06:00 run re-checks it; record the decision (or supply the credential) and it will pick it up.
+
+$FOOTER" ;;
+      *)
+        title="[ci-sweep] $repo is stuck red — $DAY"
+        body="**$repo: main is still red after the sweep's fixing rounds.**
+
+**Still failing:** $need
+
+Rounds stopped changing this failure (or the budget ran out while it was still red). It likely needs a decision, a credential, or a platform-side flag rather than another code fix — say which, and tomorrow's 06:00 run will act on it.
+
+$FOOTER" ;;
+    esac
+    file_issue "$target" "$title" "$body"
+  done < "$ISSUES"
+fi
+
+if [ -n "$RUN_LEVEL" ]; then
+  # The repo to file against: the first one named in [brackets] in the detail, so a
+  # TEMPFIX lands where the PR is; otherwise the ops home.
+  REPO="$(printf '%s' "$DETAIL" | grep -oE '\[[a-z0-9 .-]+\]' | head -1 | tr -d '[]' | awk '{print $1}')"
+  if [ -n "$REPO" ] && { [ -n "$DRY" ] || gh repo view "$GH_OWNER/$REPO" >/dev/null 2>&1; }; then
+    TARGET="$GH_OWNER/$REPO"
+  else
+    TARGET="$ISSUE_REPO_FALLBACK"
+  fi
+  file_issue "$TARGET" "[ci-sweep] CI sweep $HEAD — $DAY" "**CI sweep $HEAD**
 
 **What to do:** $ACT
 
-**Verdict:** \`$VERDICT\`
-**When:** $WHEN
-**Log:** \`$RUN_LOG\`
+**What the sweep found:** $DETAIL
 
-**What the sweep found**
-
-$DETAIL
-
-<details><summary>Last 3000 bytes of the run log — what it already tried</summary>
+<details><summary>Last 3000 bytes of the run log</summary>
 
 \`\`\`
 $TAIL
@@ -130,52 +182,10 @@ $TAIL
 
 </details>
 
----
-Filed automatically by \`~/bin/ci-sweep.sh\`. This issue exists because a red night
-and a green night were otherwise indistinguishable without opening a log file.
-A green sweep files nothing.
-EOF
-)"
-
-rc=0
-
-# --- 1. immediate: macOS notification ----------------------------------------
-# Truncated hard: a notification body that overflows is silently dropped by
-# Notification Center, which would make the loud channel the unreliable one.
-SHORT="$(printf '%s' "$ACT" | head -c 180)"
-if [ -n "$DRY" ]; then
-  echo "[notify:dry] banner: \"$HEAD\" / \"$SHORT\""
-else
-  /usr/bin/osascript -e "display notification \"$(printf '%s' "$SHORT" | sed 's/"/\\"/g')\" with title \"CI sweep\" subtitle \"$(printf '%s' "$HEAD" | sed 's/"/\\"/g')\" sound name \"Basso\"" \
-    >/dev/null 2>&1 || { echo "[notify] the macOS banner failed (no GUI session?)"; rc=1; }
+$FOOTER"
 fi
 
-# --- 2. durable: a GitHub issue, which emails her -----------------------------
-# DEDUPED BY TITLE. Two sweeps a day plus repeats would otherwise bury the first
-# report under identical issues, and a channel that floods is a channel she mutes.
-# A repeat comments on the open issue instead, which is also the more useful
-# signal: it shows the thing recurring in one place.
-if [ -n "$DRY" ]; then
-  echo "[notify:dry] issue -> $ISSUE_REPO"
-  echo "[notify:dry] title: $TITLE"
-  printf '%s\n' "$BODY" | head -14 | sed 's/^/[notify:dry]   /'
-else
-  EXISTING="$(gh issue list --repo "$ISSUE_REPO" --state open --search "$TITLE in:title" \
-              --json number,title --jq ".[]|select(.title==\"$TITLE\")|.number" 2>/dev/null | head -1)"
-  if [ -n "$EXISTING" ]; then
-    if gh issue comment "$EXISTING" --repo "$ISSUE_REPO" --body "$BODY" >/dev/null 2>&1; then
-      echo "[notify] commented on $ISSUE_REPO#$EXISTING (recurrence)"
-    else
-      echo "[notify] FAILED to comment on $ISSUE_REPO#$EXISTING"; rc=1
-    fi
-  else
-    URL="$(gh issue create --repo "$ISSUE_REPO" --title "$TITLE" --body "$BODY" 2>&1)"
-    if [ $? -eq 0 ]; then echo "[notify] filed $URL"
-    else echo "[notify] FAILED to file an issue on $ISSUE_REPO: $URL"; rc=1; fi
-  fi
-fi
-
-# A NOTIFIER THAT FAILS SILENTLY IS WORSE THAN NO NOTIFIER — it makes everyone
-# downstream believe she was told. Non-zero propagates into the run log.
+[ "$VERDICT" = "MAIN-GREEN" ] && [ "$n_issue_lines" -eq 0 ] && echo "[notify] green: banner only, no issue filed."
+# A NOTIFIER THAT FAILS SILENTLY IS WORSE THAN NO NOTIFIER.
 [ "$rc" -ne 0 ] && echo "[notify] AT LEAST ONE CHANNEL FAILED — she may not have been told."
 exit "$rc"

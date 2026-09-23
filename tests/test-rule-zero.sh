@@ -98,20 +98,20 @@ else
   echo "  o exit non-zero  a deploying, credential-carrying workflow is rejected"
 fi
 
-# --- the retry suite: pointed at a root with no sweep, it must name that -----
-# test-sweep-retry.sh drives ci-sweep.sh end to end through fakes. A copy of it
+# --- the daily suite: pointed at a root with no sweep, it must name that -----
+# test-sweep-daily.sh drives ci-sweep.sh end to end through fakes. A copy of it
 # that could not find the script and still printed a pass would be the quietest
-# way to lose every guard on the retry mechanism at once.
-RETRY="$ROOT/tests/test-sweep-retry.sh"
-[ -x "$RETRY" ] || { echo "NAMED STOP [NO_RETRY_SUITE] $RETRY is missing or not executable."; exit 3; }
+# way to lose every guard on the sweep's decisions at once.
+RETRY="$ROOT/tests/test-sweep-daily.sh"
+[ -x "$RETRY" ] || { echo "NAMED STOP [NO_DAILY_SUITE] $RETRY is missing or not executable."; exit 3; }
 mkdir -p "$TMP/no-sweep/tests"
 asserts=$((asserts + 1))
 "$RETRY" "$TMP/no-sweep" >"$TMP/out" 2>&1
 got=$?
 if [ "$got" -ne 0 ] && grep -q 'NAMED STOP \[MISSING\]' "$TMP/out"; then
-  echo "  o exit $got  the retry suite refuses a root with no ci-sweep.sh by name"
+  echo "  o exit $got  the daily suite refuses a root with no ci-sweep.sh by name"
 else
-  echo "  x exit $got  the retry suite did not hard-fail with a named reason on a missing script"
+  echo "  x exit $got  the daily suite did not hard-fail with a named reason on a missing script"
   sed 's/^/        /' "$TMP/out"
   failed=$((failed + 1))
 fi

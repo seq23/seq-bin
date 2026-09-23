@@ -64,6 +64,9 @@ case "$NAME" in
   # Same shape as the hpc site (wrangler.toml pages_build_output_dir = dist); Deploy Distribution
   # (IndexNow/GSC) fires on a completed green Validate Repo. Added 21 Sep 2026 with PR #140.
   local-guides-citation-velocity) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main; Deploy Distribution fires on green Validate Repo" ;;
+  # Client repo; Cloudflare Pages builds main on push, Content Publish fires on its schedule.
+  # Added 23 Sep 2026 after #28 had to be merged and its deploy checked by hand.
+  hicks-consulting-canonical) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
   # Three Cloudflare Pages projects (ventures, productions, community) each build from main on push.
   join-west-peek-main)  DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
   # The state Worker (D1 durable state) redeploys on every land; the Actions lanes read main at fire time.

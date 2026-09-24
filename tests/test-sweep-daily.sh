@@ -31,7 +31,15 @@ done
 command -v timeout >/dev/null 2>&1 || { echo "NAMED STOP [NO_TIMEOUT] GNU timeout is required by the sweep."; exit 3; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# Scenario 8 backgrounds a real sweep run and only reaps it on the success
+# path (after the sentry announces itself and `wait "$SWEEP_PID"` returns).
+# When the sentry never announces itself, the `bad` branch used to fall
+# through with the sweep (and its timeout/claude children) still running —
+# confirmed 2026-09-24: four such orphans survived this trap's own `rm -rf`,
+# still holding a path into the now-deleted $TMP. pkill by that unique path
+# before removing it, so no run of this file can outlive it regardless of
+# which branch exits.
+trap 'pkill -TERM -f "$TMP" 2>/dev/null; sleep 1; pkill -KILL -f "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 asserts=0; failed=0
 ok()  { asserts=$((asserts + 1)); echo "  o $*"; }
 bad() { asserts=$((asserts + 1)); failed=$((failed + 1)); echo "  x $*"; }

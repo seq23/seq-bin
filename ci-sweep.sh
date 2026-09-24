@@ -1,11 +1,18 @@
 #!/bin/bash
-# CI sweep — ONCE A DAY at 06:00 CT, under launchd (launchd/com.seq.ci-sweep.plist
-# in this repo). Goal: every repo's main green by about 09:30.
+# CI sweep — 07:00 CT, under launchd (launchd/com.seq.ci-sweep.plist in this
+# repo), with one automatic retry at 08:00 if that run does not end green
+# (launchd/com.seq.ci-sweep-retry.plist -> ci-sweep-retry-if-red.sh, which
+# runs THIS script again unchanged). Goal: every repo's main green by about
+# 10:30 (11:30 on a retry day).
 #
-# THE DESIGN (her approval, 23 Sep 2026)
-#   · One run a day, 06:00. A run that ends red is NOT retried; tomorrow's 06:00 run
-#     is briefed with what this one tried (state/carryover-next.md). If the Mac was
-#     asleep at 06:00, launchd fires the missed run once at wake.
+# THE DESIGN (her approval, 23 Sep 2026; retry added on her instruction, 24 Sep 2026)
+#   · One run at 07:00. This script itself never retries — it does not know
+#     whether it is the 07:00 run or the 08:00 retry, and does not need to:
+#     ci-sweep-retry-if-red.sh reads the ledger and runs it again exactly once
+#     if today's only run so far did not end MAIN-GREEN. A second non-green
+#     ending waits for tomorrow's 07:00 run, briefed with what both tries did
+#     (state/carryover-next.md). If the Mac was asleep at 07:00, launchd fires
+#     the missed run once at wake, and the 08:00 retry check still runs as usual.
 #   · Round 1 probes main across the fleet and dispatches one fixing agent per red
 #     repo, in parallel. Every `claude -p` is pinned to `--model opus`; the prompt
 #     makes every fixing agent opus too. Nothing follows whatever /model last said.
@@ -45,7 +52,7 @@
 set -uo pipefail
 
 # --- what the sweep is allowed to spend --------------------------------------
-#   DEADLINE_MIN  = 210  the convergence budget (3h30): 06:00 start, done ~09:30.
+#   DEADLINE_MIN  = 210  the convergence budget (3h30): 07:00 start, done ~10:30.
 #   HARD_KILL_MIN = 240  the kernel-enforced backstop, counted in AWAKE ticks by the
 #                        sentry below. A fault detector, not a budget: 30 minutes
 #                        of headroom so an ordinary red morning reports on its own
@@ -173,7 +180,7 @@ park_open_prs() {
     printf '%s#%s\t%s\t%s\n' "$repo" "$num" "$branch" "$title" >> "$WORK/parked-prs"
     say "  PARKED PR $repo#$num ($branch): $why"
     pr_note "$repo" "$num" "[ci-sweep] PARKED — not landed work" \
-      "The sweep run that opened this pull request ended without merging it: $why. The sweep does not merge it later; tomorrow's 06:00 run is told about it and re-reads it. A person may close it or take it over. Run log: $RUN_LOG"
+      "The sweep run that opened this pull request ended without merging it: $why. The sweep does not merge it later; the next sweep run (today's 08:00 retry if this run wasn't green, otherwise tomorrow's 07:00) is told about it and re-reads it. A person may close it or take it over. Run log: $RUN_LOG"
   done < <(sweep_prs_opened_this_run)
   [ "$n" -eq 0 ] && say "  (no open PR of this run's to park in [$(tr '\n' ' ' < "$WORK/scope-repos" 2>/dev/null)])"
   return 0
@@ -192,7 +199,7 @@ reject_audited_prs() {
     printf '%s\t%s\n' "$ref" "$why" >> "$WORK/rejected"
     say "  REJECTED $ref: $why"
     pr_note "$repo" "$num" "[ci-sweep] REJECTED by the audit — do not merge" \
-      "ci-sweep-audit.sh found a weakening in this pull request during sweep round $round: **$why**. The sweep will not merge it and ends this run. Tomorrow's 06:00 run is told what was rejected and why, and goes for the root cause instead. Either fix this PR so the weakening is gone, or close it. Run log: $RUN_LOG"
+      "ci-sweep-audit.sh found a weakening in this pull request during sweep round $round: **$why**. The sweep will not merge it and ends this run. The next sweep run (today's 08:00 retry if this run wasn't green, otherwise tomorrow's 07:00) is told what was rejected and why, and goes for the root cause instead. Either fix this PR so the weakening is gone, or close it. Run log: $RUN_LOG"
   done < <(grep -E '✗ FATAL ' "$audit_file" 2>/dev/null)
   [ "$n" -eq 0 ] && say "  (the audit reported FATAL but named no PR the sweep could act on)"
   return 0
@@ -445,7 +452,20 @@ conclude() {
   else
     echo "[notify] NAMED STOP [NO_NOTIFIER] $NOTIFY is missing — she was not told." >> "$RUN_LOG"
   fi
-  echo "[$(date +%H:%M:%S)] next run: 06:00 tomorrow (launchd com.seq.ci-sweep). Nothing retries before then." >> "$RUN_LOG"
+  # Tell her (and tomorrow's reader) exactly what fires next: the 08:00 retry
+  # only exists for a repo's FIRST non-green run of the day, so read the
+  # ledger — the same source ci-sweep-retry-if-red.sh reads — rather than
+  # assuming.
+  today_rows=0
+  [ -f "$LEDGER" ] && today_rows="$(awk -F'\t' -v d="$(at_time "$(date +%s)" +%Y-%m-%d)" '$2==d' "$LEDGER" | grep -c .)"
+  if [ "$verdict" = "MAIN-GREEN" ]; then
+    next_note="07:00 tomorrow (launchd com.seq.ci-sweep). Nothing else runs today."
+  elif [ "$today_rows" -ge 2 ]; then
+    next_note="07:00 tomorrow (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today."
+  else
+    next_note="08:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green."
+  fi
+  echo "[$(date +%H:%M:%S)] next run: $next_note" >> "$RUN_LOG"
   # THE LAST LINE: the verdict and the morning summary, written by bash from what
   # GitHub said, never by the model.
   echo "CI-SWEEP-COMPLETE: $verdict — $SUMMARY_LINE" | tee -a "$RUN_LOG"
@@ -501,7 +521,7 @@ probe_main() {
 # dispatch to, which are parked from yesterday, and the merge route per repo. No
 # lock, no claude, no PR, no merge, no notification.
 if [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
-  echo "[dry-run] schedule: once a day at 06:00 CT (launchd com.seq.ci-sweep); nothing retries before the next day"
+  echo "[dry-run] schedule: 07:00 CT (launchd com.seq.ci-sweep), one retry at 08:00 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next day"
   echo "[dry-run] model: every claude -p runs --model opus; every fixing agent is spawned with model opus"
   echo "[dry-run] budget: ${DEADLINE_MIN} min convergence, hard kill at ${HARD_KILL_MIN} awake min; round 1 cap ${ROUND1_CAP_MIN} min, later rounds ${ROUNDN_CAP_MIN} min"
   echo "[dry-run] rounds continue while a round makes progress; STUCK after ${NO_PROGRESS_LIMIT} consecutive rounds without"

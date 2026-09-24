@@ -1,4 +1,5 @@
-Scheduled CI sweep — runs ONCE A DAY at 06:00 CT, budget 3h30 (done by about 09:30). Goal:
+Scheduled CI sweep — runs at 07:00 CT, budget 3h30 (done by about 10:30), with one automatic
+retry at 08:00 if that run did not end green. Goal:
 every repo's `main` green. Find every red GitHub Actions run across Sequoia's repos and FIX
 them at the root. She should not be getting daily failure notifications.
 
@@ -155,8 +156,9 @@ If anything is still red it runs you AGAIN in this same session, handing you wha
 merged and the fact that it did not work. **Rounds continue while they make progress** —
 a red lane went away, or a red lane's failure signature changed (a new root cause
 surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget
-ends it as TIMEOUT. **Nothing retries after the run**: tomorrow's 06:00 run is briefed with
-what this one tried.
+ends it as TIMEOUT. **This run never retries itself**: if it does not end MAIN-GREEN, a
+separate 08:00 check (`ci-sweep-retry-if-red.sh`) runs the whole sweep again exactly once;
+a second non-green ending waits for tomorrow's 07:00 run, briefed with what both tries did.
 
 This exists because of 2026-09-08. `Velocity Content Release` in
 `local-guides-citation-velocity` failed at 02:00 and 08:38. The 10:07 sweep dispatched

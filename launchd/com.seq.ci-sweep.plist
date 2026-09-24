@@ -3,11 +3,14 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.seq.ci-sweep</string>
-  <!-- ONCE A DAY at 06:00 local (CT). Her design, 23 Sep 2026: one progress-driven
-       run with a 3h30 budget (done ~09:30) that parks what only she can clear,
-       fixes and merges the rest, and sends one morning summary. A red run is NOT
-       retried; tomorrow's 06:00 run is briefed with what it tried. If the Mac is
-       asleep at 06:00, launchd fires the missed run once at wake.
+  <!-- 07:00 local (CT). Her design, 23 Sep 2026, moved 06:00 -> 07:00 on her
+       instruction 24 Sep 2026: one progress-driven run with a 3h30 budget
+       (done ~10:30) that parks what only she can clear, fixes and merges the
+       rest, and sends one morning summary. If it does not end MAIN-GREEN,
+       com.seq.ci-sweep-retry.plist tries it exactly once more at 08:00; a
+       second non-green ending waits for tomorrow's 07:00 run, briefed with
+       what both tries did. If the Mac is asleep at 07:00, launchd fires the
+       missed run once at wake.
        Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep.plist); install with
        the steps in README.md. ci-sweep-selftest.sh asserts this schedule. -->
   <key>ProgramArguments</key>
@@ -18,7 +21,7 @@
   </array>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>6</integer>
+    <key>Hour</key><integer>7</integer>
     <key>Minute</key><integer>0</integer>
   </dict>
   <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/launchd.log</string>

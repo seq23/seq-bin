@@ -164,7 +164,7 @@ check "a banner is sent even when green" grep -q '^\[notify:dry\] banner: "CI sw
 absent "a green run files no issue" grep -q 'notify:dry\] issue' "$LOGS/run-green.log"
 check "no claude round was run" [ "$(rounds)" -eq 0 ]
 check "no carryover is left" [ ! -f "$CARRY" ]
-check "the log names tomorrow's 06:00 run" grep -q 'next run: 06:00 tomorrow' "$LOGS/run-green.log"
+check "the log names tomorrow's 07:00 run, nothing more today" grep -q 'next run: 07:00 tomorrow (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
 check "nothing schedules a retry" no_retry_anywhere run-green
 
 # =============================================================================
@@ -315,11 +315,35 @@ setup red-ab
 out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROBE_BIN="$TMP/probe.sh" \
         CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
 check "dry run exits 0 (rc=$rc)" [ "$rc" -eq 0 ]
-check "it names the schedule and the model" grep -q '06:00 CT.*' <<<"$out"
+check "it names the schedule and the model" grep -q '07:00 CT.*retry at 08:00' <<<"$out"
 check "…the model" grep -q 'model: every claude -p runs --model opus' <<<"$out"
 check "…and the repos round 1 would dispatch to, with their merge route" grep -q 'beta — build — merge route: gh' <<<"$out"
 check "no claude was invoked" [ "$(rounds)" -eq 0 ]
 check "no lock was taken" [ ! -d "$LOGS/.lock" ]
+
+# =============================================================================
+# 13-14: the 08:00 retry note, read from the SAME ledger the standalone
+# ci-sweep-retry-if-red.sh reads (state/outcomes.tsv). The ledger accumulates
+# across every scenario above in this one test run, all dated "today" — that's
+# fine for last_verdict() (it only reads the tail), but this check counts
+# TODAY's rows, so it needs a clean ledger to mean anything.
+echo "=== 13. a non-green run that is the day's only run so far names the 08:00 retry ==="
+setup green
+rm -f "$LEDGER"
+sweep run-retry1 PATH="$TMP/nogh:$BIN:$PATH"
+check "still MAIN-UNKNOWN (gh unauthenticated)" [ "$(last_verdict)" = "MAIN-UNKNOWN" ]
+check "the log names today's 08:00 retry, once" \
+  grep -q 'next run: 08:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green.' \
+  "$LOGS/run-retry1.log"
+
+echo "=== 14. a SECOND non-green run today (the retry already ran) names tomorrow, not another retry ==="
+setup green
+sweep run-retry2 PATH="$TMP/nogh:$BIN:$PATH"
+check "still MAIN-UNKNOWN" [ "$(last_verdict)" = "MAIN-UNKNOWN" ]
+check "the log names tomorrow's 07:00 run, not another retry" \
+  grep -q "next run: 07:00 tomorrow (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today." \
+  "$LOGS/run-retry2.log"
+rm -f "$LEDGER"
 
 # =============================================================================
 echo "=== negative proof: with the checks gate neutralised, the failing-check PR MUST get merged ==="

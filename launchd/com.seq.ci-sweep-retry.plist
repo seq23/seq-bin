@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.ci-sweep-retry</string>
+  <!-- 08:00 local (CT), exactly one hour after com.seq.ci-sweep (07:00). Her
+       instruction, 24 Sep 2026: if the 07:00 run did not end MAIN-GREEN, try
+       once more. ci-sweep-retry-if-red.sh reads state/outcomes.tsv (today's
+       runs) and decides: already green today -> no-op; today's only run was
+       not green -> run ci-sweep.sh once more; already retried once today ->
+       no-op, wait for tomorrow's 07:00. Never more than one retry a day.
+       Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep-retry.plist);
+       install with the steps in README.md. ci-sweep-selftest.sh asserts this
+       schedule. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>/Users/sequoiataylor/bin/ci-sweep-retry-if-red.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/retry-launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/retry-launchd.err</string>
+  <key>RunAtLoad</key><false/>
+</dict></plist>

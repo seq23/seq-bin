@@ -3,10 +3,11 @@
 #
 #   ci-sweep-notify.sh <VERDICT> <SUMMARY> <RUN_LOG> [ISSUES_TSV] [DETAIL]
 #
-# THE MORNING SUMMARY (design of 23 Sep 2026: one run a day at 06:00, one answer)
-# · A macOS banner, ALWAYS: which repos are green, fixed, parked, stuck. The daily
-#   run replaced a 30-minute retry loop, so there is exactly one banner a day and a
-#   green one is information, not noise.
+# THE MORNING SUMMARY (design of 23 Sep 2026: one run a day at 07:00, one answer;
+# one automatic retry at 08:00 added 24 Sep 2026 if the 07:00 run was not green)
+# · A macOS banner, ALWAYS: which repos are green, fixed, parked, stuck. One banner
+#   per run — so a retry day gets two — replacing the old 30-minute retry loop's
+#   many banners; a green one is information, not noise.
 # · A GitHub issue per PARKED or STUCK repo (ISSUES_TSV lines: KIND \t repo \t
 #   what is needed), filed on that repo, naming the one decision or credential. Deduped
 #   by exact title: a repeat the same day comments on the open issue instead.
@@ -51,7 +52,7 @@ case "$VERDICT" in
     ACT="Two rounds in a row changed nothing, so the stuck repos need a look or a decision. Each has an issue on its repo; parked ones name the decision needed." ;;
   MAIN-RED-TIMEOUT)
     HEAD="ran out of its 3h30 budget with repos red"
-    ACT="Rounds were still making progress when the budget ended. Tomorrow's 06:00 run picks up from here; the red repos have issues." ;;
+    ACT="Rounds were still making progress when the budget ended. The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) picks up from here; the red repos have issues." ;;
   MAIN-RED-TEMPFIX)
     HEAD="caught a fix weakening a test — DO NOT MERGE it"
     ACT="A fixing agent tried to reach green by disabling a check. The PR is marked REJECTED on the PR itself and the run ended. Close or rewrite that PR; tomorrow's run is told to fix the root cause."
@@ -62,7 +63,7 @@ case "$VERDICT" in
     RUN_LEVEL=1 ;;
   MAIN-RED-INTERRUPTED)
     HEAD="interrupted by the Mac sleeping"
-    ACT="The round in flight was ended, not finished; its open PRs are parked, never merged. Main is unverified until tomorrow's 06:00 run. Check pmset if it recurs: sleep should be 0."
+    ACT="The round in flight was ended, not finished; its open PRs are parked, never merged. Main is unverified until the next run (today's 08:00 retry, or tomorrow's 07:00). Check pmset if it recurs: sleep should be 0."
     RUN_LEVEL=1 ;;
   MAIN-UNKNOWN)
     HEAD="could not run"
@@ -126,7 +127,7 @@ file_issue() { # repo title body
 }
 
 FOOTER="---
-Filed by \`~/bin/ci-sweep.sh\` (daily at 06:00). **Run verdict:** \`$VERDICT\` · **When:** $WHEN · **Log:** \`$RUN_LOG\`
+Filed by \`~/bin/ci-sweep.sh\` (07:00 daily, one retry at 08:00 if not green). **Run verdict:** \`$VERDICT\` · **When:** $WHEN · **Log:** \`$RUN_LOG\`
 
 **Morning summary:** $SUMMARY"
 
@@ -142,7 +143,7 @@ if [ "$n_issue_lines" -gt 0 ]; then
 
 **What is needed:** $need
 
-The sweep stopped working this repo and carried on with the rest. Tomorrow's 06:00 run re-checks it; record the decision (or supply the credential) and it will pick it up.
+The sweep stopped working this repo and carried on with the rest. The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) re-checks it; record the decision (or supply the credential) and it will pick it up.
 
 $FOOTER" ;;
       *)
@@ -151,7 +152,7 @@ $FOOTER" ;;
 
 **Still failing:** $need
 
-Rounds stopped changing this failure (or the budget ran out while it was still red). It likely needs a decision, a credential, or a platform-side flag rather than another code fix — say which, and tomorrow's 06:00 run will act on it.
+Rounds stopped changing this failure (or the budget ran out while it was still red). It likely needs a decision, a credential, or a platform-side flag rather than another code fix — say which, and the next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) will act on it.
 
 $FOOTER" ;;
     esac

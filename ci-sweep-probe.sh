@@ -281,6 +281,28 @@ for dir in "$GITHUB_DIR"/*/; do
   # nearly impossible to fire on a repo whose automation is alive, while still
   # catching a repo whose CI has stopped altogether.
   runs_in_window="$(printf '%s' "$runs" | jq --arg s "$SINCE" '[.[]|select(.createdAt>$s)]|length' 2>/dev/null || echo 0)"
+  # A syntactically valid but stale-empty `gh run list` answer is not "zero
+  # runs" — GitHub's list endpoint can lag its own writes by a few seconds.
+  # Confirmed 2026-09-24: hicks-consulting-canonical was reported NO_RUNS with
+  # 8 lanes expected, while a re-fetch moments later showed 12 runs in the
+  # exact same window (same repo/branch/params). Three prior occurrences
+  # (WPP-llm 10 Sep, p-n-p 17 Sep, local-guides-citation-velocity 22 Sep) are
+  # the same shape: RUNS_UNREADABLE already guards a non-array answer, but an
+  # empty array parses fine and slipped through as a real finding. Re-confirm
+  # with fresh fetches before firing — a true silence stays silent 5s later;
+  # a lag heals.
+  if [ "$runs_in_window" -eq 0 ] && [ "$settled" -gt 0 ] && grep -q "	YES	" "$VERDICTS"; then
+    for _ in 1 2; do
+      sleep 5
+      recheck="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
+            --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)"
+      if printf '%s' "$recheck" | jq -e 'type=="array"' >/dev/null 2>&1; then
+        runs="$recheck"
+        runs_in_window="$(printf '%s' "$runs" | jq --arg s "$SINCE" '[.[]|select(.createdAt>$s)]|length' 2>/dev/null || echo 0)"
+        [ "$runs_in_window" -gt 0 ] && break
+      fi
+    done
+  fi
   if [ "$runs_in_window" -eq 0 ] && [ "$settled" -gt 0 ] && grep -q "	YES	" "$VERDICTS"; then
     printf 'SILENT\t%s\t(all)\t%s|NO_RUNS\t%s commit(s) since %s should have started %s but zero CI runs exist\n' \
       "$repo" "$repo" "$settled" "$SINCE" "$(grep -c "	YES	" "$VERDICTS") lane(s)"

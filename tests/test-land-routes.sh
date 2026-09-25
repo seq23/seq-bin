@@ -13,7 +13,8 @@ LAND="$HERE/../land"
 BLOCK="$(sed -n '/^# --- routes begin/,/^# --- routes end/p' "$LAND")"
 [ -n "$BLOCK" ] || { echo "FAIL: land no longer carries the routes block"; exit 1; }
 
-# The site repos the web property change lane targets, and the route each must resolve to.
+# The site repos the web property change lane targets (plus the grid sites added 25 Sep 2026),
+# and the route each must resolve to.
 # "self" = deploys itself on merge (DEPLOY empty, SELF set); anything else = the DEPLOY command.
 SITES='
 westpeek-live|self
@@ -23,6 +24,12 @@ west-peek-network-os|self
 secondaries|self
 founder-dilution-dashboard|self
 west-peek-os|npm run deploy:production
+horse-legal-guide-velocity|self
+WPP-llm|self
+approvalprep|self
+dream-wedding-builder|self
+authority-backlink-network|self
+p-n-p|self
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block

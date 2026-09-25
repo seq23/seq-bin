@@ -90,6 +90,27 @@ case "$NAME" in
   west-peek-network-os) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (network.joinwestpeek.com)" ;;
   secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (venturedeals.joinwestpeek.com)" ;;
   founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (dilution.joinwestpeek.com)" ;;
+  # Grid velocity/canonical sites, added 25 Sep 2026 when six green query-coverage PRs could not land.
+  # Each read from the repo's wrangler config AND the check-runs GitHub records on its main commit
+  # (the Cloudflare app's "Cloudflare Pages" / "Workers Builds" run links the production project),
+  # cross-checked against `wrangler pages project list` (Git Provider: Yes). None has a deploy.yml.
+  # wrangler.toml pages_build_output_dir = "dist"; Pages project horse-legal-guide-velocity.
+  horse-legal-guide-velocity) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (horselegalguide.com)" ;;
+  # No wrangler config; Pages project wpp-llm builds from Git (check-run "Cloudflare Pages" on main).
+  WPP-llm|wpp-llm)      DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (virtualagency-os.com)" ;;
+  # wrangler.toml pages_build_output_dir = "dist"; Pages project approvalprep (also serves
+  # employmentverificationletter.com and letterofexplanation.com).
+  approvalprep)         DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (approvalprep.com)" ;;
+  # OpenNext Worker (wrangler.jsonc main = .open-next/worker.js). Workers Builds builds and deploys
+  # main on push: the active deployment on 25 Sep (version 86754b7d) is the one the "Workers Builds:
+  # dream-wedding-builder" check-run on main dd5050f produced. `npm run deploy` exists but is NOT
+  # the route — running it too would race Workers Builds.
+  dream-wedding-builder) DEPLOY="" ; SELF="deploys itself through Workers Builds on push to main" ;;
+  # No wrangler config; three Pages projects build from main on push (check-runs "Cloudflare Pages:
+  # founderoperatorlibrary / memphisvendorlibrary / professionalresourcelibrary" on main).
+  authority-backlink-network) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
+  # No wrangler config; Pages project p-n-p builds from Git; deploy-distribution.yml does IndexNow/GSC.
+  p-n-p)                DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (porchandparty901.com)" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 # --- routes end ---

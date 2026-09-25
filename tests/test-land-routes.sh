@@ -30,6 +30,7 @@ approvalprep|self
 dream-wedding-builder|self
 authority-backlink-network|self
 p-n-p|self
+justbeingmercedes|self
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block

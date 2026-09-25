@@ -111,6 +111,10 @@ case "$NAME" in
   authority-backlink-network) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
   # No wrangler config; Pages project p-n-p builds from Git; deploy-distribution.yml does IndexNow/GSC.
   p-n-p)                DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (porchandparty901.com)" ;;
+  # wrangler.toml pages_build_output_dir = "public"; Pages project justbeingmercedes (Direct Upload).
+  # .github/workflows/deploy.yml runs `wrangler pages deploy` on push to main with the vault's
+  # cloudflare-claude-deploy token (repo secret CLOUDFLARE_API_TOKEN); first green run 36191953200.
+  justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (justbeingmercedes.com)" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 # --- routes end ---

@@ -66,6 +66,12 @@ case "$NAME" in
   sprylabs-hpc-site)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
   # Same shape as the hpc site (wrangler.toml pages_build_output_dir = dist); Deploy Distribution
   # (IndexNow/GSC) fires on a completed green Validate Repo. Added 21 Sep 2026 with PR #140.
+  # One build feeds six Cloudflare Pages projects (Git integration: check-runs "Cloudflare Pages:
+  # local-guides-generator-{trt,pi,dentistry,neuro,uscis-medical}" and the base project on the main
+  # commit), serving hormonesivhair.com, theaccidentguides.com, dentistryguides.com,
+  # neuroevalguides.com and uscisexam.com. Deploy Distribution (IndexNow/GSC) runs on push to main.
+  # Added 25 Sep 2026 when the Bing Webmaster fix PR #48 had no route to land on.
+  local-guides-generator) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (6 projects, 5 domains)" ;;
   local-guides-citation-velocity) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main; Deploy Distribution fires on green Validate Repo" ;;
   # Client repo; Cloudflare Pages builds main on push, Content Publish fires on its schedule.
   # Added 23 Sep 2026 after #28 had to be merged and its deploy checked by hand.

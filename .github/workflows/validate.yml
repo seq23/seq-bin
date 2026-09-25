@@ -60,6 +60,11 @@ jobs:
       - name: land must know how every West Peek site repo reaches production
         run: ./tests/test-land-routes.sh
 
+      # 25 Sep 2026, local-guides-generator #48: land said "nothing to run" while a Cloudflare Pages
+      # production build had failed on the merge commit. Evals land's pages_watch block.
+      - name: land must refuse a merge whose Cloudflare build failed
+        run: ./tests/test-land-pages-watch.sh
+
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
 

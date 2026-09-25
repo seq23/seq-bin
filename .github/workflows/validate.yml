@@ -62,7 +62,7 @@ jobs:
 
       # 25 Sep 2026, local-guides-generator #48: land said "nothing to run" while a Cloudflare Pages
       # production build had failed on the merge commit. Evals land's pages_watch block.
-      - name: land must refuse a self-deploy whose Cloudflare build failed
+      - name: land must refuse a merge whose Cloudflare build failed
         run: ./tests/test-land-pages-watch.sh
 
       - name: ci-sweep-audit.sh must catch a weakening

@@ -74,6 +74,9 @@ case "$NAME" in
   join-west-peek-main)  DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
   # The state Worker (D1 durable state) redeploys on every land; the Actions lanes read main at fire time.
   creator-network)      DEPLOY="npm run deploy:state" ; SELF="" ;;
+  # Sheila's creator dashboard: one Worker (app + API + crons). The script builds the client,
+  # applies D1 migrations and deploys with FAKE_SERVICES=0. Added 25 Sep 2026 with the repo.
+  sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ;;
   # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, and this script has
   # already checked out main and pulled it above, so the merge IS the deploy.
   # Added 21 Sep 2026 with seq-bin #4.

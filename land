@@ -299,8 +299,50 @@ case "$CONC" in
     ;;
 esac
 
+# A SELF-DEPLOYING REPO IS NOT DEPLOYED UNTIL ITS CLOUDFLARE BUILD SAYS SO. 25 Sep 2026,
+# local-guides-generator #48: main's GitHub workflows went green, this script printed "nothing to
+# run", and the base Cloudflare Pages project's production build had failed on the merge commit.
+# The Cloudflare app posts one check-run per project ("Cloudflare Pages: <project>", "Workers
+# Builds: <worker>") on the commit it builds; wait for those to reach a terminal state and refuse
+# on any that did not succeed. A repo whose deploy posts no such check (the Actions-driven loop
+# repos, ~/bin) gets the old sentence once none has appeared.
+# --- pages_watch begin (tests/test-land-pages-watch.sh evals this block verbatim) ---
+pages_watch() { # $1 merge sha -> 0 all succeeded | 1 failed or timed out (prints which) | 2 none posted
+  local sha="$1" rows pending failed
+  local appear_by=$((SECONDS + ${PAGES_APPEAR_SECS:-180})) deadline=$((SECONDS + ${PAGES_WAIT_SECS:-1200}))
+  while :; do
+    rows="$(gh api "repos/{owner}/{repo}/commits/$sha/check-runs" \
+      --jq '.check_runs[] | select(.name | test("^(Cloudflare Pages|Workers Builds)")) | "\(.status)\t\(.conclusion)\t\(.name)"' 2>/dev/null)"
+    if [ -z "$rows" ]; then
+      [ "$SECONDS" -ge "$appear_by" ] && return 2
+    else
+      pending="$(printf '%s\n' "$rows" | awk -F'\t' '$1 != "completed"' | wc -l | tr -d ' ')"
+      if [ "$pending" = 0 ]; then
+        failed="$(printf '%s\n' "$rows" | awk -F'\t' '$2 != "success" && $2 != "skipped" && $2 != "neutral" {print $3 " (" $2 ")"}')"
+        [ -z "$failed" ] && return 0
+        printf '%s\n' "$failed"
+        return 1
+      fi
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        printf 'still running at the deadline: %s\n' "$(printf '%s\n' "$rows" | awk -F'\t' '$1 != "completed" {print $3}' | paste -sd, -)"
+        return 1
+      fi
+    fi
+    sleep 15
+  done
+}
+# --- pages_watch end ---
+
 if [ -z "$DEPLOY" ]; then
-  say "5/5  $NAME $SELF — nothing to run"
+  say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
+  MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
+  [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
+  PW_OUT="$(pages_watch "$MSHA_PAGES")"; PW=$?
+  case "$PW" in
+    0) say "LANDED — #$PR is merged, main is green, and every Cloudflare build on ${MSHA_PAGES:0:7} succeeded." ;;
+    2) say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run" ;;
+    *) die "#$PR IS MERGED and main's workflows are green, but a Cloudflare build on ${MSHA_PAGES:0:7} did not succeed — that project was NOT updated: $(echo "$PW_OUT" | paste -sd';' -). Fix main now." ;;
+  esac
   exit 0
 fi
 

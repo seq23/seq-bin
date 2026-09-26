@@ -32,6 +32,11 @@
 #   · One morning summary per run — green / fixed (PR numbers) / parked (the
 #     decision needed) / stuck — as the log's last line and a macOS banner, always.
 #     A GitHub issue per parked or stuck repo; a green run files nothing.
+#   · PAUSE (owner's instruction, 26 Sep 2026 — low on credits): write YYYY-MM-DD
+#     (the last paused day, inclusive) to ~/Library/Logs/ci-sweep/state/pause-until;
+#     the sweep logs PAUSED rows and resumes itself the day after. While paused
+#     nothing runs — no lock, no probe, no claude, no agent — and the 08:00 gate
+#     reads PAUSED as terminal, so a paused day has one row and no retry.
 #
 # WHY ONCE A DAY. The 30-minute tick, window gate, 25-minute retry, 6-attempt
 # escalation and 2-hour slow cadence existed to keep hammering a red main all day.
@@ -142,6 +147,37 @@ record_outcome() {
     printf '%s\t%s\t%s\t%s\n' "$ts" "$(at_time "$ts" +%Y-%m-%d)" "$verdict" "$id"; } > "$tmp"
   mv "$tmp" "$LEDGER"
 }
+
+# --- PAUSE: the owner's stop switch (her instruction, 26 Sep 2026) --------------
+# $STATE_DIR/pause-until holds one YYYY-MM-DD, the LAST paused day, inclusive. Today
+# (America/Chicago) on or before it: one PAUSED ledger row, one log line, exit 0, and
+# nothing else — this sits before the lock, the supervisor, the probe and every
+# `claude`, so a paused day spends nothing. The day after, the file is deleted here
+# and the run proceeds: the sweep resumes itself. A malformed date is a warning and
+# a normal run, never a pause — a bad file may not silence the sweep forever. The
+# dry run only reports what the scheduled run would do. Checked once, by the entry
+# process: the supervised body is only ever forked by a run that already passed it.
+PAUSE_FILE="$STATE_DIR/pause-until"
+if [ -f "$PAUSE_FILE" ] && [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
+  PAUSE_UNTIL="$(head -1 "$PAUSE_FILE" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  TODAY_CT="$(TZ=America/Chicago date +%Y-%m-%d)"
+  if ! printf '%s' "$PAUSE_UNTIL" | grep -qE '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'; then
+    say "WARNING: $PAUSE_FILE holds '$PAUSE_UNTIL', not a YYYY-MM-DD date — not paused; running normally. Fix or delete the file."
+  elif [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
+    if [[ "$TODAY_CT" > "$PAUSE_UNTIL" ]]; then
+      echo "[dry-run] pause-until $PAUSE_UNTIL has expired (today $TODAY_CT): a scheduled run would delete it and run"
+    else
+      echo "[dry-run] PAUSED until $PAUSE_UNTIL (today $TODAY_CT): a scheduled run would record PAUSED and exit 0, running nothing"
+    fi
+  elif [[ "$TODAY_CT" > "$PAUSE_UNTIL" ]]; then
+    rm -f "$PAUSE_FILE"
+    say "pause expired ($PAUSE_UNTIL was the last paused day; today is $TODAY_CT), running"
+  else
+    record_outcome "PAUSED"
+    say "CI sweep paused until $PAUSE_UNTIL by owner's instruction; nothing run"
+    exit 0
+  fi
+fi
 
 # --- which merge route a repo takes ------------------------------------------
 # `land` refuses a repo it has no deploy route for, so the sweep asks land's own

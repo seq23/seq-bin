@@ -30,6 +30,8 @@
 #                                     died without a row — ci-sweep.sh's reclaim
 #                                     writes that row)
 #   today already has a GREEN run  -> nothing to do, exit 0
+#   today has a PAUSED run         -> the owner paused the sweep (state/pause-until,
+#                                     26 Sep 2026); terminal for the day, exit 0
 #   today has exactly one non-green run -> this is the one retry: run
 #   today already has 2+ runs      -> the retry already happened; exit 0
 #
@@ -75,6 +77,9 @@ if [ "$count" -eq 0 ]; then
   say "no run recorded for $TODAY and none in flight — running (the 07:00 slot was missed, or its run died without a row; ci-sweep.sh records that one)."
 elif printf '%s\n' "$rows" | awk -F'\t' '$3=="MAIN-GREEN"{f=1} END{exit !f}'; then
   say "$TODAY already has a MAIN-GREEN run — nothing to retry. Exiting."
+  exit 0
+elif printf '%s\n' "$rows" | awk -F'\t' '$3=="PAUSED"{f=1} END{exit !f}'; then
+  say "$TODAY's run was PAUSED by the owner (state/pause-until) — terminal for the day, no retry. Exiting."
   exit 0
 elif [ "$count" -ge 2 ]; then
   say "$TODAY already has $count runs (the retry already happened, still not green) — waiting for tomorrow's 07:00 run. Exiting."

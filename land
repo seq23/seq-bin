@@ -272,12 +272,17 @@ if [ "$MODE" = promote ]; then
   HEADSHA="$(git rev-parse origin/main)"
   PROD="$(production_sha)"
   echo "     main ${HEADSHA:0:7}; production ${PROD:-unrecorded (no GitHub deployment yet: any e2e-green commit qualifies)}"
+  # The list is built FIRST and promote_pick reads it from a variable: 26 Sep 2026, the first
+  # real --promote piped `git rev-list | while | promote_pick`, promote_pick stopped at its
+  # answer, git took SIGPIPE, pipefail made the whole pipeline 141, and `|| CAND=""` threw the
+  # right sha away — "nothing to promote" with a green commit sitting right there.
   pick_candidate() {
-    local greens
+    local greens list
     greens="$(gh run list --workflow "$E2E_WF" --branch main --status success --limit 100 --json headSha -q '.[].headSha' 2>/dev/null | sort -u)"
-    git rev-list --max-count=50 origin/main | while read -r sha; do
-      if printf '%s\n' "$greens" | grep -qx "$sha"; then printf '%s\tgreen\n' "$sha"; else printf '%s\tother\n' "$sha"; fi
-    done | promote_pick "$PROD"
+    list="$(git rev-list --max-count=50 origin/main | while read -r sha; do
+      if grep -qx "$sha" <<<"$greens"; then printf '%s\tgreen\n' "$sha"; else printf '%s\tother\n' "$sha"; fi
+    done)"
+    promote_pick "$PROD" <<<"$list"
   }
   CAND="$(pick_candidate)" || CAND=""
   if [ -z "$CAND" ] && [ -n "$PROD" ] && [ "$PROD" = "$HEADSHA" ]; then

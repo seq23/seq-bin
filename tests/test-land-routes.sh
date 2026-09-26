@@ -32,6 +32,7 @@ authority-backlink-network|self
 p-n-p|self
 justbeingmercedes|self
 local-guides-generator|self
+sheila-creator-dashboard|npm run deploy:production
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
@@ -50,5 +51,11 @@ done <<< "$SITES"
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero site repos"; exit 1; }
 got="$(route_for no-such-repo-xyz)"
 case "$got" in DIED:*) echo "  ok   unknown repo stops: ${got#DIED: }" ;; *) echo "  FAIL unknown repo did not stop: '$got'"; fails=$((fails+1)) ;; esac
+# 26 Sep 2026: the build-first repo carries a staging command and names its full e2e workflow,
+# so land deploys staging on every merge and holds production for a green e2e on the sha.
+# shellcheck disable=SC2034  # NAME is read by the eval'd routes block
+staged="$( ( NAME=sheila-creator-dashboard; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
+if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   sheila-creator-dashboard stages (npm run deploy:staging) and waits for e2e"
+else echo "  FAIL sheila-creator-dashboard route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
 [ "$fails" -eq 0 ] || { echo "test-land-routes: $fails failure(s)"; exit 1; }
 echo "test-land-routes: $n site repos routed, unknown repo refused"

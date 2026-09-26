@@ -65,6 +65,12 @@ jobs:
       - name: land must refuse a merge whose Cloudflare build failed
         run: ./tests/test-land-pages-watch.sh
 
+      # Build first, test in batches (26 Sep 2026): staging on every land, production only on a
+      # green full e2e for the exact sha, `land --promote` ships the newest green. Evals land's
+      # plan block (two pure functions) and carries a negative proof.
+      - name: land must hold production for a green full e2e and promote the newest green
+        run: ./tests/test-land-plan.sh
+
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
 

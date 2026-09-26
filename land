@@ -14,12 +14,27 @@
 #
 #   land            # the PR for the current branch
 #   land 96         # that PR number
+#   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
 # It refuses rather than guesses: not green, head moved, main red -> it stops and
 # says which, and it does NOT deploy. A red main after a merge is the case this
 # repo has actually hit (PR #16 in boss-os passed on its head and the merge
 # commit went red, already deployed by then), so main is watched to a terminal
 # state every single time, not sampled once.
+#
+# BUILD FIRST, TEST IN BATCHES (26 Sep 2026). A repo whose route names a full e2e workflow
+# (E2E_WF) no longer runs that suite per merge: the merge gate is the fast check, and the browser
+# suites run nightly + on dispatch. So for those repos `land <pr>` is: fast check green -> merge ->
+# main's FAST run green -> deploy STAGING from the merge sha -> production ONLY if a completed run
+# of the e2e workflow on that exact sha concluded success; otherwise it prints WAITING and exits 0.
+# `land --promote <repo>` then ships the newest main commit whose e2e run passed and that is newer
+# than what production runs. Production's record is the GitHub Deployments API (environment
+# "production", one deployment per land, `gh api repos/../deployments`), written by this script on
+# every production deploy of an e2e-routed repo and read back by --promote; nothing is written to
+# the git graph. Both deploys run from a clean detached worktree at exactly that sha, never the
+# working tree. `--run-e2e` makes --promote dispatch the e2e workflow on main's head and wait for it
+# (ceiling 1.5x the last completed run) when no green run is newer than production.
+# Repos with no E2E_WF on their route are unchanged: merge -> production, as before.
 set -uo pipefail
 
 # RUN FROM A COPY. bash reads a script incrementally, so editing this file while a `land` is in
@@ -32,7 +47,25 @@ if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
   LAND_RUNNING_FROM_COPY=1 exec bash "$_copy" "$@"
 fi
 
-PR="${1:-}"
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
+
+MODE="land"; PR=""; TARGET=""; RUN_E2E=""
+for a in "$@"; do
+  case "$a" in
+    --promote) MODE="promote" ;;
+    --run-e2e) RUN_E2E=1 ;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --*) die "unknown flag $a (land [<pr>] | land --promote [<repo>] [--run-e2e])" ;;
+    *) if [ "$MODE" = promote ]; then TARGET="$a"; else PR="$a"; fi ;;
+  esac
+done
+[ -z "$RUN_E2E" ] || [ "$MODE" = promote ] || die "--run-e2e only means something with --promote"
+if [ -n "$TARGET" ]; then
+  case "$TARGET" in */*|.*) : ;; *) [ -d "$TARGET" ] || TARGET="$HOME/GitHub/$TARGET" ;; esac
+  [ -d "$TARGET" ] || die "no such repo directory: $TARGET"
+  cd "$TARGET" || die "cannot enter $TARGET"
+fi
 REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "not in a git repo"; exit 1; }
 cd "$REPO_DIR" || exit 1
 # A worktree is named after its branch dir, not the repo. Ask git for the
@@ -48,14 +81,16 @@ NAME="$(basename "$(git rev-parse --path-format=absolute --git-common-dir | sed 
 # silently stayed on the old build. Set it here so no caller has to know.
 export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-8d147e242033699dd37c6f5a451f48d2}"
 
-say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
-
 # How this repo reaches production. westpeek-live deploys itself through Workers
 # Builds on merge; the two Worker repos deploy only when a person runs the script.
 # Every West Peek web property the "web property change" lane can target MUST have a row here —
 # tests/test-land-routes.sh evals this block verbatim and fails if one is missing.
+# A row may also set: STAGING (a staging deploy command, run from the merge sha right after
+# main's fast check is green), E2E_WF (the name of the full post-merge browser workflow; set,
+# production waits for a green run of it on the exact sha — see the header), and SMOKE (a URL
+# that must answer 200 with "ok":true after a production deploy).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
+STAGING=""; E2E_WF=""; SMOKE=""
 case "$NAME" in
   west-peek-os|boss-os) DEPLOY="npm run deploy:production" ; SELF="" ;;
   westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
@@ -82,7 +117,9 @@ case "$NAME" in
   creator-network)      DEPLOY="npm run deploy:state" ; SELF="" ;;
   # Sheila's creator dashboard: one Worker (app + API + crons). The script builds the client,
   # applies D1 migrations and deploys with FAKE_SERVICES=0. Added 25 Sep 2026 with the repo.
-  sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ;;
+  # 26 Sep 2026: staging on every land; production waits for the `e2e` workflow (jobs e2e,
+  # e2e-open, help-screenshots — nightly 08:00 UTC + workflow_dispatch) on the exact sha.
+  sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://sheilastudio.seq-taylor.workers.dev/healthz" ;;
   # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, and this script has
   # already checked out main and pulled it above, so the merge IS the deploy.
   # Added 21 Sep 2026 with seq-bin #4.
@@ -124,6 +161,165 @@ case "$NAME" in
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 # --- routes end ---
+
+# WHAT LANDS WHERE. Pure — no gh, no git — so tests/test-land-plan.sh can prove every branch.
+# --- plan begin (tests/test-land-plan.sh evals this block verbatim) ---
+# land_plan DEPLOY STAGING E2E_WF E2E_CONCLUSION -> the steps, space-separated, in order, out of:
+#   staging     deploy staging from the merge sha
+#   production  deploy production (no e2e workflow on the route, or its run on this sha succeeded)
+#   waiting     production waits for a green full-e2e run on this sha (land --promote ships it)
+#   self        the repo deploys itself; nothing for this script to run
+# E2E_CONCLUSION is the conclusion of the newest COMPLETED run of E2E_WF on the exact sha, or ""
+# when there is none (still running counts as none: a run that has not finished proves nothing).
+land_plan() {
+  local deploy="$1" staging="$2" e2e="$3" conc="$4" out=""
+  [ -n "$staging" ] && out="staging"
+  if [ -z "$deploy" ]; then printf '%s\n' "${out:+$out }self"; return 0; fi
+  if [ -z "$e2e" ] || [ "$conc" = success ]; then printf '%s\n' "${out:+$out }production"; return 0; fi
+  printf '%s\n' "${out:+$out }waiting"
+}
+# promote_pick PRODUCTION_SHA < "sha<TAB>green|other" lines, main's commits NEWEST FIRST
+#   -> prints the newest green commit that is newer than production, exit 0; exit 1 if none.
+# Reaching production's own sha ends the walk: everything below it is already shipped or older.
+# An unrecorded production ("") means any green commit qualifies.
+promote_pick() {
+  local prod="$1" sha verdict
+  while IFS=$'\t' read -r sha verdict; do
+    [ -n "$sha" ] || continue
+    [ "$sha" = "$prod" ] && return 1
+    [ "$verdict" = green ] && { printf '%s\n' "$sha"; return 0; }
+  done
+  return 1
+}
+# --- plan end ---
+
+# The newest completed run of the e2e workflow on exactly this sha, or "" (none, or none finished).
+e2e_verdict() { # $1 sha
+  gh run list --workflow "$E2E_WF" --branch main --limit 50 --json headSha,status,conclusion \
+    -q "[.[] | select(.headSha == \"$1\" and .status == \"completed\")][0].conclusion // empty" 2>/dev/null
+}
+# What production runs, from the GitHub Deployments record this script writes (newest first).
+production_sha() {
+  gh api "repos/{owner}/{repo}/deployments?environment=production&per_page=1" --jq '.[0].sha // empty' 2>/dev/null
+}
+record_production() { # $1 sha  $2 note -> one GitHub deployment (environment production) + a success status
+  local id
+  id="$(printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"%s","production_environment":true}' "$1" "$2" \
+        | gh api -X POST "repos/{owner}/{repo}/deployments" --input - --jq '.id' 2>/dev/null)"
+  if [ -z "$id" ]; then
+    say "     WARNING: production is live on ${1:0:7} but the GitHub deployment record could not be written; land --promote will not know. Record by hand: gh api -X POST repos/{owner}/{repo}/deployments -f ref=$1 -f environment=production"
+    return 0
+  fi
+  printf '{"state":"success","environment":"production","description":"%s"%s}' "$2" "${SMOKE:+,\"environment_url\":\"${SMOKE%/healthz}\"}" \
+    | gh api -X POST "repos/{owner}/{repo}/deployments/$id/statuses" --input - >/dev/null 2>&1 || true
+  echo "     recorded: GitHub deployment $id — production = ${1:0:7}"
+}
+# NEVER A DIRTY TREE. Deploy from a detached worktree at exactly the sha, so what ships is what
+# main's checks read — not a branch checkout, not a working tree with edits. node_modules is
+# shared from this checkout when the lockfile at that sha is identical (the repo convention for
+# worktrees); otherwise `npm ci` in the worktree.
+deploy_at() { # $1 sha  $2 command
+  local sha="$1" cmd="$2" wt rc
+  wt="$(mktemp -d -t land-deploy.XXXXXX)" || return 1
+  git worktree add -q --detach "$wt" "$sha" || { rm -rf "$wt"; echo "     could not check out $sha into a worktree"; return 1; }
+  if [ -f "$wt/package-lock.json" ]; then
+    if [ -d "$REPO_DIR/node_modules" ] && cmp -s "$wt/package-lock.json" "$REPO_DIR/package-lock.json"; then
+      ln -s "$(cd "$REPO_DIR/node_modules" && pwd -P)" "$wt/node_modules"
+    else
+      (cd "$wt" && npm ci --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; return 1; }
+    fi
+  fi
+  (cd "$wt" && echo "     in $wt @ ${sha:0:7}: $cmd" && eval "$cmd"); rc=$?
+  git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+  return $rc
+}
+smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to serve the new version
+  local body="" i
+  for i in 1 2 3 4 5 6 7 8; do
+    body="$(curl -s -m 15 "$1" 2>/dev/null || true)"
+    case "$body" in *'"ok":true'*) echo "     smoke: $1 -> $body"; return 0 ;; esac
+    [ "$i" -lt 8 ] && sleep 5
+  done
+  echo "     smoke FAILED: $1 -> ${body:-no answer}"
+  return 1
+}
+# Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
+# duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
+wait_run_bounded() { # $1 run id  $2 ceiling seconds
+  local rid="$1" deadline=$(( $(date +%s) + $2 )) conc=""
+  while :; do
+    conc="$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+    [ -n "$conc" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      gh run cancel "$rid" >/dev/null 2>&1 || true
+      echo "cancelled-at-ceiling"; return 1
+    fi
+    sleep 20
+  done
+  echo "$conc"
+}
+last_duration() { # $1 workflow -> seconds of its newest completed run on main (default 1800)
+  gh run list --workflow "$1" --branch main --status completed --limit 1 --json createdAt,updatedAt \
+    -q '.[0] | ((.updatedAt | fromdateiso8601) - (.createdAt | fromdateiso8601))' 2>/dev/null | grep -E '^[0-9]+$' || echo 1800
+}
+
+# ---------------------------------------------------------------------------------------------
+# land --promote [<repo>] [--run-e2e]: the newest e2e-green main commit, newer than production.
+if [ "$MODE" = promote ]; then
+  [ -n "$DEPLOY" ] && [ -n "$E2E_WF" ] || die "$NAME has no full-e2e route (E2E_WF unset): land <pr> ships it to production directly, so there is nothing to promote"
+  say "1/4  reading main, production and the $E2E_WF runs for $NAME"
+  git fetch -q origin main || die "could not fetch main"
+  HEADSHA="$(git rev-parse origin/main)"
+  PROD="$(production_sha)"
+  echo "     main ${HEADSHA:0:7}; production ${PROD:-unrecorded (no GitHub deployment yet: any e2e-green commit qualifies)}"
+  pick_candidate() {
+    local greens
+    greens="$(gh run list --workflow "$E2E_WF" --branch main --status success --limit 100 --json headSha -q '.[].headSha' 2>/dev/null | sort -u)"
+    git rev-list --max-count=50 origin/main | while read -r sha; do
+      if printf '%s\n' "$greens" | grep -qx "$sha"; then printf '%s\tgreen\n' "$sha"; else printf '%s\tother\n' "$sha"; fi
+    done | promote_pick "$PROD"
+  }
+  CAND="$(pick_candidate)" || CAND=""
+  if [ -z "$CAND" ] && [ -n "$PROD" ] && [ "$PROD" = "$HEADSHA" ]; then
+    say "NOTHING TO PROMOTE — production already runs main's head ${HEADSHA:0:7}."; exit 0
+  fi
+  if [ -z "$CAND" ] && [ -n "$RUN_E2E" ]; then
+    say "2/4  no e2e-green commit newer than production — running $E2E_WF on main ${HEADSHA:0:7} (--run-e2e)"
+    # An in-flight run on the head (the nightly, or someone's dispatch) is waited for, not doubled.
+    RID="$(gh run list --workflow "$E2E_WF" --branch main --limit 10 --json databaseId,headSha,status \
+            -q "[.[] | select(.headSha == \"$HEADSHA\" and .status != \"completed\")][0].databaseId // empty" 2>/dev/null)"
+    if [ -z "$RID" ]; then
+      T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      gh workflow run "$E2E_WF" --ref main >/dev/null || die "could not dispatch $E2E_WF on main"
+      for _ in $(seq 1 12); do
+        sleep 10
+        RID="$(gh run list --workflow "$E2E_WF" --branch main --event workflow_dispatch --limit 5 --json databaseId,headSha,createdAt \
+                -q "[.[] | select(.headSha == \"$HEADSHA\" and .createdAt >= \"$T0\")][0].databaseId // empty" 2>/dev/null)"
+        [ -n "$RID" ] && break
+      done
+      [ -n "$RID" ] || die "dispatched $E2E_WF on main but no run appeared in 2 minutes. Check: gh run list --workflow $E2E_WF"
+    fi
+    CEIL=$(( $(last_duration "$E2E_WF") * 3 / 2 )); [ "$CEIL" -ge 600 ] || CEIL=600
+    echo "     run $RID, ceiling $((CEIL / 60)) min (1.5x the last completed run)"
+    CONC="$(wait_run_bounded "$RID" "$CEIL")" || true
+    echo "     $E2E_WF on ${HEADSHA:0:7}: $CONC"
+    [ "$CONC" = success ] || die "$E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC. Nothing promoted; production stays on ${PROD:-its current build}. Fix main first: gh run view $RID"
+    CAND="$(pick_candidate)" || CAND=""
+  fi
+  if [ -z "$CAND" ]; then
+    HEADCONC="$(e2e_verdict "$HEADSHA")"
+    die "nothing to promote: no main commit newer than production ${PROD:0:7} has a green $E2E_WF run (main head ${HEADSHA:0:7}: ${HEADCONC:-no completed run}). Run one: land --promote $NAME --run-e2e"
+  fi
+  say "2/4  promoting ${CAND:0:7} — $(git log --format='%s' -1 "$CAND")"
+  [ "$CAND" = "$HEADSHA" ] || echo "     (main's head ${HEADSHA:0:7} has no green $E2E_WF run yet; ${CAND:0:7} is the newest that does)"
+  say "3/4  deploying production from exactly ${CAND:0:7}"
+  deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed — read the error, it explains itself. Production's record is unchanged (still ${PROD:-unrecorded})."
+  say "4/4  smoke + record"
+  if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
+  record_production "$CAND" "land --promote from ${CAND:0:7}"
+  say "PROMOTED — $NAME production now runs ${CAND:0:7} (full $E2E_WF green on that sha)."
+  exit 0
+fi
 
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
@@ -211,8 +407,10 @@ sleep 12
 GATE_WF="$(sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' .github/workflows/deploy.yml 2>/dev/null | head -1 | tr -d '"'"'"' ')"
 pick_run() {
   # $1: a jq boolean over one run. Newest matching run of the gate workflow; else the newest match.
+  # The full e2e workflow (E2E_WF, routes block) is never "main's run": production waits for it
+  # separately, and the fast check is what a merge is judged on.
   gh run list --branch main --limit 20 --json databaseId,headSha,event,name \
-    -q "[.[] | select($1)] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
+    -q "[.[] | select($1) | select(.name != \"${E2E_WF:-}\")] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
 }
 # --- pick_run end ---
 if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
@@ -376,10 +574,39 @@ if [ -f ".github/workflows/deploy.yml" ]; then
   esac
 fi
 
-say "5/5  deploying"
-# Never a bare `wrangler deploy`: it ships a stale client and the LOCAL DEV
-# bindings. On 17 Sep it tried to push WP_OS_ENV "local" and a dev passcode to
-# production and failed only because of an unrelated error.
-$DEPLOY || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
+if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
+  say "5/5  deploying"
+  # Never a bare `wrangler deploy`: it ships a stale client and the LOCAL DEV
+  # bindings. On 17 Sep it tried to push WP_OS_ENV "local" and a dev passcode to
+  # production and failed only because of an unrelated error.
+  $DEPLOY || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
+  say "LANDED — #$PR is merged, main is green, and it is in production."
+  exit 0
+fi
 
-say "LANDED — #$PR is merged, main is green, and it is in production."
+# STAGING NOW, PRODUCTION WHEN THE FULL E2E SAYS SO (routes with STAGING / E2E_WF; header above).
+MSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
+[ -n "$MSHA" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so nothing was deployed. Re-run 'land $PR'."
+E2E_CONC=""; [ -z "$E2E_WF" ] || E2E_CONC="$(e2e_verdict "$MSHA")"
+PLAN="$(land_plan "$DEPLOY" "$STAGING" "$E2E_WF" "$E2E_CONC")"
+say "5/5  ${MSHA:0:7}: $PLAN${E2E_WF:+ ($E2E_WF on this sha: ${E2E_CONC:-no completed run})}"
+for step in $PLAN; do
+  case "$step" in
+    staging)
+      say "     staging <- ${MSHA:0:7}"
+      deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and main is green, but the STAGING deploy from ${MSHA:0:7} failed — read the error, it explains itself. Production untouched."
+      ;;
+    production)
+      say "     production <- ${MSHA:0:7}"
+      deploy_at "$MSHA" "$DEPLOY" || die "#$PR IS MERGED and main is green, but the production deploy from ${MSHA:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
+      if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${MSHA:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
+      [ -z "$E2E_WF" ] || record_production "$MSHA" "land #$PR from ${MSHA:0:7}"
+      say "LANDED — #$PR is merged, main is green, ${STAGING:+staging and }production run ${MSHA:0:7}."
+      ;;
+    waiting)
+      say "WAITING — #$PR is merged, main's fast check is green${STAGING:+, staging runs ${MSHA:0:7}}."
+      say "production waits for full $E2E_WF on $MSHA; run \`land --promote $NAME\` after it passes (or \`land --promote $NAME --run-e2e\` to run it now)"
+      ;;
+  esac
+done
+exit 0

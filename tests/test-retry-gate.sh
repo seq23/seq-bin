@@ -3,6 +3,7 @@
 # fake sweep. What is under test is the gate's OWN decision:
 #   · no row today, nothing in flight        -> run the sweep
 #   · a MAIN-GREEN row today                  -> do nothing
+#   · a PAUSED row today (owner's pause-until, 26 Sep 2026) -> do nothing: terminal
 #   · one non-green row today                 -> run the sweep (the one retry)
 #   · two rows today                          -> do nothing
 #   · no row today, a sweep IN FLIGHT         -> wait for it, then decide from ITS row
@@ -58,6 +59,19 @@ reset; row MAIN-RED-STUCK r1; gate
 check "one non-green row: the one retry runs" [ "$(ran)" = "ran" ]
 reset; row MAIN-RED-STUCK r1; row MAIN-RED-STUCK r2; gate
 check "two rows: does nothing" [ -z "$(ran)" ]
+reset; row PAUSED r1; gate
+check "a PAUSED row today (the owner's pause-until): terminal, does nothing" [ -z "$(ran)" ]
+check "…and says why" grep -q 'PAUSED by the owner (state/pause-until) — terminal for the day, no retry' "$TMP/gate.out"
+
+echo "=== negative proof: without the PAUSED test, a paused day gets a retry ==="
+sed 's/\$3=="PAUSED"/$3=="NEVER-THIS"/' "$GATE" > "$TMP/nopause.sh"; chmod +x "$TMP/nopause.sh"
+if cmp -s "$GATE" "$TMP/nopause.sh"; then
+  bad "SETUP BROKEN — could not remove the PAUSED test, so the negative proof is void"
+else
+  reset; row PAUSED r1; GATE_BIN="$TMP/nopause.sh" gate
+  if [ "$(ran)" = "ran" ]; then ok "PROVEN   without it the PAUSED day is retried, so the section above reads the PAUSED test"
+  else bad "NO TEETH — the PAUSED section passed without the PAUSED test ($(ran))"; fi
+fi
 
 echo "=== a sweep in flight is waited for, then decided from its own row ==="
 reset; hold 3 MAIN-RED-UNFINISHED; gate

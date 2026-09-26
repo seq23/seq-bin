@@ -13,7 +13,10 @@
 #   · every run ends with one banner; issues only for parked/stuck repos and
 #     run-level faults; a green run files nothing; nothing schedules a retry;
 #   · sleep is INTERRUPTED (not HUNG), a stall is HUNG, a TEMPFIX rejects the PR
-#     without merging or closing it.
+#     without merging or closing it;
+#   · a state/pause-until date on or after today (America/Chicago) is a PAUSED row,
+#     exit 0 and NOTHING run (no lock, no probe, no gh, no claude); an expired date
+#     is deleted and the run proceeds; a malformed one is a warning and a normal run.
 # The notifier is the real one in dry mode, so the summary and issues are proven on
 # the real text.
 #
@@ -462,6 +465,77 @@ check "the dead run is recorded MAIN-RED-RECLAIMED" [ "$(awk -F'\t' '$4=="run-di
 check "…and the new run went on to its own verdict" [ "$(last_verdict)" = "MAIN-GREEN" ]
 
 # =============================================================================
+# 20 (26 Sep 2026, owner's instruction — low on credits): state/pause-until pauses the
+# sweep at zero cost and lets it resume itself. The date is compared in America/Chicago,
+# so the fixtures are computed there too (a UTC runner at 02:00 is still "yesterday" in CT).
+PAUSE="$LOGS/state/pause-until"
+TODAY_CT="$(TZ=America/Chicago date +%Y-%m-%d)"
+echo "=== 20. paused today (the last paused day, inclusive): PAUSED row, exit 0, nothing run ==="
+setup red-a1 green
+rm -f "$LEDGER"; echo "$TODAY_CT" > "$PAUSE"
+sweep run-paused; rc=$?
+check "a paused run exits 0 (rc=$rc)" [ "$rc" -eq 0 ]
+check "the ledger records PAUSED" [ "$(last_verdict)" = "PAUSED" ]
+check "…as a 4-column row for today with this run's id" grep -qE "^[0-9]+	$(date +%Y-%m-%d)	PAUSED	run-paused\$" "$LEDGER"
+check "…and it is the day's only row" [ "$(grep -c . "$LEDGER")" -eq 1 ]
+check "the log says so: $(last_line run-paused)" grep -q "CI sweep paused until $TODAY_CT by owner's instruction; nothing run" "$LOGS/run-paused.log"
+check "no claude was invoked" [ "$(rounds)" -eq 0 ]
+check "the probe was never called" [ ! -f "$TMP/probe-n" ]
+check "gh was never called" [ ! -s "$TMP/gh-calls.log" ]
+check "no lock was taken" [ ! -d "$LOGS/.lock" ]
+absent "no banner, no issue: nothing ran, nothing to report" grep -q 'notify:dry\]' "$LOGS/run-paused.log"
+check "the pause file is kept for tomorrow" [ -f "$PAUSE" ]
+echo "=== 20b. a future pause date pauses too; the dry run reports it and dispatches nothing ==="
+setup red-a1 green
+echo "2999-12-31" > "$PAUSE"
+sweep run-paused-future; rc=$?
+check "paused (rc=$rc)" [ "$rc" -eq 0 ]
+check "…PAUSED in the ledger" [ "$(last_verdict)" = "PAUSED" ]
+check "…no claude round" [ "$(rounds)" -eq 0 ]
+out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROBE_BIN="$TMP/probe.sh" \
+        CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
+check "the dry run names the pause (rc=$rc)" grep -q '^\[dry-run\] PAUSED until 2999-12-31' <<<"$out"
+check "…and still writes no ledger row" [ "$(grep -c . "$LEDGER")" -eq 2 ]
+echo "=== 20c. an expired pause is deleted and the run proceeds ==="
+setup green
+echo "2020-01-01" > "$PAUSE"
+sweep run-pause-expired; rc=$?
+check "the run proceeded to its own verdict (rc=$rc)" [ "$rc" -eq 0 ]
+check "…MAIN-GREEN" [ "$(last_verdict)" = "MAIN-GREEN" ]
+check "the log says the pause expired" grep -q 'pause expired (2020-01-01 was the last paused day; today is .*), running' "$LOGS/run-pause-expired.log"
+check "the pause file was removed — the sweep resumed itself" [ ! -f "$PAUSE" ]
+check "the probe ran" [ -f "$TMP/probe-n" ]
+echo "=== 20d. a malformed pause file is a warning and a normal run, never a pause ==="
+setup green
+echo "next week" > "$PAUSE"
+sweep run-pause-malformed; rc=$?
+check "the run proceeded (rc=$rc)" [ "$rc" -eq 0 ]
+check "…MAIN-GREEN" [ "$(last_verdict)" = "MAIN-GREEN" ]
+check "the log warns about the file" grep -q "WARNING: .*pause-until holds 'next week', not a YYYY-MM-DD date — not paused; running normally" "$LOGS/run-pause-malformed.log"
+check "the malformed file is left for a person to see" [ -f "$PAUSE" ]
+check "…and the warning is logged once, not by supervisor and body both" [ "$(grep -c 'WARNING: .*pause-until' "$LOGS/run-pause-malformed.log")" -eq 1 ]
+setup green
+echo "2026-13-45" > "$PAUSE"
+sweep run-pause-impossible
+check "an impossible date (2026-13-45) is malformed too, not a pause" [ "$(last_verdict)" = "MAIN-GREEN" ]
+rm -f "$PAUSE" "$LEDGER"
+
+echo "=== negative proof: without the pause check, a paused-today run dispatches a round ==="
+sed 's/^if \[ -f "\$PAUSE_FILE" \] && \[ -z "\${CI_SWEEP_SUPERVISED:-}" \]; then$/if false; then/' "$SWEEP" > "$TMP/no-pause.sh"; chmod +x "$TMP/no-pause.sh"
+if cmp -s "$SWEEP" "$TMP/no-pause.sh"; then
+  bad "SETUP BROKEN — could not remove the pause check, so the negative proof is void"
+else
+  setup red-a1 green; echo "$TODAY_CT" > "$PAUSE"
+  SWEEP_SAVE="$SWEEP"; SWEEP="$TMP/no-pause.sh"; sweep run-no-pause; SWEEP="$SWEEP_SAVE"
+  if [ "$(rounds)" -ge 1 ] && [ "$(last_verdict)" != "PAUSED" ]; then
+    ok "PROVEN   without the check the paused day runs a claude round ($(rounds)) and ends $(last_verdict), so section 20 reads the check"
+  else
+    bad "NO TEETH — section 20's zero rounds did not depend on the pause check (rounds=$(rounds), verdict=$(last_verdict))"
+  fi
+  rm -f "$PAUSE" "$LEDGER"
+fi
+
+# =============================================================================
 echo "=== negative proof: with the checks gate neutralised, the failing-check PR MUST get merged ==="
 sed 's/^pr_checks_state() {$/pr_checks_state() { echo green; return; }\npr_checks_state_disabled() {/' "$SWEEP" > "$TMP/crippled.sh"
 chmod +x "$TMP/crippled.sh"
@@ -515,5 +589,5 @@ if [ "$failed" -gt 0 ]; then
   for f in "$TMP"/*.out; do [ -s "$f" ] && { echo "--- $(basename "$f")"; tail -20 "$f"; }; done
   exit 1
 fi
-echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, pins opus, reports every morning, and never retries or closes a PR."
+echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, pins opus, reports every morning, never retries or closes a PR, and a pause-until date stops it at zero cost until it resumes itself."
 exit 0

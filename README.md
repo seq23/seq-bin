@@ -46,6 +46,7 @@ edit was recoverable only if someone had thought to copy the file first.
   Sep 2026). Sleep is not a hang: the sentry measures its own heartbeat gaps and
   classes a run the Mac slept through as `MAIN-RED-INTERRUPTED`, with the round's
   open PRs parked, never merged or audited as landed work.
+- **Pause:** write YYYY-MM-DD (last paused day) to `~/Library/Logs/ci-sweep/state/pause-until`; the sweep logs PAUSED rows and resumes itself the day after (owner's instruction, 26 Sep 2026; the 08:00 gate reads PAUSED as terminal).
 
 ## Installing the schedule
 

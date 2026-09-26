@@ -33,7 +33,9 @@
 # every production deploy of an e2e-routed repo and read back by --promote; nothing is written to
 # the git graph. Both deploys run from a clean detached worktree at exactly that sha, never the
 # working tree. `--run-e2e` makes --promote dispatch the e2e workflow on main's head and wait for it
-# (ceiling 1.5x the last completed run) when no green run is newer than production.
+# (ceiling 1.5x the last completed run) when no green run is newer than production. A repo whose
+# origin/main carries .github/workflows/promote.yml promotes itself on a green e2e: --promote waits
+# for any in-flight promote run (bounded) before reading production, never deploys on top of one.
 # Repos with no E2E_WF on their route are unchanged: merge -> production, as before.
 set -uo pipefail
 
@@ -310,6 +312,35 @@ last_duration() { # $1 workflow -> seconds of its newest completed run on main (
   gh run list --workflow "$1" --branch main --status completed --limit 1 --json createdAt,updatedAt \
     -q '.[0] | ((.updatedAt | fromdateiso8601) - (.createdAt | fromdateiso8601))' 2>/dev/null | grep -E '^[0-9]+$' || echo 1800
 }
+# NEVER RACE THE REPO'S OWN PROMOTE. 26 Sep 2026: sheila-creator-dashboard grew promote.yml (fires
+# on a green e2e run of main, deploys production from that sha, records the GitHub Deployment). Its
+# already-live check only catches the SEQUENTIAL case; a person running `land --promote` in the same
+# minutes would build + `d1 migrations apply` + `wrangler deploy` the same sha on top of it. So
+# before deciding what to promote, an in-flight promote run (queued, waiting, in_progress) is
+# waited for — bounded by 1.5x its last completed duration, floor 6 min — and production is read
+# only after it finishes (which is then usually "NOTHING TO PROMOTE"). Past the ceiling it is
+# cancelled and this stops by name; nothing is ever deployed on top of it. A repo with no
+# promote.yml on origin/main has nothing to wait for and this is silent.
+# $1 (optional): a sha whose promote run is EXPECTED to appear (the --run-e2e path: promote.yml
+# fires on the e2e success just waited for) — polled for up to LAND_PROMOTE_APPEAR_SECS (120 s).
+PROMOTE_WF="promote.yml"
+promote_wait_inflight() {
+  local expect="${1:-}" appear_by=$((SECONDS + ${LAND_PROMOTE_APPEAR_SECS:-120})) row="" rid sha st ceil conc
+  git cat-file -e "origin/main:.github/workflows/$PROMOTE_WF" 2>/dev/null || return 0
+  while :; do
+    row="$(gh run list --workflow "$PROMOTE_WF" --limit 10 --json databaseId,headSha,status \
+            -q '[.[] | select(.status != "completed")][0] | select(. != null) | "\(.databaseId)\t\(.headSha)\t\(.status)"' 2>/dev/null)"
+    [ -n "$row" ] && break
+    [ -n "$expect" ] && [ "$SECONDS" -lt "$appear_by" ] || return 0
+    sleep 10
+  done
+  IFS=$'\t' read -r rid sha st <<<"$row"
+  ceil=$(( $(last_duration "$PROMOTE_WF") * 3 / 2 )); [ "$ceil" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || ceil=${LAND_WAIT_FLOOR_SECS:-360}
+  echo "     promote run $rid in flight for ${sha:0:7} ($st) — waiting (ceiling $((ceil / 60)) min, 1.5x its last completed run)"
+  conc="$(wait_run_bounded "$rid" "$ceil")" || true
+  [ "$conc" != cancelled-at-ceiling ] || die "NAMED STOP [PROMOTE_RUN_PAST_CEILING] $PROMOTE_WF run $rid on ${sha:0:7} ran past $((ceil / 60)) min and was cancelled. Nothing deployed on top of it: read the run (gh run view $rid), then land --promote $NAME again."
+  echo "     promote run $rid finished: $conc — reading production again"
+}
 
 # ---------------------------------------------------------------------------------------------
 # land --promote [<repo>] [--run-e2e]: the newest e2e-green main commit, newer than production.
@@ -318,6 +349,7 @@ if [ "$MODE" = promote ]; then
   say "1/4  reading main, production and the $E2E_WF runs for $NAME"
   git fetch -q origin main || die "could not fetch main"
   HEADSHA="$(git rev-parse origin/main)"
+  promote_wait_inflight
   PROD="$(production_sha)"
   echo "     main ${HEADSHA:0:7}; production ${PROD:-unrecorded (no GitHub deployment yet: any e2e-green commit qualifies)}"
   # The list is built FIRST and promote_pick reads it from a variable: 26 Sep 2026, the first
@@ -357,6 +389,11 @@ if [ "$MODE" = promote ]; then
     CONC="$(wait_run_bounded "$RID" "$CEIL")" || true
     echo "     $E2E_WF on ${HEADSHA:0:7}: $CONC"
     [ "$CONC" = success ] || die "$E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC. Nothing promoted; production stays on ${PROD:-its current build}. Fix main first: gh run view $RID"
+    # That success is exactly what the repo's promote.yml (if any) fires on: wait for it, then
+    # read production again — it has usually just shipped this very sha.
+    promote_wait_inflight "$HEADSHA"
+    PROD="$(production_sha)"
+    if [ "$PROD" = "$HEADSHA" ]; then say "NOTHING TO PROMOTE — the repo's own $PROMOTE_WF shipped main's head ${HEADSHA:0:7} on that green run."; exit 0; fi
     CAND="$(pick_candidate)" || CAND=""
   fi
   if [ -z "$CAND" ]; then

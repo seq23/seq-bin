@@ -13,6 +13,10 @@
 #    timeout" refused a green PR as "not green". Pinned here: an empty head never merges; a
 #    transient error is retried and lands; a persistent one exits 75 saying "could not verify
 #    (network)", never "not green"; a real failing check is still exit 1 "not green".
+# 3. --PROMOTE RACED THE REPO'S OWN PROMOTE.YML (sheila-creator-dashboard, 26 Sep 2026): both would
+#    build + migrate + deploy the same sha. Pinned here: an in-flight promote run is waited for
+#    (bounded, cancelled + NAMED STOP past the ceiling) and production is read after it; a repo
+#    without promote.yml is untouched; --run-e2e waits for the promote run its green e2e fires.
 #
 # LAND_UNDER_TEST points it at another copy of land — that is how the negative proof is run
 # (the pre-fix land fails the cases above).
@@ -57,6 +61,26 @@ case "$a" in
   "pr merge "*) : > "$FAKE_DIR/merged"; exit 0 ;;
   "pr view "*"--json state "*) merged && echo MERGED || echo OPEN; exit 0 ;;
   "pr view "*mergeCommit*) echo "$MERGESHA"; exit 0 ;;
+  # --- promote fakes (cases 11-14). promote-inflight = a promote.yml run 777 is in flight on
+  # origin/main; each conclusion read counts down promote-ticks, and when it reaches 0 the run is
+  # done and production's deployment record says origin/main. promote-hang = it never finishes.
+  "run list --workflow promote.yml "*"--status completed"*) cat "$FAKE_DIR/promote-last" 2>/dev/null || echo 100; exit 0 ;;  # last_duration
+  "run list --workflow promote.yml "*)
+    if [ -f "$FAKE_DIR/promote-inflight" ] && [ ! -f "$FAKE_DIR/promote-done" ]; then printf '777\t%s\tin_progress\n' "$ORIGIN_MAIN"; fi; exit 0 ;;
+  "run view 777 "*conclusion*)
+    [ -f "$FAKE_DIR/promote-hang" ] && exit 0
+    t="$(cat "$FAKE_DIR/promote-ticks" 2>/dev/null || echo 0)"
+    if [ "$t" -le 0 ]; then : > "$FAKE_DIR/promote-done"; echo success; else echo $((t - 1)) > "$FAKE_DIR/promote-ticks"; fi; exit 0 ;;
+  "run cancel 777"*) : > "$FAKE_DIR/promote-cancelled"; exit 0 ;;
+  # e2e-pending = no green e2e yet; run 800 is in flight on origin/main and goes green when read.
+  "run list --workflow e2e "*"--status success"*) [ -f "$FAKE_DIR/e2e-pending" ] || echo "$ORIGIN_MAIN"; exit 0 ;;
+  "run list --workflow e2e "*"databaseId,headSha,status"*) [ -f "$FAKE_DIR/e2e-pending" ] && echo 800; exit 0 ;;
+  "run list --workflow e2e "*"--status completed"*) echo 100; exit 0 ;;
+  "run list --workflow e2e "*) exit 0 ;;
+  "run view 800 "*conclusion*) rm -f "$FAKE_DIR/e2e-pending"; : > "$FAKE_DIR/promote-inflight"; echo success; exit 0 ;;  # green e2e fires promote.yml
+  "api repos/{owner}/{repo}/deployments?environment=production"*)
+    [ -f "$FAKE_DIR/promote-done" ] && echo "$ORIGIN_MAIN"; exit 0 ;;
+  "api -X POST repos/{owner}/{repo}/deployments"*) echo 4242; exit 0 ;;                    # record_production
   "run list "*) echo 900; exit 0 ;;
   "run watch "*) exit 0 ;;
   "run view 900 "*conclusion*) echo success; exit 0 ;;
@@ -65,11 +89,13 @@ case "$a" in
   *) echo "fake gh: unhandled: $a" >&2; exit 1 ;;
 esac
 SH
+printf '#!/bin/bash\necho "{\\"ok\\":true}"\n' > "$BIN/curl"   # the smoke check never leaves the machine
 chmod +x "$BIN"/*
 export FAKE_DIR="$FAKE" HEADSHA MERGESHA
 
-# fixture NAME: a bare origin whose main has moved on (the merge) past a clone at $W/NAME, and the
-# merge commit rewrites artifacts/a.json — the file the owner has dirty in case 1.
+# fixture NAME [promote]: a bare origin whose main has moved on (the merge) past a clone at $W/NAME,
+# and the merge commit rewrites artifacts/a.json — the file the owner has dirty in case 1. With
+# "promote", origin/main carries .github/workflows/promote.yml (the repo promotes itself).
 fixture() {
   local name="$1"
   rm -rf "$W/origin.git" "${W:?}/${name:?}" "$W/pusher" "$FAKE"; mkdir -p "$FAKE"
@@ -77,13 +103,18 @@ fixture() {
   git clone -q "$W/origin.git" "$W/pusher" 2>/dev/null
   mkdir -p "$W/pusher/artifacts"; echo '{"v":1}' > "$W/pusher/artifacts/a.json"; echo one > "$W/pusher/other.txt"
   echo '{"lockfileVersion":3}' > "$W/pusher/package-lock.json"   # identical lockfile: deploy_at shares her node_modules
-  git -C "$W/pusher" add artifacts other.txt package-lock.json; git -C "$W/pusher" commit -qm base; git -C "$W/pusher" push -q origin HEAD:main
+  if [ "${2:-}" = promote ]; then mkdir -p "$W/pusher/.github/workflows"; echo 'name: promote' > "$W/pusher/.github/workflows/promote.yml"; fi
+  git -C "$W/pusher" add -A; git -C "$W/pusher" commit -qm base; git -C "$W/pusher" push -q origin HEAD:main
   git clone -q "$W/origin.git" "$W/$name"
   echo '{"v":2}' > "$W/pusher/artifacts/a.json"; git -C "$W/pusher" commit -qam "the merged PR"; git -C "$W/pusher" push -q origin HEAD:main
-  ORIGIN_MAIN="$(git -C "$W/pusher" rev-parse HEAD)"
+  ORIGIN_MAIN="$(git -C "$W/pusher" rev-parse HEAD)"; export ORIGIN_MAIN
 }
 run_land() { # name -> sets OUT, RC
   OUT="$(cd "$W/$1" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 PAGES_APPEAR_SECS=0 bash "$LAND" 7 2>&1)"; RC=$?
+}
+run_promote() { # name [flags...] -> sets OUT, RC   (LAND_WAIT_FLOOR_SECS from the caller, default 360)
+  local name="$1"; shift
+  OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" --promote "$@" 2>&1)"; RC=$?
 }
 fails=0; passes=0
 check() { # label, command...
@@ -181,7 +212,61 @@ check "says not green — test: fail" has "not green — test: fail"
 check "a single read, no retry of a real answer" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
 check "not merged" eval '! merge_called'
 
+# --- land --promote against a repo that promotes itself (promote.yml) — 26 Sep 2026 ----------------
+# sheila-creator-dashboard's promote.yml deploys production on a green e2e. A person's `land --promote`
+# in the same minutes must WAIT for that run and read production after it, never build + migrate +
+# deploy the same sha on top of it.
+echo "=== 11. a promote.yml run is in flight: land waits for it, then finds nothing to promote ==="
+fixture sheila-creator-dashboard promote
+: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
+run_promote sheila-creator-dashboard
+check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
+check "says it is waiting on run 777" has "promote run 777 in flight for ${ORIGIN_MAIN:0:7}"
+check "waited to the run's conclusion (3 reads: two pending, one success)" [ "$(grep -c '^run view 777' "$FAKE/calls")" -eq 3 ]
+check "read production AFTER the run (deployment record answered)" has "promote run 777 finished: success"
+check "NOTHING TO PROMOTE — the run shipped that sha" has "NOTHING TO PROMOTE"
+check "no deploy ran on top of it" [ ! -f "$FAKE/npm-ran" ]
+check "the run was not cancelled" [ ! -f "$FAKE/promote-cancelled" ]
+
+echo "=== 12. no promote.yml on origin/main: nothing to wait for, promotes as before ==="
+fixture sheila-creator-dashboard
+: > "$FAKE/promote-inflight"; mkdir "$W/sheila-creator-dashboard/node_modules"   # a stray in-flight row is irrelevant: no promote.yml
+run_promote sheila-creator-dashboard
+check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
+check "silent about promote runs" eval '! has "promote run"'
+check "never listed promote.yml runs" eval '! grep -q "^run list --workflow promote.yml" "$FAKE/calls"'
+check "deployed from a worktree at origin/main" grep -qx "head=$ORIGIN_MAIN" "$FAKE/npm-ran"
+check "PROMOTED" has "PROMOTED"
+
+echo "=== 13. the promote run never finishes: cancelled at the ceiling, NAMED STOP, nothing deployed ==="
+fixture sheila-creator-dashboard promote
+: > "$FAKE/promote-inflight"; : > "$FAKE/promote-hang"; echo 0 > "$FAKE/promote-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
+LAND_WAIT_FLOOR_SECS=0 run_promote sheila-creator-dashboard
+check "rc 1" [ "$RC" -eq 1 ]
+check "NAMED STOP names the run" has "NAMED STOP [PROMOTE_RUN_PAST_CEILING] promote.yml run 777"
+check "the hung run was cancelled" [ -f "$FAKE/promote-cancelled" ]
+check "nothing deployed on top of it" [ ! -f "$FAKE/npm-ran" ]
+
+echo "=== 14. --run-e2e: the green e2e fires promote.yml; land waits for THAT run, does not double-deploy ==="
+fixture sheila-creator-dashboard promote
+: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
+run_promote sheila-creator-dashboard --run-e2e
+check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
+check "waited for the in-flight e2e run 800, did not dispatch" [ "$(grep -c '^run view 800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
+check "then waited for the promote run it triggered" has "promote run 777 in flight"
+check "NOTHING TO PROMOTE — promote.yml shipped the head" has "shipped main's head ${ORIGIN_MAIN:0:7}"
+check "no deploy from this side" [ ! -f "$FAKE/npm-ran" ]
+
+echo "=== negative proof: a land that does not wait for the promote run deploys on top of it ==="
+BROKEN="$W/land-no-wait"; sed '/^  promote_wait_inflight$/d' "$LAND" > "$BROKEN"
+check "the broken copy differs (the wait call was removed)" eval '! cmp -s "$LAND" "$BROKEN"'
+fixture sheila-creator-dashboard promote
+: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
+LAND="$BROKEN" run_promote sheila-creator-dashboard
+check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
+check "…without ever watching run 777" eval '! grep -q "^run view 777" "$FAKE/calls"'
+
 # Rule 0: this must have examined something.
-[ "$passes" -ge 30 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }
+[ "$passes" -ge 55 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-land-flow: $fails failure(s), $passes passed"; exit 1; }
-echo "test-land-flow: $passes checks passed — land leaves her tree alone and never reads could-not-check as an answer"
+echo "test-land-flow: $passes checks passed — land leaves her tree alone, never reads could-not-check as an answer, and never races a repo's own promote run"

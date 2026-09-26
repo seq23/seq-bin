@@ -82,5 +82,16 @@ the scripts those workflows call where a browser could hide behind an npm alias.
 
 - boss-os: `the-merge-gate-is-fast` fails with the journeys back in `ci.yml` and with `e2e.yml` on
   push (both tried, both red, both restored).
-- founder-dilution-dashboard: `gh workflow run e2e.yml --ref main` → green → `promote.yml` moved
-  `production` to main's head → Pages built it as production (see the seq-bin PR body for run ids).
+- founder-dilution-dashboard: `gh workflow run e2e.yml --ref main` → e2e run 36247662566 green →
+  promote run 36247746594 moved `production` to d5709fd → Pages built `production` as production
+  (14:13 UTC, dilution.joinwestpeek.com). Pages project `production_branch` = `production` since 14:08 UTC.
+- secondaries: e2e run 36247740094 green → promote run 36247788501 moved `production` to 0799587 →
+  Pages built it as production (14:13 UTC, venturedeals.joinwestpeek.com). `production_branch` switched 14:11 UTC.
+- justbeingmercedes: merge 688b533 → Deploy (push) published https://staging.justbeingmercedes.pages.dev;
+  production stayed on 254f6a1 until the dispatched e2e (run 36247845405) went green and Deploy (workflow_run 36247909014)
+  published 688b533 to justbeingmercedes.com.
+- boss-os: #50 landed with the OLD `land` (before this PR): main's fast CI went green in ~4 min, no
+  Deploy run fired (deploy.yml now waits for e2e), production stayed on f92f9db — but `land` printed
+  "the Deploy workflow shipped it" from the previous commit's Deploy run. That sentence is the bug the
+  E2E_WF guard in this PR removes; boss-os's first production move is the 07:00 UTC nightly (or
+  `land --promote boss-os --run-e2e`).

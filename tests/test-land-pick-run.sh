@@ -49,5 +49,11 @@ rm "$WORK/repo/.github/workflows/deploy.yml"
 check "no deploy.yml: the newest matching run, as before" 301 "$(run_case '.headSha == "bbb" and .event == "push"')"
 printf 'name: Deploy\non:\n  workflow_run:\n    workflows: ["CI"]\n' > "$WORK/repo/.github/workflows/deploy.yml"
 check "a quoted workflow name is read the same" 300 "$(run_case '.headSha == "bbb" and .event == "push"')"
+# 26 Sep 2026: a route that names its full e2e workflow (E2E_WF) never watches that run as "main":
+# no deploy.yml, the e2e listed newer, and the fast check is still the run picked.
+rm "$WORK/repo/.github/workflows/deploy.yml"
+run_case_e2e() { ( cd "$WORK/repo" && PATH="$WORK/bin:$PATH" && export E2E_WF=Playwright && eval "$BLOCK" && pick_run "$1" ); }
+check "E2E_WF set, no deploy.yml: the fast check, never the e2e run" 300 "$(run_case_e2e '.headSha == "bbb" and .event == "push"')"
+check "E2E_WF set, a sha with only an e2e run: empty (nothing to judge the merge on)" "" "$(run_case_e2e '.headSha == "ccc" and .name == "Playwright"')"
 [ "$fails" -eq 0 ] || { echo "test-land-pick-run: $fails failure(s)"; exit 1; }
-echo "test-land-pick-run: 7 cases passed — land watches the gate run on a two-workflow main"
+echo "test-land-pick-run: 9 cases passed — land watches the gate run on a two-workflow main, never the e2e run"

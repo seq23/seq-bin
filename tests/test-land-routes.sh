@@ -34,6 +34,7 @@ p-n-p|self
 justbeingmercedes|self
 local-guides-generator|self
 sheila-creator-dashboard|npm run deploy:production
+mercedes-creator-dashboard|npm run deploy:production
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
@@ -55,9 +56,16 @@ case "$got" in DIED:*) echo "  ok   unknown repo stops: ${got#DIED: }" ;; *) ech
 # 26 Sep 2026: the build-first repo carries a staging command and names its full e2e workflow,
 # so land deploys staging on every merge and holds production for a green e2e on the sha.
 # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
-staged="$( ( NAME=sheila-creator-dashboard; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
-if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   sheila-creator-dashboard stages (npm run deploy:staging) and waits for e2e"
-else echo "  FAIL sheila-creator-dashboard route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
+# mercedes-creator-dashboard (26 Sep 2026) is the same shape: stages on every land, waits for e2e,
+# smokes its own custom domain (never Sheila's URL).
+for build_first in sheila-creator-dashboard mercedes-creator-dashboard; do
+  staged="$( ( NAME=$build_first; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
+  if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   $build_first stages (npm run deploy:staging) and waits for e2e"
+  else echo "  FAIL $build_first route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
+done
+smoke="$( ( NAME=mercedes-creator-dashboard; DEPLOY=""; SELF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$SMOKE" ) )"
+if [ "$smoke" = "https://dashboard.justbeingmercedes.com/healthz" ]; then echo "  ok   mercedes-creator-dashboard smokes its own domain"
+else echo "  FAIL mercedes-creator-dashboard smoke: got '$smoke'"; fails=$((fails+1)); fi
 # 26 Sep 2026: boss-os names its full e2e workflow (no staging target), so land holds production
 # for a green `e2e` on the sha and `land --promote boss-os` ships it. And a route with E2E_WF must
 # not take the "wait for the Deploy run" branch: that deploy.yml fires on e2e now, and the newest

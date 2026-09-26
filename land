@@ -163,6 +163,10 @@ case "$NAME" in
   # 26 Sep 2026: staging on every land; production waits for the `e2e` workflow (jobs e2e,
   # e2e-open, help-screenshots — nightly 08:00 UTC + workflow_dispatch) on the exact sha.
   sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://sheilastudio.seq-taylor.workers.dev/healthz" ;;
+  # Mercedes Studio (seq23/mercedes-creator-dashboard): a full-history copy of Sheila's dashboard for
+  # Mercedes Asare, same shape (check.yml gate, staging on every land, promote.yml on a green nightly
+  # e2e). Worker `mercedesstudio` at https://dashboard.justbeingmercedes.com. Added 26 Sep 2026.
+  mercedes-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://dashboard.justbeingmercedes.com/healthz" ;;
   # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, so fast-forwarding it IS the deploy
   # (step 5 does it without touching any file she has changed, or stops and says why).
   # Added 21 Sep 2026 with seq-bin #4.

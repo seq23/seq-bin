@@ -66,9 +66,12 @@ else echo "  FAIL sheila-creator-dashboard route: expected 'npm run deploy:stagi
 bossed="$( ( NAME=boss-os; DEPLOY=""; SELF=""; STAGING=""; E2E_WF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
 if [ "$bossed" = "|e2e" ]; then echo "  ok   boss-os waits for e2e (no staging target)"
 else echo "  FAIL boss-os route: expected '|e2e', got '$bossed'"; fails=$((fails+1)); fi
-if grep -q 'if \[ -f ".github/workflows/deploy.yml" \] && \[ -z "\$E2E_WF" \]; then' "$LAND"; then
-  echo "  ok   a route with E2E_WF never waits for a Deploy run on green main"
-else echo "  FAIL land waits for a Deploy run even when the route names E2E_WF (deploy.yml fires on e2e, not CI)"; fails=$((fails+1)); fi
+# The guard reads deploy.yml from origin/main (never the working tree: her checkout may be on any
+# branch, #14) AND skips routes with E2E_WF (deploy.yml fires on e2e, not CI, #18). Both, on one line.
+if grep -q '^if git cat-file -e origin/main:.github/workflows/deploy.yml 2>/dev/null && \[ -z "\$E2E_WF" \]; then' "$LAND" \
+   && ! grep -q 'if \[ -f ".github/workflows/deploy.yml" \]' "$LAND"; then
+  echo "  ok   a route with E2E_WF never waits for a Deploy run on green main, and deploy.yml is read from origin/main"
+else echo "  FAIL land waits for a Deploy run even when the route names E2E_WF, or reads deploy.yml from the working tree instead of origin/main"; fails=$((fails+1)); fi
 # The three self-deploying repos that moved to build-first say so in their SELF sentence, so the
 # "5/5" line an operator reads names staging and the promote path, not "on push to main".
 for r in secondaries founder-dilution-dashboard justbeingmercedes; do

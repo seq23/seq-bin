@@ -156,7 +156,7 @@ If anything is still red it runs you AGAIN in this same session, handing you wha
 merged and the fact that it did not work. **Rounds continue while they make progress** —
 a red lane went away, or a red lane's failure signature changed (a new root cause
 surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget
-ends it as TIMEOUT. **This run never retries itself**: if it does not end MAIN-GREEN, a
+ends it as UNFINISHED, with the exact unfinished list carried to the next run. **This run never retries itself**: if it does not end MAIN-GREEN, a
 separate 08:00 check (`ci-sweep-retry-if-red.sh`) runs the whole sweep again exactly once;
 a second non-green ending waits for tomorrow's 07:00 run, briefed with what both tries did.
 
@@ -229,7 +229,7 @@ the answer is "everything is green".
 **This sentinel now means only "I reached my end."** It no longer decides how the sweep is
 reported. After the last round the wrapper writes the last line of the log — the verdict
 (`MAIN-GREEN`, `MAIN-PENDING`, `MAIN-RED-BLOCKED` (only parked repos still red),
-`MAIN-RED-STUCK`, `MAIN-RED-TIMEOUT`, `MAIN-RED-TEMPFIX`, `MAIN-RED-HUNG`,
+`MAIN-RED-STUCK`, `MAIN-RED-UNFINISHED` (work left: budget ran out, a merged fix whose lane has not re-run, or a fix PR still open), `MAIN-RED-KILLED`, `MAIN-RED-TEMPFIX`, `MAIN-RED-HUNG`,
 `MAIN-RED-INTERRUPTED` or `MAIN-UNKNOWN`) and the morning summary (green / fixed with PR
 numbers / parked with the decision needed / stuck) — from what GitHub says, not from what
 you say. It goes to her as a banner every morning. **Writing `fixed` over a lane that is

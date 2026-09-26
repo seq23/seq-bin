@@ -75,6 +75,9 @@ POLL_SECS="${CI_SWEEP_POLL_SECS:-30}"
 # Consecutive rounds with no progress before the run is STUCK. Two rounds that
 # moved nothing is evidence about the problem, not about effort.
 NO_PROGRESS_LIMIT="${CI_SWEEP_NO_PROGRESS_LIMIT:-2}"
+# Repos whose lanes the sweep never dispatches by hand: how-we-know's loop lanes
+# move live loop state, which is off-limits to the sweep (ci-sweep-prompt.md).
+NO_DISPATCH_REPOS="${CI_SWEEP_NO_DISPATCH_REPOS:-how-we-know}"
 
 # SLEEP_GAP 180s: the sentry ticks every 20s; a gap of more than 9 ticks between two
 # of its own stamps means the Mac was asleep, not that the sweep was slow.
@@ -112,6 +115,15 @@ GH_OWNER="${CI_SWEEP_GH_OWNER:-seq23}"
 STATE_DIR="$LOG_DIR/state"
 LEDGER="$STATE_DIR/outcomes.tsv"
 NEXT_CARRY="$STATE_DIR/carryover-next.md"
+#   fixed-unverified.tsv  repo \t workflow \t failing run id \t note — lanes whose fix
+#                      merged but which have NOT run on main since. Read by the next run
+#                      so it neither re-works them nor calls them green; an entry lapses
+#                      the moment the lane's latest run is a different one.
+FIXED_UNVERIFIED="$STATE_DIR/fixed-unverified.tsv"
+#   unfinished-prs.tsv repo \t num \t branch \t title — the sweep's own fix PRs still
+#                      open when a run ended. The next run resumes them: its merge pass
+#                      lands any that are green, and DONE requires none left open.
+UNFINISHED_PRS="$STATE_DIR/unfinished-prs.tsv"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
@@ -157,6 +169,21 @@ sweep_prs_opened_this_run() {
     gh pr list --repo "$GH_OWNER/$repo" --state open --limit 30 --json number,createdAt,title,headRefName,isDraft \
       --jq ".[] | select(.createdAt >= \"$since\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null
   done
+  # The previous run's unfinished fix PRs are this run's to finish, while still open.
+  [ -s "$WORK/carried-prs.tsv" ] || return 0
+  while IFS=$'\t' read -r repo num _; do
+    [ -z "$num" ] && continue
+    gh pr view "$num" --repo "$GH_OWNER/$repo" --json state,number,title,headRefName,isDraft \
+      --jq "select(.state==\"OPEN\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null </dev/null
+  done < "$WORK/carried-prs.tsv"
+}
+# The fix PRs that keep a run from being DONE: open, the sweep's own, not rejected.
+unfinished_prs() {
+  sweep_prs_opened_this_run | sort -u | while IFS=$'\t' read -r repo num branch title; do
+    [ -z "$num" ] && continue
+    grep -qE "^$repo#$num	" "$WORK/rejected" 2>/dev/null && continue
+    printf '%s\t%s\t%s\t%s\n' "$repo" "$num" "$branch" "$title"
+  done
 }
 pr_note() {   # repo num marker body — one note per PR per marker
   local repo="$1" num="$2" marker="$3" body="$4"
@@ -180,8 +207,8 @@ park_open_prs() {
     printf '%s#%s\t%s\t%s\n' "$repo" "$num" "$branch" "$title" >> "$WORK/parked-prs"
     say "  PARKED PR $repo#$num ($branch): $why"
     pr_note "$repo" "$num" "[ci-sweep] PARKED — not landed work" \
-      "The sweep run that opened this pull request ended without merging it: $why. The sweep does not merge it later; the next sweep run (today's 08:00 retry if this run wasn't green, otherwise tomorrow's 07:00) is told about it and re-reads it. A person may close it or take it over. Run log: $RUN_LOG"
-  done < <(sweep_prs_opened_this_run)
+      "The sweep run that opened this pull request ended without merging it: $why. The next sweep run (today's 08:00 retry if this run wasn't green, otherwise tomorrow's 07:00) resumes it: it re-reads the checks and lands it if green, and cannot end green while it is open. A person may close it or take it over. Run log: $RUN_LOG"
+  done < <(sweep_prs_opened_this_run | sort -u)
   [ "$n" -eq 0 ] && say "  (no open PR of this run's to park in [$(tr '\n' ' ' < "$WORK/scope-repos" 2>/dev/null)])"
   return 0
 }
@@ -213,8 +240,16 @@ reject_audited_prs() {
 # green | pending | red | none. "none" — no checks at all — cannot be verified and
 # is never merged.
 pr_checks_state() {
-  local repo="$1" num="$2" buckets
-  buckets="$(gh pr checks "$num" --repo "$GH_OWNER/$repo" --json bucket --jq '.[].bucket' 2>/dev/null)"
+  local repo="$1" num="$2" buckets try
+  # A gh that fails (TLS handshake timeout, 5xx, rate limit) is asked again with
+  # backoff; only a gh that ANSWERED can say "no checks". Still unanswered after the
+  # tries is pending — could-not-check is neither green nor red (26 Sep 2026).
+  for try in 1 2 3 4; do
+    if buckets="$(gh pr checks "$num" --repo "$GH_OWNER/$repo" --json bucket --jq '.[].bucket' 2>/dev/null)"; then break; fi
+    [ -n "$buckets" ] && break
+    [ "$try" -eq 4 ] && { echo pending; return; }
+    sleep "$(( try * 5 < POLL_SECS * 2 ? try * 5 : POLL_SECS * 2 ))"
+  done
   if [ -z "$buckets" ]; then echo none; return; fi
   if printf '%s\n' "$buckets" | grep -qx pending; then echo pending; return; fi
   if printf '%s\n' "$buckets" | grep -qvxE 'pass|skipping'; then echo red; return; fi
@@ -253,10 +288,22 @@ watch_merged_main() {
     sleep "$POLL_SECS"
   done
 }
+# land's exit code for "GitHub did not answer, nothing merged" (land: LAND_RC_UNVERIFIED).
+# Folded in from seq-bin #14 (the land side lives there).
+LAND_RC_UNVERIFIED=75
+LAND_AGAIN_SECS="${CI_SWEEP_LAND_AGAIN_SECS:-60}"
+land_pr() { # repo num -> land's rc; its output goes to the run log with a [land] prefix
+  local repo="$1" num="$2" rc
+  ( cd "$GITHUB_DIR/$repo" && { timeout --signal=TERM --kill-after=30 "$(capped "$MAIN_WATCH_CAP_MIN")m" "$LAND" "$num" &
+      tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; rc=$?; forget_pgid "$tpid"; exit "$rc"; } ) \
+    > "$WORK/land-$repo-$num.log" 2>&1; rc=$?
+  sed 's/^/    [land] /' "$WORK/land-$repo-$num.log" >> "$RUN_LOG"
+  return "$rc"
+}
 merge_pass() {
   local round="$1" repo num branch title ref st head sha route rc until_ts cap
   local cands="$WORK/merge-candidates-$round.tsv" watch="$WORK/merge-watch-$round.tsv"
-  sweep_prs_opened_this_run > "$cands"; : > "$watch"
+  sweep_prs_opened_this_run | sort -u > "$cands"; : > "$watch"
   if [ ! -s "$cands" ]; then say "merge pass: no open PR of this run's to consider"; return 0; fi
   cap="$(capped "$MERGE_CHECKS_CAP_MIN")"; until_ts=$(( $(date +%s) + cap * 60 ))
   while IFS=$'\t' read -r repo num branch title; do
@@ -284,11 +331,21 @@ merge_pass() {
     route="$(merge_route "$repo")"
     if [ "$route" = land ]; then
       say "  $ref: checks green (gh pr checks) — landing with \`land $num\` (merges, watches main, deploys)"
-      ( cd "$GITHUB_DIR/$repo" && timeout --signal=TERM --kill-after=30 "$(capped "$MAIN_WATCH_CAP_MIN")m" "$LAND" "$num" ) \
-        > "$WORK/land-$repo-$num.log" 2>&1; rc=$?
-      sed 's/^/    [land] /' "$WORK/land-$repo-$num.log" >> "$RUN_LOG"
+      land_pr "$repo" "$num"; rc=$?
       sha="$(gh pr view "$num" --repo "$GH_OWNER/$repo" --json state,mergeCommit --jq 'select(.state=="MERGED") | .mergeCommit.oid' 2>/dev/null)"
-      if [ -z "$sha" ]; then
+      # COULD NOT VERIFY IS NOT A REFUSAL. 26 Sep 2026, horse-legal-guide-velocity #35: one TLS
+      # handshake timeout and land refused a green PR, and the sweep left it unmerged for the day.
+      # land now retries its own reads and, when GitHub still does not answer, exits
+      # LAND_RC_UNVERIFIED (75) having merged nothing — so land it once more after a pause.
+      if [ -z "$sha" ] && [ "$rc" -eq "$LAND_RC_UNVERIFIED" ]; then
+        say "  $ref: land could not verify it (network/API, rc=$rc) and merged nothing — landing it once more in ${LAND_AGAIN_SECS}s"
+        sleep "$LAND_AGAIN_SECS"
+        land_pr "$repo" "$num"; rc=$?
+        sha="$(gh pr view "$num" --repo "$GH_OWNER/$repo" --json state,mergeCommit --jq 'select(.state=="MERGED") | .mergeCommit.oid' 2>/dev/null)"
+      fi
+      if [ -z "$sha" ] && [ "$rc" -eq "$LAND_RC_UNVERIFIED" ]; then
+        say "  $ref: land could not verify it twice (rc=$rc: GitHub did not answer) — not merged, NOT judged red; the next merge pass reads it again"
+      elif [ -z "$sha" ]; then
         say "  $ref: land refused (rc=$rc) — not merged; see [land] lines above"
       else
         printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$num" "$sha" land "main:$([ "$rc" -eq 0 ] && echo success || echo "land-rc-$rc")" >> "$WORK/merged.tsv"
@@ -327,15 +384,17 @@ build_summary() {
     return 0
   fi
   cls="$WORK/classified.tsv"
-  awk -F'\t' -v first="$first" -v parked="$WORK/parked-repos.tsv" -v merged="$WORK/merged.tsv" '
+  awk -F'\t' -v first="$first" -v parked="$WORK/parked-repos.tsv" -v merged="$WORK/merged.tsv" -v unv="$WORK/unverified.tsv" '
     BEGIN {
+      while ((getline l < unv) > 0)    { split(l, a, "\t"); uv[a[2] SUBSEP a[3]]=1 }
       while ((getline l < first) > 0)  { split(l, a, "\t"); if (a[1]=="RED" || a[1]=="SILENT") startred[a[2]]=1 }
       while ((getline l < parked) > 0) { split(l, a, "\t"); if (!(a[1] in pk)) pk[a[1]]=a[2] }
       while ((getline l < merged) > 0) { split(l, a, "\t"); prs[a[1]] = prs[a[1]] (prs[a[1]] ? ", " : "") "#" a[2] }
     }
     NF >= 2 && $1 ~ /^(GREEN|RED|SILENT|PENDING|QUIET|NOCI)$/ {
       seen[$2]=1
-      if ($1=="RED" || $1=="SILENT") { red[$2]=1; lanes[$2] = lanes[$2] (lanes[$2] ? "; " : "") $3 " " $1 }
+      if (($1=="RED" || $1=="SILENT") && (($2 SUBSEP $3) in uv)) { ured[$2]=1; ulanes[$2] = ulanes[$2] (ulanes[$2] ? "; " : "") $3 }
+      else if ($1=="RED" || $1=="SILENT") { red[$2]=1; lanes[$2] = lanes[$2] (lanes[$2] ? "; " : "") $3 " " $1 }
       if ($1=="PENDING") pend[$2]=1
     }
     END {
@@ -343,26 +402,101 @@ build_summary() {
         if (r in red) {
           if (r in pk) print "parked\t" r "\t" pk[r]
           else         print "stuck\t" r "\t" lanes[r] ((r in prs) ? " (merged " prs[r] ", still red)" : "")
-        } else if (r in pend) print "pending\t" r "\t" ((r in prs) ? prs[r] : "")
+        } else if (r in ured) print "unverified\t" r "\t" ulanes[r] " — fix " ((r in prs) ? prs[r] : "merged earlier") " merged, lane not yet re-run on main"
+        else if (r in pend) print "pending\t" r "\t" ((r in prs) ? prs[r] : "")
         else if (r in startred) print "fixed\t" r "\t" ((r in prs) ? prs[r] : "no PR merged by the sweep")
         else print "green\t" r "\t"
       }
     }' "$last" | sort > "$cls"
-  local g f p s pe
+  local g f p s pe u
   g="$(awk -F'\t' '$1=="green"{printf "%s%s", (n++?", ":""), $2}' "$cls")"
   f="$(awk -F'\t' '$1=="fixed"{printf "%s%s (%s)", (n++?", ":""), $2, $3}' "$cls")"
   p="$(awk -F'\t' '$1=="parked"{printf "%s%s — %s", (n++?"; ":""), $2, $3}' "$cls")"
   s="$(awk -F'\t' '$1=="stuck"{printf "%s%s — %s", (n++?"; ":""), $2, $3}' "$cls")"
   pe="$(awk -F'\t' '$1=="pending"{printf "%s%s", (n++?", ":""), $2}' "$cls")"
+  u="$(awk -F'\t' '$1=="unverified"{printf "%s%s — %s", (n++?"; ":""), $2, $3}' "$cls")"
   {
     echo "green ($(awk -F'\t' '$1=="green"' "$cls" | grep -c .)): ${g:-none}"
     echo "fixed this run: ${f:-none}"
     echo "parked on her decision: ${p:-none}"
     echo "stuck: ${s:-none}"
     [ -n "$pe" ] && echo "in flight (unproven, not red): $pe"
+    [ -n "$u" ] && echo "fixed-unverified (red on main until the lane re-runs): $u"
   } > "$WORK/summary.txt"
   SUMMARY_LINE="$(tr '\n' '|' < "$WORK/summary.txt" | sed 's/|$//; s/|/ | /g')"
-  awk -F'\t' -v OFS='\t' '$1=="parked"{print "PARKED", $2, $3} $1=="stuck"{print "STUCK", $2, $3}' "$cls" > "$WORK/issues.tsv"
+  awk -F'\t' -v OFS='\t' '$1=="parked"{print "PARKED", $2, $3} $1=="stuck"{print "STUCK", $2, $3} $1=="unverified"{print "UNVERIFIED", $2, $3}' "$cls" > "$WORK/issues.tsv"
+}
+
+# --- FIXED-UNVERIFIED: a merged fix is not a green lane ------------------------
+# 26 Sep 2026: round 1 merged fixes for schedule-only lanes (approvalprep's release,
+# how-we-know's loop) and round 2 was sent straight back at them, because the lane's
+# latest run on main was still the red one from BEFORE the fix. The lane is neither
+# green (nothing has run the fix) nor a fresh failure (nothing has run at all). It is
+# FIXED-UNVERIFIED: never green, never re-worked by a round. The sweep runs it on
+# main itself (dispatch_unverified) and waits for the result; one it may not or
+# cannot run (NO_DISPATCH_REPOS, no workflow_dispatch trigger) keeps the run from
+# ending green — MAIN-RED-UNFINISHED, carried to the next run. The verdict still
+# comes only from GitHub's latest run per lane at verdict time.
+#
+# A RED lane is FIXED-UNVERIFIED when its failing run id is unchanged since the probe
+# taken before the LAST merge into its repo this run, or when the previous run
+# recorded that same (repo, lane, run id) in $FIXED_UNVERIFIED. A lane that re-ran
+# and failed again carries a new run id and is plainly RED.
+# A finished `timeout`'s group leaves the list, so a recycled pid is never killed.
+forget_pgid() { grep -vxF "$1" "$WORK/child-pgids" > "$WORK/child-pgids.$1" 2>/dev/null; mv "$WORK/child-pgids.$1" "$WORK/child-pgids" 2>/dev/null; return 0; }
+run_id_of() { printf '%s' "$1" | grep -oE 'run #[0-9]+' | head -1 | tr -dc '0-9'; }
+unverified_lanes() { # <probe-out> -> the RED lines that are FIXED-UNVERIFIED, + a note column
+  awk -F'\t' -v OFS='\t' -v work="$WORK" -v mr="$WORK/merge-rounds.tsv" -v carried="$FIXED_UNVERIFIED" '
+    function runid(d) { if (match(d, /run #[0-9]+/)) return substr(d, RSTART + 5, RLENGTH - 5); return "" }
+    BEGIN {
+      while ((getline l < mr) > 0)      { split(l, a, "\t"); last[a[1]] = a[2]; pr[a[1]] = a[3] }
+      while ((getline l < carried) > 0) { split(l, a, "\t"); carry[a[1] SUBSEP a[2] SUBSEP a[3]] = a[4] }
+    }
+    $1 == "RED" {
+      id = runid($5); if (id == "") next
+      if (($2 SUBSEP $3 SUBSEP id) in carry) { print $1, $2, $3, $4, $5, carry[$2 SUBSEP $3 SUBSEP id] " (carried from the previous run; still no run since)"; next }
+      if (!($2 in last)) next
+      f = work "/probe-" (last[$2] - 1) ".tsv"; before = ""
+      while ((getline l < f) > 0) { split(l, a, "\t"); if (a[1] == "RED" && a[2] == $2 && a[3] == $3) before = runid(a[5]) }
+      close(f)
+      if (before == id) print $1, $2, $3, $4, $5, "fix #" pr[$2] " merged after round " last[$2] "; the lane has not run on main since (latest is still run #" id ")"
+    }' "$1"
+}
+
+# Runs each FIXED-UNVERIFIED lane once on main (`gh workflow run`, retried on a
+# transient error) so its fix is proven THIS run rather than at the next schedule.
+# Not for NO_DISPATCH_REPOS, not for a lane without a workflow_dispatch trigger (gh
+# refuses those), and at most once per lane per run. Prints how many it started.
+dispatch_unverified() {
+  local repo wf det n=0 try out old latest until_reg
+  while IFS=$'\t' read -r _ repo wf _ det _; do
+    [ -z "$repo" ] && continue
+    grep -qxF "$repo|$wf" "$WORK/dispatched.tsv" 2>/dev/null && continue
+    printf '%s|%s\n' "$repo" "$wf" >> "$WORK/dispatched.tsv"
+    if printf ' %s ' "$NO_DISPATCH_REPOS" | grep -qF " $repo "; then
+      say "  $repo / $wf: not dispatched — $repo is in NO_DISPATCH_REPOS; its next scheduled run is the proof"; continue
+    fi
+    for try in 1 2 3; do
+      if out="$(gh workflow run "$wf" --repo "$GH_OWNER/$repo" --ref main 2>&1 </dev/null)"; then
+        say "  $repo / $wf: dispatched on main to verify the merged fix"; n=$((n + 1))
+        # Wait (bounded) until GitHub lists a run newer than the failing one, so the
+        # next probe cannot read the old failure as the lane's latest and stop early.
+        old="$(run_id_of "$det")"; until_reg=$(( $(date +%s) + 180 ))
+        while [ "$(date +%s)" -lt "$until_reg" ]; do
+          latest="$(gh run list --repo "$GH_OWNER/$repo" --workflow "$wf" --branch main --limit 1 \
+                      --json databaseId --jq '.[0].databaseId' 2>/dev/null </dev/null)"
+          [ -n "$latest" ] && [ "$latest" != "$old" ] && break
+          sleep "$(( POLL_SECS < 10 ? POLL_SECS : 10 ))"
+        done
+        break
+      fi
+      if printf '%s' "$out" | grep -qiE 'timeout|timed out|TLS|5[0-9][0-9]|rate limit|connection'; then
+        sleep $(( try * 10 )); continue
+      fi
+      say "  $repo / $wf: cannot be dispatched ($(printf '%s' "$out" | head -1)) — its next scheduled run is the proof"; break
+    done
+  done < "$WORK/unverified.tsv"
+  echo "$n"
 }
 
 # What tomorrow's round 1 is told. Written by every non-green outcome.
@@ -375,6 +509,14 @@ write_next_carryover() {
     echo "# THE PREVIOUS DAILY RUN DID NOT REACH GREEN — read this before anything else"
     echo
     echo "Verdict of the last run ($RUN_ID): **$verdict** — $detail"
+    echo
+    echo "## UNFINISHED — resume from here (straight from GitHub at the end of the run)"
+    echo "Red lanes (repo / lane):"
+    grep -E '^(RED|SILENT)	' "$last_probe" 2>/dev/null | awk -F'\t' '{print "  - " $2 " / " $3 ": " $5}' || true
+    echo "Fixed but not yet re-run on main (do not re-work; the next run re-checks them):"
+    awk -F'\t' '{print "  - " $2 " / " $3 ": " $6}' "$WORK/unverified.tsv" 2>/dev/null || true
+    echo "The sweep's own fix PRs still open (the next run lands these if green):"
+    awk -F'\t' '{print "  - " $1 "#" $2 " (" $3 "): " $4}' "$UNFINISHED_PRS" 2>/dev/null || true
     echo
     echo "## Where the fleet stood when it ended"
     sed 's/^/- /' "$WORK/summary.txt" 2>/dev/null
@@ -432,13 +574,26 @@ conclude() {
   # Per-repo STUCK issues only when the fleet state was actually read at the end.
   # A hung, interrupted or could-not-run run files one run-level issue instead.
   case "$verdict" in
-    MAIN-RED-STUCK|MAIN-RED-TIMEOUT|MAIN-RED-BLOCKED) : ;;
+    MAIN-RED-STUCK|MAIN-RED-UNFINISHED|MAIN-RED-BLOCKED) : ;;
     *) grep -v '^STUCK	' "$WORK/issues.tsv" > "$WORK/issues.tsv.tmp" 2>/dev/null; mv "$WORK/issues.tsv.tmp" "$WORK/issues.tsv" ;;
   esac
   say "=== morning summary ==="
   sed 's/^/    /' "$WORK/summary.txt" | tee -a "$RUN_LOG"
   say "    verdict: $verdict — $detail"
   record_outcome "$verdict"
+  # The sweep's own fix PRs still open are carried to the next run to finish.
+  unfinished_prs > "$UNFINISHED_PRS.tmp" 2>/dev/null
+  if [ -s "$UNFINISHED_PRS.tmp" ]; then mv "$UNFINISHED_PRS.tmp" "$UNFINISHED_PRS"; else rm -f "$UNFINISHED_PRS.tmp" "$UNFINISHED_PRS"; fi
+  # Only a run that classified the fleet rewrites what it carries forward.
+  if [ -f "$WORK/unverified.tsv" ]; then
+    if [ -s "$WORK/unverified.tsv" ]; then
+      while IFS=$'\t' read -r _ repo wf _ det note; do
+        printf '%s\t%s\t%s\t%s\n' "$repo" "$wf" "$(run_id_of "$det")" "${note%% (carried*}"
+      done < "$WORK/unverified.tsv" > "$FIXED_UNVERIFIED"
+    else
+      rm -f "$FIXED_UNVERIFIED"
+    fi
+  fi
   if [ "$verdict" = "MAIN-GREEN" ]; then
     rm -f "$NEXT_CARRY"
   else
@@ -595,11 +750,14 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
       kill -TERM "-$holder" 2>/dev/null || kill -TERM "$holder" 2>/dev/null
       sleep 5
       kill -KILL "-$holder" 2>/dev/null || kill -KILL "$holder" 2>/dev/null
-      old_id="$(cat "$LOCK/run-id" 2>/dev/null || echo "")"
-      if [ -n "$old_id" ]; then
-        record_outcome "MAIN-RED-RECLAIMED" "$old_id"
-        say "recorded $old_id as MAIN-RED-RECLAIMED (it was killed here without a verdict)."
-      fi
+    fi
+    # Every run gets a ledger row, including one that died without a verdict (killed
+    # -9, a crash, a reboot): a missing row reads as "no run today" to the 08:00 gate
+    # and to today's own retry count.
+    old_id="$(cat "$LOCK/run-id" 2>/dev/null || echo "")"
+    if [ -n "$old_id" ] && ! awk -F'\t' -v id="$old_id" '$4==id{f=1} END{exit !f}' "$LEDGER" 2>/dev/null; then
+      record_outcome "MAIN-RED-RECLAIMED" "$old_id"
+      say "recorded $old_id as MAIN-RED-RECLAIMED (it ended without a verdict)."
     fi
     rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { say "FAILED to take lock"; exit 3; }
   fi
@@ -608,6 +766,11 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   echo "$STARTED_AT" > "$LOCK/started"
   date +%s > "$LOCK/heartbeat"
   release_lock() { [ "$(cat "$LOCK/pid" 2>/dev/null || echo)" = "$$" ] && rm -rf "$LOCK"; }
+  # latest.log names the run IN FLIGHT, from its first line (26 Sep 2026: it still
+  # pointed at yesterday's MAIN-GREEN log while today's run was in round 2, so a
+  # reader took yesterday's verdict for today's and called a live run "lingering").
+  # conclude() points it here again; a run without a verdict line is still running.
+  ln -sfn "$RUN_LOG" "$LOG_DIR/latest.log"
 
   say "=== CI sweep supervisor: convergence budget ${DEADLINE_MIN} min, hard kill at ${HARD_KILL_MIN} awake min ($(at_time "$KILL_AT" +%H:%M)) ==="
 
@@ -616,6 +779,13 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   /usr/bin/python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
       /bin/bash "$0" "$@" &
   BODY=$!
+  # The body's group AND every group a `timeout` in it opened (see run_round).
+  kill_body_tree() {
+    local sig="$1" g
+    kill "-$sig" "-$BODY" 2>/dev/null
+    while read -r g; do [ -n "$g" ] && kill "-$sig" "-$g" 2>/dev/null; done < "$WORK/child-pgids" 2>/dev/null
+    return 0
+  }
 
   # THE SENTRY: heartbeat, watchdog and sleep detector in one loop. The ceiling is
   # counted in TICKS (awake time), never read from the wall clock (2026-09-21: a
@@ -633,16 +803,35 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
       echo "$now" >> "$WORK/heartbeats"
       if [ $(( now - prev )) -gt "$SLEEP_GAP_SECS" ]; then
         echo "no heartbeat for $(( now - prev ))s, from $(at_time "$prev" +%H:%M:%S) to $(at_time "$now" +%H:%M:%S) — the Mac was asleep" > "$WORK/interrupted"
-        kill -TERM "-$BODY" 2>/dev/null; sleep 20; kill -KILL "-$BODY" 2>/dev/null; exit 0
+        kill_body_tree TERM; sleep 20; kill_body_tree KILL; exit 0
       fi
       prev="$now"
       if [ "$ticks" -ge "$limit" ]; then
         echo "$ticks ticks of ${TICK_SECS}s awake" > "$WORK/hung"
-        kill -TERM "-$BODY" 2>/dev/null; sleep 20; kill -KILL "-$BODY" 2>/dev/null; exit 0
+        kill_body_tree TERM; sleep 20; kill_body_tree KILL; exit 0
       fi
     done ) >/dev/null 2>&1 & SENTRY=$!
 
+  # EVERY RUN LEAVES A LEDGER ROW (26 Sep 2026). A supervisor that is itself killed
+  # (launchctl unload, a logout, a kill from a session) ends the body and records
+  # MAIN-RED-KILLED; the EXIT trap backstops any other path out. Only kill -9 escapes
+  # both, and the next run's lock reclaim records that one.
+  ledger_has_row() { awk -F'\t' -v id="$RUN_ID" '$4==id{f=1} END{exit !f}' "$LEDGER" 2>/dev/null; }
+  on_supervisor_signal() {
+    trap - TERM INT HUP
+    kill_body_tree TERM; sleep 3; kill_body_tree KILL
+    kill "${SENTRY:-}" 2>/dev/null
+    say "=== KILLED: the supervisor received a signal; the body was ended ==="
+    conclude "MAIN-RED-KILLED" "the sweep was killed from outside before it reached a verdict (a signal to the supervisor). Main's state is UNVERIFIED — treat it as red. Its open PRs are carried to the next run."
+    release_lock
+    exit 23
+  }
+  trap on_supervisor_signal TERM INT HUP
+  trap 'ledger_has_row || record_outcome "MAIN-RED-KILLED"' EXIT
+
   wait "$BODY"; RC=$?
+  # A trapped signal interrupts wait with rc>128 before the handler runs; the
+  # handler exits, so reaching here means the body really ended.
   disown "$SENTRY" 2>/dev/null
   kill "$SENTRY" 2>/dev/null
   ELAPSED=$(( $(date +%s) - STARTED_AT ))
@@ -651,7 +840,7 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   BODY_VERDICT="$(cat "$WORK/verdict" 2>/dev/null || echo "")"
 
   if [ -f "$WORK/interrupted" ] && [ "$BODY_VERDICT" != "MAIN-GREEN" ]; then
-    kill -KILL "-$BODY" 2>/dev/null
+    kill_body_tree KILL
     say "=== INTERRUPTED: $(cat "$WORK/interrupted") (rc=$RC, ${ELAPSED}s wall, ${AWAKE}s awake) ==="
     say "--- parking anything the cut-off round left open ---"
     park_open_prs "the Mac slept mid-round ($(cat "$WORK/interrupted"))"
@@ -661,7 +850,7 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   fi
 
   if [ -f "$WORK/hung" ] || [ "$AWAKE" -ge $(( HARD_KILL_MIN * 60 )) ] || [ "$RC" -eq 143 ] || [ "$RC" -eq 137 ]; then
-    kill -KILL "-$BODY" 2>/dev/null
+    kill_body_tree KILL
     say "=== HUNG: the sweep did not finish within ${HARD_KILL_MIN} awake minutes and was killed from outside (rc=$RC, ${AWAKE}s awake of ${ELAPSED}s) ==="
     say "--- parking anything the killed round left open ---"
     park_open_prs "the sweep hung and was killed at its ${HARD_KILL_MIN}-minute ceiling"
@@ -715,7 +904,15 @@ round=0
 no_progress=0
 prev_keys=""          # unparked red lanes (repo|workflow) at the previous probe
 prev_sigs=""          # their failure signatures
-: > "$WORK/parked-repos.tsv"; : > "$WORK/scope-repos"; : > "$WORK/merged.tsv"
+: > "$WORK/parked-repos.tsv"; : > "$WORK/scope-repos"; : > "$WORK/merged.tsv"; : > "$WORK/merge-rounds.tsv"
+: > "$WORK/dispatched.tsv"; : > "$WORK/carried-prs.tsv"
+final_passes=0        # merge passes run at the green point for fix PRs still open
+skip_progress=0       # the last iteration only dispatched lanes; no round ran
+if [ -s "$UNFINISHED_PRS" ]; then
+  cp "$UNFINISHED_PRS" "$WORK/carried-prs.tsv"
+  cut -f1 "$WORK/carried-prs.tsv" >> "$WORK/scope-repos"
+  say "resuming $(grep -c . "$WORK/carried-prs.tsv") fix PR(s) the previous run left open: $(awk -F'\t' '{printf "%s#%s ", $1, $2}' "$WORK/carried-prs.tsv")"
+fi
 PROGRESS_LOG="$WORK/progress.tsv"; : > "$PROGRESS_LOG"
 
 while :; do
@@ -731,13 +928,54 @@ while :; do
   RED_LINES="$(printf '%s\n' "$ALL_RED" | awk -F'\t' -v pf="$WORK/parked-repos.tsv" '
     BEGIN { while ((getline l < pf) > 0) { split(l, a, "\t"); pk[a[1]]=1 } }
     NF && !($2 in pk)')"
+  # FIXED-UNVERIFIED lanes leave the working set (see unverified_lanes); they stay
+  # in ALL_RED, so they can never be counted green.
+  unverified_lanes "$PROBE_OUT" > "$WORK/unverified.tsv"
+  if [ -s "$WORK/unverified.tsv" ]; then
+    say "$(grep -c . "$WORK/unverified.tsv") lane(s) FIXED-UNVERIFIED — fix merged, lane not re-run on main; not green, not worked again:"
+    awk -F'\t' '{print "    " $2 " / " $3 ": " $6}' "$WORK/unverified.tsv" | tee -a "$RUN_LOG"
+    RED_LINES="$(printf '%s\n' "$RED_LINES" | awk -F'\t' -v uf="$WORK/unverified.tsv" '
+      BEGIN { while ((getline l < uf) > 0) { split(l, a, "\t"); u[a[2] SUBSEP a[3]]=1 } }
+      NF && !(($2 SUBSEP $3) in u)')"
+  fi
 
   if [ -z "$ALL_RED" ]; then
     if [ "$PRC" -eq 2 ]; then
       PENDING_LINES="$(grep -E '^PENDING	' "$PROBE_OUT" || true)"
       finish "MAIN-PENDING" "nothing is red, but $(printf '%s\n' "$PENDING_LINES" | grep -c .) lane(s) had not reached a terminal state at the ${VERIFY_CAP_MIN}-minute cap: $(printf '%s\n' "$PENDING_LINES" | cut -f2,3 | tr '\t' '/' | tr '\n' ';'). Unproven, not red."
     fi
-    finish "MAIN-GREEN" "all $(grep -cE '^GREEN	' "$PROBE_OUT") lane(s) green on main after $round fixing round(s)."
+    # DONE is a checked condition, not a belief: every lane green on GitHub AND none
+    # of the sweep's own fix PRs still open. A green fix PR nobody merged is work left.
+    OPEN_PRS="$(unfinished_prs)"
+    if [ -n "$OPEN_PRS" ]; then
+      if [ "$final_passes" -lt 2 ] && [ "$(remaining_min)" -ge 5 ]; then
+        final_passes=$((final_passes + 1))
+        say "every lane is green, but $(printf '%s\n' "$OPEN_PRS" | grep -c .) fix PR(s) of the sweep's are still open — landing them before calling it done (pass $final_passes of 2):"
+        printf '%s\n' "$OPEN_PRS" | awk -F'\t' '{print "    " $1 "#" $2 " (" $3 ")"}' | tee -a "$RUN_LOG"
+        merged_before="$(grep -c . "$WORK/merged.tsv")"
+        merge_pass "final-$final_passes"
+        tail -n +"$((merged_before + 1))" "$WORK/merged.tsv" | awk -F'\t' -v OFS='\t' -v r="$round" 'NF{print $1, r + 1, $2}' >> "$WORK/merge-rounds.tsv"
+        skip_progress=1
+        continue
+      fi
+      park_open_prs "every lane on main was green but the sweep could not land this PR"
+      finish "MAIN-RED-UNFINISHED" "every lane on main is green, but the sweep's own fix PR(s) are still open after $final_passes landing pass(es): $(printf '%s\n' "$OPEN_PRS" | awk -F'\t' '{printf "[%s] #%s (%s); ", $1, $2, $3}')the next run resumes them."
+    fi
+    finish "MAIN-GREEN" "all $(grep -cE '^GREEN	' "$PROBE_OUT") lane(s) green on main after $round fixing round(s), and no fix PR of the sweep's left open."
+  fi
+  # Lanes whose fix merged are run on main now, not left to the next schedule.
+  if [ -s "$WORK/unverified.tsv" ] && [ "$(remaining_min)" -ge 10 ]; then
+    started_n="$(dispatch_unverified | tail -1)"
+    if [ -z "$RED_LINES" ] && [ "${started_n:-0}" -gt 0 ]; then
+      say "  waiting for the $started_n dispatched lane(s) to reach a terminal state (the probe waits on in-flight runs)"
+      sleep "$(( POLL_SECS < 20 ? POLL_SECS : 20 ))"   # let GitHub register the run
+      skip_progress=1
+      continue
+    fi
+  fi
+  if [ -z "$RED_LINES" ] && [ -s "$WORK/unverified.tsv" ]; then
+    park_open_prs "the run ended with fixes merged but their lanes not yet re-run on main"
+    finish "MAIN-RED-UNFINISHED" "every lane still red has its fix merged but has not run on main since, and the sweep could not run it here — main is NOT verified green: $(awk -F'\t' '{printf "[%s] %s — %s; ", $2, $3, $6}' "$WORK/unverified.tsv")$( [ -s "$WORK/parked-repos.tsv" ] && printf 'parked: %s' "$(awk -F'\t' '{printf "[%s] %s; ", $1, $2}' "$WORK/parked-repos.tsv")")The next run re-checks each lane from GitHub."
   fi
   if [ -z "$RED_LINES" ]; then
     park_open_prs "its repo is parked on her decision, so the sweep did not merge it"
@@ -759,7 +997,9 @@ while :; do
   # root cause surfaced). Parking a repo removes its lanes, which counts.
   cur_keys="$(printf '%s\n' "$RED_LINES" | awk -F'\t' 'NF{print $2 "|" $3}' | sort -u)"
   cur_sigs="$(printf '%s\n' "$RED_LINES" | cut -f4 | grep . | sort -u)"
-  if [ "$round" -gt 0 ]; then
+  if [ "$round" -gt 0 ] && [ "$skip_progress" -eq 1 ]; then
+    : # the last iteration dispatched lanes or landed PRs; no round ran to judge
+  elif [ "$round" -gt 0 ]; then
     gone="$(comm -23 <(printf '%s\n' "$prev_keys" | grep .) <(printf '%s\n' "$cur_keys" | grep .) | tr '\n' ' ')"
     newsig="$(comm -13 <(printf '%s\n' "$prev_sigs" | grep .) <(printf '%s\n' "$cur_sigs" | grep .) | tr '\n' ' ')"
     if [ -n "${gone// /}" ] || [ -n "${newsig// /}" ]; then
@@ -772,7 +1012,8 @@ while :; do
       printf '%s\tnone\t%s\n' "$round" "$no_progress" >> "$PROGRESS_LOG"
     fi
   fi
-  prev_keys="$cur_keys"; prev_sigs="$cur_sigs"
+  [ "$skip_progress" -eq 1 ] || { prev_keys="$cur_keys"; prev_sigs="$cur_sigs"; }
+  skip_progress=0
 
   # --- stops ----------------------------------------------------------------------
   if [ "$no_progress" -ge "$NO_PROGRESS_LIMIT" ]; then
@@ -782,7 +1023,7 @@ while :; do
   LEFT="$(remaining_min)"
   if [ "$LEFT" -lt 10 ]; then
     park_open_prs "the run reached its ${DEADLINE_MIN}-minute budget before this PR's fix was verified"
-    finish "MAIN-RED-TIMEOUT" "$RED_COUNT lane(s) still red in [$RED_REPOS]; the ${DEADLINE_MIN}-minute budget was reached after $round round(s)."
+    finish "MAIN-RED-UNFINISHED" "$RED_COUNT lane(s) still red in [$RED_REPOS]; the ${DEADLINE_MIN}-minute budget was reached after $round round(s) with work left. The unfinished list is in the carryover; the next run resumes from it."
   fi
 
   # --- brief the next round ------------------------------------------------------
@@ -857,6 +1098,15 @@ while :; do
       echo "it with the one-line CI-SWEEP-PARKED form and keep going on the others."
     } > "$CARRY"
   fi
+  if [ -s "$WORK/unverified.tsv" ]; then
+    {
+      echo
+      echo "## FIXED-UNVERIFIED — do NOT work these lanes; their fix is merged"
+      echo "Each is red on main only because it has not run since its fix merged. Re-working"
+      echo "it is wasted budget; the lane's next scheduled run is the proof."
+      awk -F'\t' '{print "  - " $2 " / " $3 ": " $6}' "$WORK/unverified.tsv"
+    } >> "$CARRY"
+  fi
 
   # Background-agent ceiling strictly inside the round cap: 50 of 60, 32 of 40. A
   # ceiling larger than the cap means the round is always killed from outside while
@@ -876,11 +1126,15 @@ $(cat "$CARRY")"
   # (2026-09-20: two capped rounds, two 0-byte logs). MODEL PINNED: --model opus on
   # every invocation — without it the sweep silently ran on whatever /model she last
   # chose. ci-sweep-selftest.sh fails if any `"$CLAUDE" -p` line lacks it.
+  # GNU timeout puts itself in a NEW process group, so killing the body's group
+  # never reached a round's claude (26 Sep 2026: a killed sweep would leave its
+  # round running). Its pid is its pgid; it is recorded for the supervisor to end.
   run_round() {
-    timeout --signal=TERM --kill-after=60 "${CAP}m" \
-      "$CLAUDE" -p "$ROUND_PROMPT" --model opus "$@" \
-      --output-format stream-json --verbose \
-      --dangerously-skip-permissions < /dev/null 2>&1 | python3 "$STREAM" > "$ROUND_LOG"
+    { timeout --signal=TERM --kill-after=60 "${CAP}m" \
+        "$CLAUDE" -p "$ROUND_PROMPT" --model opus "$@" \
+        --output-format stream-json --verbose \
+        --dangerously-skip-permissions < /dev/null 2>&1 &
+      tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; rc=$?; forget_pgid "$tpid"; exit "$rc"; } | python3 "$STREAM" > "$ROUND_LOG"
   }
   if [ "$round" -eq 1 ]; then
     SESSION_ID="$( (uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())') | tr 'A-Z' 'a-z')"
@@ -958,5 +1212,9 @@ $(cat "$CARRY")"
 
   # --- the merge pass: land what is green, on evidence read here -----------------
   say "--- merge pass after round $round ---"
+  merged_before="$(grep -c . "$WORK/merged.tsv")"
   merge_pass "$round"
+  # Which round each repo's latest merge followed: unverified_lanes compares against
+  # the probe taken before it.
+  tail -n +"$((merged_before + 1))" "$WORK/merged.tsv" | awk -F'\t' -v OFS='\t' -v r="$round" 'NF{print $1, r, $2}' >> "$WORK/merge-rounds.tsv"
 done

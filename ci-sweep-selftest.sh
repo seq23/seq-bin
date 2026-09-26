@@ -269,6 +269,21 @@ else
 fi
 
 # ===========================================================================
+echo "=== 7a. the 08:00 gate waits for an in-flight run and decides from its row ==="
+# 26 Sep 2026: at 08:00 the 07:00 run was still in round 2; the gate saw no row, ran the
+# sweep, the lock no-oped it, and the day could never get its one retry.
+GATE_SUITE="$BIN/tests/test-retry-gate.sh"
+if [ ! -x "$GATE_SUITE" ]; then
+  bad "tests/test-retry-gate.sh is missing — the 08:00 gate is unguarded"
+elif out="$("$GATE_SUITE" "$BIN" 2>&1)"; then
+  n="$(printf '%s\n' "$out" | grep -oE '^=== [0-9]+ assertion' | grep -oE '[0-9]+')"
+  examined_fixtures=$((examined_fixtures + ${n:-0}))
+  ok "retry gate: ${n:-?} assertions — waits for an in-flight run, never loses the day's retry"
+else
+  bad "retry gate suite failed:"; printf '%s\n' "$out" | grep -E '^  x' | sed 's/^/      /'
+fi
+
+# ===========================================================================
 echo "=== 7b. a failed GitHub read is unproven, never silence ================="
 # 2026-09-23: one failed `gh run list` became '[]' and the probe called a repo with 33
 # runs SILENT. A fake gh fails only that call; the probe must say PENDING, not SILENT.

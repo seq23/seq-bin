@@ -23,6 +23,15 @@
 
 set -uo pipefail
 
+# ISOLATION FROM A LIVE SWEEP. The sweep's fixing agents run this file from inside a supervised run
+# and inherit CI_SWEEP_SUPERVISED / CI_SWEEP_RUN_ID / CI_SWEEP_STARTED_AT (26 Sep 2026: 51 of 83
+# assertions failed that way — the fake sweep skipped its supervisor, never made its work dir, and
+# every scenario read nothing). Every CI_SWEEP_* the harness did not set itself is dropped here;
+# each scenario then sets, per call, exactly the ones it depends on (see sweep() below).
+# (Folded in from seq-bin #14.)
+while IFS= read -r v; do unset "$v"; done < <(compgen -e | grep '^CI_SWEEP_')
+[ -z "$(compgen -e | grep '^CI_SWEEP_')" ] || { echo "NAMED STOP [ENV_LEAK] a CI_SWEEP_* variable survived the reset."; exit 3; }
+
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SWEEP="$ROOT/ci-sweep.sh"
 for f in "$SWEEP" "$ROOT/ci-sweep-notify.sh" "$ROOT/ci-sweep-stream.py"; do
@@ -79,9 +88,13 @@ case "$1 $2" in
       *headRefOid*)  echo "head$3" ;;
     esac; exit 0 ;;
   "pr merge")
+    [ -f "$FAKE_DIR/merge-refuse" ] && { echo "GraphQL: Pull request is not mergeable" >&2; exit 1; }
     : > "$FAKE_DIR/merged-$repo-$3"
     grep -vE "^$repo	$3	" "$FAKE_DIR/open-prs" > "$FAKE_DIR/open-prs.t"; mv "$FAKE_DIR/open-prs.t" "$FAKE_DIR/open-prs"; exit 0 ;;
   "run list") printf 'completed\tsuccess\n'; exit 0 ;;
+  "workflow run")
+    [ -f "$FAKE_DIR/no-dispatch" ] && { echo "HTTP 422: Workflow does not have 'workflow_dispatch' trigger" >&2; exit 1; }
+    exit 0 ;;
   *) exit 0 ;;
 esac
 SH
@@ -93,6 +106,9 @@ case "$NAME" in
   *) echo "no route"; exit 1 ;;
 esac
 echo "$PWD land $*" >> "$FAKE_DIR/land-calls.log"
+# "could not verify" N times first (land's rc 75: GitHub did not answer, nothing merged)
+n="$(cat "$FAKE_DIR/land-unverified" 2>/dev/null || echo 0)"
+if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$FAKE_DIR/land-unverified"; echo "STOPPED: could not verify (network)"; exit 75; fi
 : > "$FAKE_DIR/merged-$NAME-$1"
 grep -vE "^$NAME	$1	" "$FAKE_DIR/open-prs" > "$FAKE_DIR/open-prs.t"; mv "$FAKE_DIR/open-prs.t" "$FAKE_DIR/open-prs"
 echo "LANDED — #$1"
@@ -105,8 +121,11 @@ n="$(cat "$FAKE_DIR/probe-n" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$FAKE_D
 mode="$(sed -n "$((n + 1))p" "$FAKE_DIR/probe-seq")"; [ -z "$mode" ] && mode="$(tail -1 "$FAKE_DIR/probe-seq")"
 G() { printf 'GREEN\t%s\tbuild\t%s|build|success|-\tok\n' "$1" "$1"; }
 R() { printf 'RED\t%s\tbuild\t%s|build|failure|%s\tfailed\n' "$1" "$1" "$2"; }
+# RI <repo> <sig> <run id>: a red lane as the real probe reports it, naming its run.
+RI() { printf 'RED\t%s\tbuild\t%s|build|failure|%s\trun #%s concluded failure\n' "$1" "$1" "$2" "$3"; }
 case "$mode" in
   green)   G alpha; G beta; exit 0 ;;
+  ru-a*)   RI alpha test "${mode#ru-a}"; G beta; exit 1 ;;
   red-ab)  R alpha test; R beta lint; exit 1 ;;
   red-a2b) R alpha test2; R beta lint; exit 1 ;;
   red-b)   G alpha; R beta lint; exit 1 ;;
@@ -133,7 +152,7 @@ LOGS="$TMP/logs"; LEDGER="$LOGS/state/outcomes.tsv"; CARRY="$LOGS/state/carryove
 
 # setup <probe-seq...> — fresh fakes for one scenario
 setup() {
-  printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called"
+  printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called" "$TMP/merge-refuse" "$TMP/no-dispatch" "$TMP/land-unverified"
   : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/claude-args.log"; : > "$TMP/land-calls.log"
   echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/claude-mode"
 }
@@ -143,7 +162,7 @@ sweep() { # sweep <run-id> [ENV=VAL ...]
       CI_SWEEP_PROBE_BIN="$TMP/probe.sh" CI_SWEEP_AUDIT_BIN="$TMP/audit.sh" \
       CI_SWEEP_NOTIFY_BIN="$ROOT/ci-sweep-notify.sh" CI_SWEEP_NOTIFY_DRY=1 \
       CI_SWEEP_STREAM_BIN="$ROOT/ci-sweep-stream.py" CI_SWEEP_CLAUDE_BIN="$BIN/claude" \
-      CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_POLL_SECS=1 \
+      CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_POLL_SECS=1 CI_SWEEP_LAND_AGAIN_SECS=0 \
       CI_SWEEP_GITHUB_DIR="$TMP/github" CI_SWEEP_RUN_ID="$id" \
       "$@" "$SWEEP" >"$TMP/$id.out" 2>&1
 }
@@ -231,6 +250,25 @@ absent "…and gh pr merge was not used for it" grep -q '^pr merge 5' "$TMP/gh-c
 check "green after landing (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ]
 check "summary: fixed gamma (#5)" grep -q 'fixed this run: gamma (#5)' <<<"$(last_line run-land)"
 
+# 26 Sep 2026, horse-legal-guide-velocity #35: a TLS timeout made land refuse a green PR and the
+# sweep left it unmerged. land's rc 75 means "GitHub did not answer, nothing merged" — land it again.
+echo "=== 5b. land that could not verify (rc 75) is landed once more, and only once ==="
+setup red-g green-g
+printf 'gamma\t5\tfix/g\tFix gamma\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-gamma-5"; echo 1 > "$TMP/land-unverified"
+sweep run-land-again; rc=$?
+check "land ran twice for gamma#5" [ "$(grep -c "$TMP/github/gamma land 5" "$TMP/land-calls.log")" -eq 2 ]
+check "the second land merged it: green (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ]
+check "the log says it could not verify, not that land refused" grep -q 'land could not verify it (network/API, rc=75)' "$LOGS/run-land-again.log"
+setup red-g red-g
+printf 'gamma\t5\tfix/g\tFix gamma\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-gamma-5"; echo 99 > "$TMP/land-unverified"
+sweep run-land-unanswered
+passes="$(grep -c -- '--- merge pass after round' "$LOGS/run-land-unanswered.log")"
+finals="$(grep -c 'landing them before calling it done' "$LOGS/run-land-unanswered.log")"
+check "…a GitHub that never answers gets exactly one more land per merge pass ($passes round pass(es) + $finals final), not a loop" \
+  [ "$passes" -ge 1 ] && [ "$(grep -c "$TMP/github/gamma land 5" "$TMP/land-calls.log")" -eq $((2 * (passes + finals))) ]
+check "…reported as could-not-verify, NOT judged red" grep -q 'could not verify it twice (rc=75: GitHub did not answer)' "$LOGS/run-land-unanswered.log"
+absent "…and never as 'land refused'" grep -q 'gamma#5: land refused' "$LOGS/run-land-unanswered.log"
+
 # =============================================================================
 echo "=== 6. SUSPECT and failing checks are never merged ==="
 setup red-a1 green
@@ -270,6 +308,7 @@ SENTRY="$(cat "$LOGS/run-sleep.d/sentry-pid" 2>/dev/null || echo "")"
 if [ -z "$SENTRY" ]; then
   bad "the sentry never announced itself; cannot simulate a sleep"
 else
+  check "latest.log names the run IN FLIGHT, not the last finished one" [ "$(readlink "$LOGS/latest.log")" = "$LOGS/run-sleep.log" ]
   sleep 2
   kill -STOP "$SENTRY"; sleep 6; kill -CONT "$SENTRY"   # the Mac "sleeps" 6s > 3s gap
   wait "$SWEEP_PID"; rc=$?
@@ -345,6 +384,83 @@ check "the log names tomorrow's 07:00 run, not another retry" \
   "$LOGS/run-retry2.log"
 rm -f "$LEDGER"
 
+
+# =============================================================================
+# 15-19 (26 Sep 2026): DONE is a checked condition. A merged fix whose lane has not
+# re-run is not green; a green fix PR nobody merged is not done; a killed run still
+# leaves its ledger row; and the next run resumes what this one left.
+UNV="$LOGS/state/fixed-unverified.tsv"; UPR="$LOGS/state/unfinished-prs.tsv"
+rm -f "$UNV" "$UPR"
+echo "=== 15. a merged fix whose lane has not re-run is FIXED-UNVERIFIED: dispatched, then proven ==="
+setup ru-a100 ru-a100 green
+printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"
+sweep run-unv-dispatch; rc=$?
+check "the lane was named FIXED-UNVERIFIED after the merge" grep -q 'lane(s) FIXED-UNVERIFIED' "$LOGS/run-unv-dispatch.log"
+check "…and dispatched on main with gh workflow run" grep -q '^workflow run build --repo seq23/alpha --ref main' "$TMP/gh-calls.log"
+check "…not re-worked: exactly one claude round" [ "$(rounds)" -eq 1 ]
+check "green only once the lane's new run is green (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ]
+
+echo "=== 16. a FIXED-UNVERIFIED lane that cannot be dispatched ends MAIN-RED-UNFINISHED, never green ==="
+setup ru-a100
+printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"; : > "$TMP/no-dispatch"
+sweep run-unv-stop; rc=$?
+check "verdict is MAIN-RED-UNFINISHED (rc=$rc)" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
+check "…after one round: the fixed lane is not re-worked" [ "$(rounds)" -eq 1 ]
+check "the log says why it was not dispatched" grep -q 'alpha / build: cannot be dispatched' "$LOGS/run-unv-stop.log"
+check "the lane is carried to the next run with its failing run id" grep -qx $'alpha\tbuild\t100\t.*' "$UNV"
+check "the carryover holds the exact unfinished list" grep -q '^## UNFINISHED — resume from here' "$CARRY"
+check "…naming the lane" grep -q '  - alpha / build: fix #7 merged after round 1' "$CARRY"
+check "an issue names it as fixed-but-unverified" grep -q 'title: \[ci-sweep\] alpha: fix merged, lane not yet re-run on main' "$LOGS/run-unv-stop.log"
+check "the summary says fixed-unverified, not fixed" grep -q 'fixed-unverified (red on main until the lane re-runs): alpha' <<<"$(last_line run-unv-stop)"
+setup ru-a100
+sweep run-unv-carried
+check "the next run reads the carried lane: no round is spent re-working it" [ "$(rounds)" -eq 0 ]
+check "…and it is still not green" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
+setup ru-a101 green
+sweep run-unv-reran
+check "a lane that re-ran and failed (new run id) is plainly red and worked" [ "$(rounds)" -eq 1 ]
+check "…and the carried entry lapsed once it was green" [ ! -f "$UNV" ]
+
+echo "=== 17. a green fix PR the sweep could not merge is NOT done: MAIN-RED-UNFINISHED, resumed next run ==="
+setup red-a1 green
+printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"; : > "$TMP/merge-refuse"
+sweep run-open-pr; rc=$?
+check "every lane green + an open green fix PR is MAIN-RED-UNFINISHED, not MAIN-GREEN (rc=$rc)" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
+check "it tried to land the PR twice more before calling it" [ "$(grep -c '^pr merge 7 ' "$TMP/gh-calls.log")" -eq 3 ]
+check "the open PR is carried to the next run" grep -q $'^alpha\t7\t' "$UPR"
+check "…and named in the carryover" grep -q '  - alpha#7 (fix/a)' "$CARRY"
+setup green
+printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"
+sweep run-open-pr-resume; rc=$?
+check "the next run resumes the carried PR" grep -q 'resuming 1 fix PR(s) the previous run left open: alpha#7' "$LOGS/run-open-pr-resume.log"
+check "…lands it" grep -q '^pr merge 7 --repo seq23/alpha' "$TMP/gh-calls.log"
+check "…and only then is green (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ]
+check "nothing is carried after a green run" [ ! -f "$UPR" ]
+
+echo "=== 18. a supervisor killed from outside still writes its ledger row and ends every child ==="
+setup red-a1
+echo sleep > "$TMP/claude-mode"
+sweep run-killed CI_SWEEP_TICK_SECS=1 &
+KPID=$!
+for _ in $(seq 1 40); do [ -s "$LOGS/run-killed.d/sentry-pid" ] && grep -q 'round 1' "$LOGS/run-killed.log" 2>/dev/null && break; sleep 0.5; done
+SUP="$(cat "$LOGS/.lock/pid" 2>/dev/null || echo)"
+if [ -z "$SUP" ]; then
+  bad "the killed-run scenario never took the lock; cannot test the trap"
+else
+  sleep 1; kill -TERM "$SUP"; wait "$KPID"; rc=$?
+  check "the ledger has the run as MAIN-RED-KILLED (rc=$rc)" [ "$(awk -F'\t' '$4=="run-killed"{print $3}' "$LEDGER")" = "MAIN-RED-KILLED" ]
+  check "the lock was released" [ ! -d "$LOGS/.lock" ]
+  sleep 1
+  absent "no claude round survives its supervisor" pgrep -f "$BIN/claude"
+fi
+
+echo "=== 19. a run that died without a row gets one when the next run reclaims its lock ==="
+setup green
+mkdir -p "$LOGS/.lock"; echo 999999 > "$LOGS/.lock/pid"; echo run-died > "$LOGS/.lock/run-id"; date +%s > "$LOGS/.lock/heartbeat"
+sweep run-after-death
+check "the dead run is recorded MAIN-RED-RECLAIMED" [ "$(awk -F'\t' '$4=="run-died"{print $3}' "$LEDGER")" = "MAIN-RED-RECLAIMED" ]
+check "…and the new run went on to its own verdict" [ "$(last_verdict)" = "MAIN-GREEN" ]
+
 # =============================================================================
 echo "=== negative proof: with the checks gate neutralised, the failing-check PR MUST get merged ==="
 sed 's/^pr_checks_state() {$/pr_checks_state() { echo green; return; }\npr_checks_state_disabled() {/' "$SWEEP" > "$TMP/crippled.sh"
@@ -360,6 +476,33 @@ else
   else
     bad "NO TEETH — the failing PR was not merged even with the gate removed"
   fi
+fi
+
+
+echo "=== negative proof: without the DONE check, the open green fix PR reads MAIN-GREEN ==="
+sed 's/^    OPEN_PRS="\$(unfinished_prs)"$/    OPEN_PRS=""/' "$SWEEP" > "$TMP/no-done.sh"; chmod +x "$TMP/no-done.sh"
+if cmp -s "$SWEEP" "$TMP/no-done.sh"; then
+  bad "SETUP BROKEN — could not remove the DONE check, so the negative proof is void"
+else
+  rm -f "$UPR"; setup red-a1 green
+  printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"; : > "$TMP/merge-refuse"
+  SWEEP_SAVE="$SWEEP"; SWEEP="$TMP/no-done.sh"; sweep run-no-done; SWEEP="$SWEEP_SAVE"
+  if [ "$(last_verdict)" = "MAIN-GREEN" ]; then ok "PROVEN   without the DONE check the open PR is called green, so section 17 reads it"
+  else bad "NO TEETH — section 17 passed for a reason other than the DONE check ($(last_verdict))"; fi
+  rm -f "$UPR"
+fi
+
+echo "=== negative proof: without FIXED-UNVERIFIED, the merged-but-unrun lane is re-worked ==="
+sed 's/^unverified_lanes() {.*/&\n  return 0/' "$SWEEP" > "$TMP/no-unv.sh"; chmod +x "$TMP/no-unv.sh"
+if cmp -s "$SWEEP" "$TMP/no-unv.sh"; then
+  bad "SETUP BROKEN — could not disable unverified_lanes"
+else
+  rm -f "$UNV"; setup ru-a100
+  printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-7"
+  SWEEP_SAVE="$SWEEP"; SWEEP="$TMP/no-unv.sh"; sweep run-no-unv; SWEEP="$SWEEP_SAVE"
+  if [ "$(rounds)" -gt 1 ]; then ok "PROVEN   without it the fixed lane is sent back to a round ($(rounds) rounds), so section 16 reads it"
+  else bad "NO TEETH — section 16's single round did not depend on unverified_lanes"; fi
+  rm -f "$UNV"
 fi
 
 # --- Rule 0 ------------------------------------------------------------------

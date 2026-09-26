@@ -50,9 +50,13 @@ case "$VERDICT" in
   MAIN-RED-STUCK)
     HEAD="repos stuck red — fixes stopped changing the failure"
     ACT="Two rounds in a row changed nothing, so the stuck repos need a look or a decision. Each has an issue on its repo; parked ones name the decision needed." ;;
-  MAIN-RED-TIMEOUT)
-    HEAD="ran out of its 3h30 budget with repos red"
-    ACT="Rounds were still making progress when the budget ended. The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) picks up from here; the red repos have issues." ;;
+  MAIN-RED-UNFINISHED)
+    HEAD="work left unfinished — not green yet"
+    ACT="The run ended with work the sweep could not finish here: lanes still red when the 3h30 budget ran out, fixes merged whose lanes have not re-run on main, or its own fix PRs still open. The exact list is in the carryover, and the next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) resumes from it." ;;
+  MAIN-RED-KILLED)
+    HEAD="was killed before it reached a verdict"
+    ACT="Something ended the sweep from outside (a signal to its supervisor). Main is unverified; the next run resumes."
+    RUN_LEVEL=1 ;;
   MAIN-RED-TEMPFIX)
     HEAD="caught a fix weakening a test — DO NOT MERGE it"
     ACT="A fixing agent tried to reach green by disabling a check. The PR is marked REJECTED on the PR itself and the run ended. Close or rewrite that PR; tomorrow's run is told to fix the root cause."
@@ -144,6 +148,15 @@ if [ "$n_issue_lines" -gt 0 ]; then
 **What is needed:** $need
 
 The sweep stopped working this repo and carried on with the rest. The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) re-checks it; record the decision (or supply the credential) and it will pick it up.
+
+$FOOTER" ;;
+      UNVERIFIED)
+        title="[ci-sweep] $repo: fix merged, lane not yet re-run on main — $DAY"
+        body="**$repo: main is not verified green yet.**
+
+**Unfinished:** $need
+
+The fix is merged, but the lane has not run on main since, so the sweep cannot call it green. The sweep dispatches such a lane itself where it can; this one it could not (no manual trigger, or a repo whose lanes it never runs by hand). The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) re-checks it from GitHub.
 
 $FOOTER" ;;
       *)

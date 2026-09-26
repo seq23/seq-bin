@@ -81,6 +81,41 @@ NAME="$(basename "$(git rev-parse --path-format=absolute --git-common-dir | sed 
 # silently stayed on the old build. Set it here so no caller has to know.
 export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-8d147e242033699dd37c6f5a451f48d2}"
 
+# --- verify helpers begin (tests/test-land-flow.sh drives the whole script through them) ---
+# COULD NOT CHECK IS NOT GREEN, AND IT IS NOT RED EITHER. 26 Sep 2026, in one sweep: how-we-know
+# #130's head lookup got "HTTP 401: Requires authentication", this script printed "green, head ,
+# MERGEABLE/CLEAN" with an EMPTY head and merged; and horse-legal-guide-velocity #35 got a "TLS
+# handshake timeout" on its first call and was refused as "PR #35 is not green" — a green PR left
+# unmerged on a network blip. Both are the same defect: an unanswered question read as an answer.
+# So every verification read goes through gh_read, which retries a failed read (bounded: 3
+# attempts, 2s then 4s), and a read that never answers stops with exit 75 (EX_TEMPFAIL) and the
+# words "could not verify", distinct from a real refusal (exit 1), so a caller can try again.
+LAND_RC_UNVERIFIED=75
+unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing was merged by this step; land again when GitHub answers.\033[0m\n' "$1" "$2"; exit "$LAND_RC_UNVERIFIED"; }
+# gh_read runs inside $( ), so what went wrong is left in a file, not a variable the subshell loses.
+GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
+gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
+trap 'rm -f "$GH_ERR_FILE"' EXIT
+gh_kind() { # stderr text -> network | auth | api
+  if grep -qiE 'timeout|timed out|connection (reset|refused)|no such host|dial tcp|EOF|TLS|i/o|network is unreachable|HTTP 50[0-9]|temporarily unavailable' <<<"$1"; then echo network
+  elif grep -qiE 'HTTP 401|HTTP 403|authentication|gh auth login|rate limit' <<<"$1"; then echo auth
+  else echo api; fi
+}
+gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = valid answer, 1 = none after retries
+  local want="$1" out err_f GH_ERR try=1 backoff="${LAND_RETRY_SECS:-2}"; shift
+  err_f="$(mktemp)"
+  while :; do
+    out="$(gh "$@" 2>"$err_f")"
+    if [ -n "$out" ] && grep -qE "$want" <<<"$out"; then rm -f "$err_f"; printf '%s\n' "$out"; return 0; fi
+    GH_ERR="$(head -3 "$err_f" | paste -sd' ' -)"; [ -n "$GH_ERR" ] || GH_ERR="empty answer from gh $1 $2"
+    printf '%s' "$GH_ERR" > "$GH_ERR_FILE"
+    [ "$try" -ge 3 ] && { rm -f "$err_f"; return 1; }
+    echo "     gh $1 $2 did not answer ($GH_ERR) — attempt $try of 3, again in ${backoff}s" >&2
+    sleep "$backoff"; try=$((try + 1)); backoff=$((backoff * 2))
+  done
+}
+# --- verify helpers end ---
+
 # How this repo reaches production. westpeek-live deploys itself through Workers
 # Builds on merge; the two Worker repos deploy only when a person runs the script.
 # Every West Peek web property the "web property change" lane can target MUST have a row here —
@@ -126,10 +161,10 @@ case "$NAME" in
   # 26 Sep 2026: staging on every land; production waits for the `e2e` workflow (jobs e2e,
   # e2e-open, help-screenshots — nightly 08:00 UTC + workflow_dispatch) on the exact sha.
   sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://sheilastudio.seq-taylor.workers.dev/healthz" ;;
-  # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, and this script has
-  # already checked out main and pulled it above, so the merge IS the deploy.
+  # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, so fast-forwarding it IS the deploy
+  # (step 5 does it without touching any file she has changed, or stops and says why).
   # Added 21 Sep 2026 with seq-bin #4.
-  bin|seq-bin)          DEPLOY="" ; SELF="is the launchd working copy, already fast-forwarded to main above" ;;
+  bin|seq-bin)          DEPLOY="" ; SELF="is the launchd working copy, fast-forwarded to origin/main in step 5" ;;
   # West Peek web properties on Cloudflare Pages Git integration: the project builds `main` on push
   # (check-run "Cloudflare Pages" on the merge commit), so the merge IS the deploy. Read from each
   # repo's wrangler.toml (pages_build_output_dir) / Pages project source, 23 Sep 2026, so the web
@@ -360,21 +395,36 @@ if [ -z "$ALREADY_MERGED" ]; then
 say "1/5  verifying PR #$PR myself"
 # Never take an agent's word that CI is green: two reported green on red on
 # 17 Sep, and one had read `mergeable` (merge conflicts) rather than the checks.
-gh pr checks "$PR" || die "PR #$PR is not green"
+# The checks are read as JSON and judged here, never by gh's exit code, which is 1 both for a
+# failing check and for a network error. A valid JSON array IS the answer; anything else is no answer.
+if ! CHECKS="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)"; then
+  grep -qi 'no checks reported' <<<"$(gh_err)" && die "PR #$PR has no checks at all — green cannot be verified"
+  unverified "$(gh_kind "$(gh_err)")" "the checks on PR #$PR could not be read: $(gh_err)"
+fi
+jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
+[ "$(jq 'length' <<<"$CHECKS")" -gt 0 ] || die "PR #$PR has no checks at all — green cannot be verified"
 # EVERY BUCKET, NOT THE EXIT CODE. 21 Sep 2026, boss-os #35: the Playwright job had been CANCELLED
 # at its 30-minute cap, `gh pr checks` printed it as "fail" and still exited 0, and this script
 # merged a PR whose merge state read UNSTABLE. A cancelled, skipped-by-failure or failing check is
 # not green whatever the exit code says; only `pass` (and a genuinely `skipping` job) is.
-NOTGREEN="$(gh pr checks "$PR" --json name,bucket -q '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' 2>/dev/null)"
+NOTGREEN="$(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' <<<"$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
-HEAD="$(gh pr view "$PR" --json headRefOid -q .headRefOid)"
-RUNSHA="$(gh pr checks "$PR" --json link -q '.[0].link' | grep -oE '[0-9]+$' | head -1 \
-          | xargs -I{} gh run view {} --json headSha -q .headSha 2>/dev/null)"
-[ -n "$RUNSHA" ] && [ "$RUNSHA" != "$HEAD" ] && die "the green run is for $RUNSHA but the PR head is $HEAD — stale checks"
+# An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
+HEAD="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
+  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
+# The stale-checks test reads an Actions run's sha. Only an Actions run link carries a run id —
+# a Cloudflare Pages link ends in a uuid whose trailing digits are not one.
+RUNID="$(jq -r '[.[] | .link | capture("/actions/runs/(?<id>[0-9]+)") | .id][0] // empty' <<<"$CHECKS")"
+if [ -n "$RUNID" ]; then
+  RUNSHA="$(gh_read '^[0-9a-f]{40}$' run view "$RUNID" --json headSha -q .headSha)" \
+    || unverified "$(gh_kind "$(gh_err)")" "the sha of green run $RUNID could not be read: $(gh_err)"
+  [ "$RUNSHA" = "$HEAD" ] || die "the green run is for $RUNSHA but the PR head is $HEAD — stale checks"
+fi
 # UNKNOWN is GitHub still computing — it answers that for a minute after anything merges to main
 # (19 Sep: #132 stopped as UNKNOWN/UNKNOWN seconds after #135 landed, and was clean). Wait it out.
 for _ in $(seq 1 12); do
-  STATE="$(gh pr view "$PR" --json mergeable,mergeStateStatus -q '.mergeable+"/"+.mergeStateStatus')"
+  STATE="$(gh_read '^[A-Z_]+/[A-Z_]+$' pr view "$PR" --json mergeable,mergeStateStatus -q '.mergeable+"/"+.mergeStateStatus')" \
+    || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's merge state could not be read: $(gh_err)"
   [ "${STATE%%/*}" = "UNKNOWN" ] || break
   sleep 10
 done
@@ -386,19 +436,45 @@ esac
 echo "     green, head $HEAD, $STATE"
 
 say "2/5  merging"
-gh pr merge "$PR" --squash || die "merge failed"
+# Pinned to the head verified above: a push after the check cannot ride in unverified.
+if ! MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)"; then
+  echo "$MERGE_OUT"
+  # A merge whose ANSWER was lost may still have happened; ask before calling it a failure.
+  MSTATE="$(gh_read '^(OPEN|CLOSED|MERGED)$' pr view "$PR" --json state -q .state)" || MSTATE=""
+  case "$MSTATE" in
+    MERGED) echo "     the merge call errored but PR #$PR reads MERGED — carrying on" ;;
+    OPEN) [ "$(gh_kind "$MERGE_OUT")" != api ] && unverified "$(gh_kind "$MERGE_OUT")" "the merge call did not answer and PR #$PR is still open"
+          die "merge failed" ;;
+    "") unverified "$(gh_kind "$(gh_err)")" "the merge call failed and PR #$PR's state could not be read back — check it: gh pr view $PR" ;;
+    *) die "merge failed — PR #$PR is $MSTATE" ;;
+  esac
+fi
 fi
 
 say "3/5  syncing main"
-# From a worktree, main is checked out elsewhere and cannot be switched to here; fetching
-# is enough — every later step reads origin/main through the API, not the working tree.
-if git checkout -q main 2>/dev/null; then
-  git pull -q || die "could not sync main"
-  git log --oneline -1
+# THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`
+# in whatever checkout land ran from. 26 Sep 2026, local-guides-citation-velocity #159: her tree
+# carried regenerated artifacts/validation/*.json, the pull aborted, and land said "STOPPED: could
+# not sync main" AFTER the merge — a landed PR reported as a failure, main never watched, nothing
+# confirmed deployed. Every later step reads origin/main (the API, `git show origin/main:`, or a
+# throwaway worktree for a scripted deploy), so all this step NEEDS is the fetch. The local branch
+# is fast-forwarded only when that cannot touch her work: on main, and no tracked file changed.
+# --- sync begin (tests/test-land-flow.sh) ---
+git fetch -q origin main || git fetch -q origin main || die "#$PR IS MERGED, but origin/main could not be fetched. Nothing was deployed. Re-run 'land $PR'."
+SYNCED=""
+CUR="$(git symbolic-ref -q --short HEAD)"
+DIRTY="$(git status --porcelain --untracked-files=no)"
+if [ "$CUR" != main ]; then
+  echo "     local checkout is on ${CUR:-a detached HEAD} — left exactly as it is; later steps read origin/main"
+elif [ -n "$DIRTY" ]; then
+  echo "     local main has $(grep -c . <<<"$DIRTY") uncommitted tracked change(s) — left exactly as they are, not fast-forwarded; later steps read origin/main"
+elif git merge -q --ff-only origin/main 2>/dev/null; then
+  SYNCED=1
 else
-  git fetch -q origin main || die "could not fetch main"
-  git log --oneline -1 origin/main
+  echo "     local main has commits origin/main does not — left as it is; later steps read origin/main"
 fi
+# --- sync end ---
+git log --oneline -1 origin/main
 
 say "4/5  watching main to a terminal state"
 # A green PR is not a green merge: `pull_request` builds the branch head, not the
@@ -422,7 +498,8 @@ sleep 12
 # names it in `workflow_run: workflows: [..]`. A repo with no deploy.yml, or none of that
 # workflow's runs on the list, gets the newest run, as before.
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
-GATE_WF="$(sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' .github/workflows/deploy.yml 2>/dev/null | head -1 | tr -d '"'"'"' ')"
+# Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
+GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
 pick_run() {
   # $1: a jq boolean over one run. Newest matching run of the gate workflow; else the newest match.
   # The full e2e workflow (E2E_WF, routes block) is never "main's run": production waits for it
@@ -549,6 +626,19 @@ pages_watch() { # $1 merge sha -> 0 all succeeded | 1 failed or timed out (print
 }
 # --- pages_watch end ---
 
+# ~/bin IS PRODUCTION: launchd runs its working copy, so here — and only here — the local checkout
+# must move. Her uncommitted work in it is never touched: the fast-forward runs only on main and only
+# when no file she has changed is one the incoming commits change (git refuses to clobber either way).
+if [ -z "$DEPLOY" ] && { [ "$NAME" = bin ] || [ "$NAME" = seq-bin ]; } && [ -z "$SYNCED" ]; then
+  say "5/5  $NAME $SELF"
+  [ "$CUR" = main ] || die "#$PR IS MERGED and main is green, but $REPO_DIR is on ${CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $REPO_DIR checkout main && git -C $REPO_DIR merge --ff-only origin/main"
+  OVERLAP="$(comm -12 <(git status --porcelain --untracked-files=no | cut -c4- | sort -u) <(git diff --name-only HEAD origin/main | sort -u))"
+  [ -z "$OVERLAP" ] || die "#$PR IS MERGED and main is green, but the merge changes file(s) with uncommitted local edits in $REPO_DIR ($(echo "$OVERLAP" | paste -sd, -)), so it was NOT fast-forwarded and launchd still runs the old scripts. Nothing of hers was touched."
+  git merge -q --ff-only origin/main || die "#$PR IS MERGED and main is green, but $REPO_DIR could not fast-forward to origin/main (local commits?), so launchd still runs the old scripts."
+  say "LANDED — #$PR is merged, main is green, and $REPO_DIR is at $(git log --oneline -1) (her $(grep -c . <<<"$DIRTY") uncommitted change(s) untouched)."
+  exit 0
+fi
+
 if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
@@ -575,7 +665,8 @@ fi
 # the nightly e2e workflow, not on CI: after a merge there is no Deploy run to wait for, and the
 # newest "Deploy" on the list would be an OLDER commit's — "LANDED, the Deploy workflow shipped it"
 # about a deploy that never happened. Those routes fall through to the plan below (WAITING).
-if [ -f ".github/workflows/deploy.yml" ] && [ -z "$E2E_WF" ]; then
+# Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
+if git cat-file -e origin/main:.github/workflows/deploy.yml 2>/dev/null && [ -z "$E2E_WF" ]; then
   say "5/5  $NAME deploys itself on green main — waiting for that run rather than racing it"
   sleep 20
   DRID="$(gh run list --branch main --limit 10 --json databaseId,name,headSha \
@@ -601,7 +692,12 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   # Never a bare `wrangler deploy`: it ships a stale client and the LOCAL DEV
   # bindings. On 17 Sep it tried to push WP_OS_ENV "local" and a dev passcode to
   # production and failed only because of an unrelated error.
-  $DEPLOY || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
+  # FROM origin/main, NEVER FROM HER CHECKOUT. Step 3 no longer switches or pulls her tree, so the
+  # deploy runs through deploy_at: a throwaway detached worktree of the commit main just went green
+  # on, removed afterwards.
+  DSHA="$(git rev-parse origin/main 2>/dev/null)"
+  [ -n "$DSHA" ] || die "#$PR IS MERGED and main is green, but origin/main could not be read here, so nothing was deployed. Re-run 'land $PR'."
+  deploy_at "$DSHA" "$DEPLOY" || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
   say "LANDED — #$PR is merged, main is green, and it is in production."
   exit 0
 fi

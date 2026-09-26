@@ -92,7 +92,13 @@ export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-8d147e242033699dd37c6f5a4
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
 STAGING=""; E2E_WF=""; SMOKE=""
 case "$NAME" in
-  west-peek-os|boss-os) DEPLOY="npm run deploy:production" ; SELF="" ;;
+  west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
+  # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
+  # `e2e.yml` (nightly 07:00 UTC + workflow_dispatch), so a merge waits only on the fast CI run and
+  # production moves only to a sha the journeys passed — deploy.yml fires on e2e's success and
+  # records the GitHub Deployment; `land <pr>` prints WAITING; `land --promote boss-os [--run-e2e]`
+  # ships the newest e2e-green commit from here. No staging target in this repo.
+  boss-os)              DEPLOY="npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ;;
   westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
   # The loop repos run in GitHub Actions straight from main: the merge IS the
   # deploy. Every scheduled lane checks out main at fire time.
@@ -131,8 +137,13 @@ case "$NAME" in
   # network.joinwestpeek.com, venturedeals.joinwestpeek.com, dilution.joinwestpeek.com.
   west-peek-pitch-lab)  DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (pitch.joinwestpeek.com)" ;;
   west-peek-network-os) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (network.joinwestpeek.com)" ;;
-  secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (venturedeals.joinwestpeek.com)" ;;
-  founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (dilution.joinwestpeek.com)" ;;
+  # 26 Sep 2026 (build first, test in batches): Pages builds every push to main as the STAGING
+  # preview (main.<project>.pages.dev) and the `production` branch as production; only the repo's
+  # promote.yml moves that branch, on a green nightly e2e (secondaries 07:40 UTC, dilution 07:20).
+  # The "Cloudflare Pages" check-run on the merge commit is the staging build, and that is what
+  # pages_watch confirms here. Promote by hand: gh workflow run e2e.yml --ref main (in that repo).
+  secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (venturedeals.joinwestpeek.com) = the production branch, moved by promote.yml on a green nightly e2e" ;;
+  founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (dilution.joinwestpeek.com) = the production branch, moved by promote.yml on a green nightly e2e" ;;
   # Grid velocity/canonical sites, added 25 Sep 2026 when six green query-coverage PRs could not land.
   # Each read from the repo's wrangler config AND the check-runs GitHub records on its main commit
   # (the Cloudflare app's "Cloudflare Pages" / "Workers Builds" run links the production project),
@@ -157,7 +168,9 @@ case "$NAME" in
   # wrangler.toml pages_build_output_dir = "public"; Pages project justbeingmercedes (Direct Upload).
   # .github/workflows/deploy.yml runs `wrangler pages deploy` on push to main with the vault's
   # cloudflare-claude-deploy token (repo secret CLOUDFLARE_API_TOKEN); first green run 36191953200.
-  justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (justbeingmercedes.com)" ;;
+  # 26 Sep 2026: deploy.yml publishes the `staging` preview on every push to main and
+  # justbeingmercedes.com only from a sha the nightly e2e.yml (08:20 UTC) passed (workflow_run).
+  justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages (deploy.yml): main -> staging preview on push; justbeingmercedes.com only from an e2e-green sha, nightly" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 # --- routes end ---
@@ -558,7 +571,11 @@ fi
 # So where the repo deploys itself, this script WAITS and reports rather than competing. It still
 # has a job: confirming the deploy actually happened. An automation nobody checks is how "merged"
 # and "shipped" came apart in the first place.
-if [ -f ".github/workflows/deploy.yml" ]; then
+# A ROUTE WITH E2E_WF IS NOT DEPLOYED BY GREEN MAIN. Since 26 Sep 2026 boss-os's deploy.yml fires on
+# the nightly e2e workflow, not on CI: after a merge there is no Deploy run to wait for, and the
+# newest "Deploy" on the list would be an OLDER commit's — "LANDED, the Deploy workflow shipped it"
+# about a deploy that never happened. Those routes fall through to the plan below (WAITING).
+if [ -f ".github/workflows/deploy.yml" ] && [ -z "$E2E_WF" ]; then
   say "5/5  $NAME deploys itself on green main — waiting for that run rather than racing it"
   sleep 20
   DRID="$(gh run list --branch main --limit 10 --json databaseId,name,headSha \

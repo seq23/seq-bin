@@ -56,6 +56,7 @@ case "$a" in
   "pr view "*"state,mergeCommit"*) merged && echo "MERGED/$MERGESHA" || echo "OPEN/"; exit 0 ;;
   "pr checks "*) answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
   "pr view "*headRefOid*) answer head "$HEADSHA" ;;
+  "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
   "pr merge "*) : > "$FAKE_DIR/merged"; exit 0 ;;
@@ -138,6 +139,28 @@ check "her dirty file is byte-for-byte hers" [ "$(cat "$W/approvalprep/artifacts
 check "her local main was not moved" [ "$(git -C "$W/approvalprep" rev-parse HEAD)" = "$BEFORE" ]
 check "it says it left the tree alone" has "left exactly as they are"
 check "origin/main was fetched" [ "$(git -C "$W/approvalprep" rev-parse origin/main)" = "$ORIGIN_MAIN" ]
+# 2 Oct 2026 (lgcv #163/#166): the run watched on main is the workflow that judged the PR, not `[0]`.
+check "the PR's workflow was read from its own check run" grep -q '^run view 555 .*workflowName' "$FAKE/calls"
+check "…and handed to the pick of main's run" grep -q '^run list --branch main .*Fast Check' "$FAKE/calls"
+check "…without reading the checks a second time" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
+check "it says which run it watched and what judged the PR" has 'the PR was judged by "Fast Check"'
+
+echo "=== 1b. a workflow name carrying a quote is never spliced into the filter: lands, on the newest run ==="
+fixture approvalprep
+echo 'Bad "Name"' > "$FAKE/pr-workflow"
+run_land approvalprep
+check "rc 0" [ "$RC" -eq 0 ]
+check "main watched to success" has "completed success"
+check "the quoted name never reached the run list" eval '! grep -q "^run list --branch main .*Bad" "$FAKE/calls"'
+
+echo "=== 1c. an already-merged PR skipped step 1, so its checks are read for the workflow ==="
+fixture approvalprep
+: > "$FAKE/merged"
+run_land approvalprep
+check "rc 0" [ "$RC" -eq 0 ]
+check "nothing was merged again" eval '! merge_called'
+check "the merged PR's checks were read once, for the workflow" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
+check "…and its workflow was handed to the pick of the merge commit's run" grep -q '^run list --branch main .*Fast Check' "$FAKE/calls"
 
 echo "=== 2. checkout on a feature branch: not switched to main ==="
 fixture approvalprep

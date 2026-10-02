@@ -1,17 +1,20 @@
 #!/bin/bash
-# CI sweep retry gate — fired once a day at 08:00 CT by launchd
+# CI sweep retry gate — fired Monday and Friday at 09:00 CT by launchd
 # (launchd/com.seq.ci-sweep-retry.plist), exactly one hour after the primary
-# 07:00 run (launchd/com.seq.ci-sweep.plist, com.seq.ci-sweep.sh).
+# 08:00 run (launchd/com.seq.ci-sweep.plist, ci-sweep.sh).
 #
-# THE DESIGN (her instruction, 24 Sep 2026): if the 07:00 run does not end
+# THE DESIGN (her instruction, 24 Sep 2026): if the primary run does not end
 # MAIN-GREEN, try again once, an hour later. Not more than once — a second
-# non-green ending still waits for tomorrow's 07:00 run.
+# non-green ending still waits for the next Mon/Fri 08:00 run.
+# 2 Oct 2026, owner: Mon+Fri 08:00 (retry 09:00), first run Mon 5 Oct — was
+# daily 07:00 (+08:00 retry). This gate reads the ledger BY DAY, so the
+# weekday change needs nothing here: a run day is whichever day the plist fires.
 #
 # WHY A SEPARATE SCRIPT RATHER THAN A RETRY LOOP INSIDE ci-sweep.sh: the
 # ledger (state/outcomes.tsv, one line per run) is already the source of
 # truth for what ran today and how it ended, so the cap-at-one-retry rule is
 # a read of that ledger, not new state. Keeping it out of ci-sweep.sh also
-# means the primary script's own "one run a day, no self-retry" contract
+# means the primary script's own "one run per run day, no self-retry" contract
 # (tests/test-sweep-daily.sh's no_retry_anywhere checks) stays exactly what
 # it says: ci-sweep.sh never retries itself. The retry is layered on from
 # outside, the same way the supervisor bounds the body from outside.
@@ -19,14 +22,14 @@
 # LOGIC (reads only, decides, then either execs ci-sweep.sh or exits 0):
 #   no run recorded for today yet, and a sweep is IN FLIGHT (live lock holder)
 #                                  -> WAIT for it, one bounded wait, then decide
-#                                     from its row (26 Sep 2026: the 07:00 run was
-#                                     in round 2 at 08:00, the gate ran the sweep,
+#                                     from its row (26 Sep 2026, then daily 07:00/08:00: the
+#                                     07:00 run was in round 2 at 08:00, the gate ran the sweep,
 #                                     the lock no-oped it, and the day had no retry
-#                                     however the 07:00 run ended). The wait ends at
+#                                     however the primary run ended). The wait ends at
 #                                     the holder's own ceiling; a holder still alive
 #                                     past it is handed to ci-sweep.sh, whose lock
 #                                     reclaims it and records MAIN-RED-RECLAIMED.
-#   no run recorded, nothing in flight -> run (the 07:00 slot was missed, or the run
+#   no run recorded, nothing in flight -> run (the 08:00 slot was missed, or the run
 #                                     died without a row — ci-sweep.sh's reclaim
 #                                     writes that row)
 #   today already has a GREEN run  -> nothing to do, exit 0
@@ -74,7 +77,7 @@ if [ "$count" -eq 0 ] && holder="$(holder_pid)"; then
 fi
 
 if [ "$count" -eq 0 ]; then
-  say "no run recorded for $TODAY and none in flight — running (the 07:00 slot was missed, or its run died without a row; ci-sweep.sh records that one)."
+  say "no run recorded for $TODAY and none in flight — running (the 08:00 slot was missed, or its run died without a row; ci-sweep.sh records that one)."
 elif printf '%s\n' "$rows" | awk -F'\t' '$3=="MAIN-GREEN"{f=1} END{exit !f}'; then
   say "$TODAY already has a MAIN-GREEN run — nothing to retry. Exiting."
   exit 0
@@ -82,7 +85,7 @@ elif printf '%s\n' "$rows" | awk -F'\t' '$3=="PAUSED"{f=1} END{exit !f}'; then
   say "$TODAY's run was PAUSED by the owner (state/pause-until) — terminal for the day, no retry. Exiting."
   exit 0
 elif [ "$count" -ge 2 ]; then
-  say "$TODAY already has $count runs (the retry already happened, still not green) — waiting for tomorrow's 07:00 run. Exiting."
+  say "$TODAY already has $count runs (the retry already happened, still not green) — waiting for the next Mon/Fri 08:00 run. Exiting."
   exit 0
 else
   say "$TODAY's only run so far was not green — this is the one retry. Running."

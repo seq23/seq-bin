@@ -269,12 +269,12 @@ else
 fi
 
 # ===========================================================================
-echo "=== 7a. the 08:00 gate waits for an in-flight run and decides from its row ==="
-# 26 Sep 2026: at 08:00 the 07:00 run was still in round 2; the gate saw no row, ran the
+echo "=== 7a. the 09:00 retry gate waits for an in-flight run and decides from its row ==="
+# 26 Sep 2026 (then daily 07:00/08:00): at 08:00 the 07:00 run was still in round 2; the gate saw no row, ran the
 # sweep, the lock no-oped it, and the day could never get its one retry.
 GATE_SUITE="$BIN/tests/test-retry-gate.sh"
 if [ ! -x "$GATE_SUITE" ]; then
-  bad "tests/test-retry-gate.sh is missing — the 08:00 gate is unguarded"
+  bad "tests/test-retry-gate.sh is missing — the 09:00 gate is unguarded"
 elif out="$("$GATE_SUITE" "$BIN" 2>&1)"; then
   n="$(printf '%s\n' "$out" | grep -oE '^=== [0-9]+ assertion' | grep -oE '[0-9]+')"
   examined_fixtures=$((examined_fixtures + ${n:-0}))
@@ -310,38 +310,57 @@ echo "=== 8. the docs cannot drift from the code ============================"
 # the 07:00 run does not end green (her instruction). Two plists now carry the
 # schedule — the retry one gets the same read-the-plist-not-the-prose treatment
 # as the primary always has.
+#
+# 2 Oct 2026, owner: Mon+Fri 08:00, first run Mon 5 Oct. Daily is gone. The
+# primary fires Monday and Friday at 08:00, the retry Monday and Friday at
+# 09:00, and NOTHING else: read_schedule prints the full calendar as one
+# canonical line (every entry, every key) so that a third weekday, a stray
+# Day/Month key, a second time, a StartInterval or an env knob changes the
+# line and fails the exact-match below. Proven negatively on 2 Oct 2026 by
+# adding a Weekday 3 entry to each plist in turn and watching this fail.
 PLIST="$BIN/launchd/com.seq.ci-sweep.plist"
 RETRY_PLIST="$BIN/launchd/com.seq.ci-sweep-retry.plist"
 RETRY_SCRIPT="$BIN/ci-sweep-retry-if-red.sh"
 SWEEP="$BIN/ci-sweep.sh"; PROMPT="$BIN/ci-sweep-prompt.md"; README="$BIN/README.md"
+NOTIFY="$BIN/ci-sweep-notify.sh"
 consistency=0
 read_schedule() {
   python3 - "$1" <<'PY'
 import plistlib, sys
 d = plistlib.load(open(sys.argv[1], "rb"))
 s = d.get("StartCalendarInterval")
-if isinstance(s, list):
-    print("MULTI %d" % len(s)) if len(s) != 1 else None
-    s = s[0] if len(s) == 1 else None
-if not isinstance(s, dict):
+if isinstance(s, dict):
+    s = [s]                       # a single dict is a one-entry calendar: printed, and it will not match
+if not isinstance(s, list) or not s:
     print("NONE"); sys.exit()
-extra = sorted(set(s) - {"Hour", "Minute"})
+DAYS = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
+parts = []
+for e in s:
+    if not isinstance(e, dict):
+        parts.append("BAD"); continue
+    extra = sorted(set(e) - {"Weekday", "Hour", "Minute"})
+    wd = e.get("Weekday")
+    parts.append("%s %02d:%02d%s" % (DAYS.get(wd, "ANY" if wd is None else "WD%s" % wd),
+                 e.get("Hour", -1), e.get("Minute", -1),
+                 " EXTRA=" + ",".join(extra) if extra else ""))
 args = " ".join(d.get("ProgramArguments", []))
-print("%02d:%02d%s%s%s" % (s.get("Hour", -1), s.get("Minute", -1),
-      " EXTRA=" + ",".join(extra) if extra else "",
-      " STARTINTERVAL" if "StartInterval" in d else "",
-      " ENVKNOBS" if "CI_SWEEP_" in args else ""))
+print(" + ".join(parts)
+      + (" RUNATLOAD" if d.get("RunAtLoad") else "")
+      + (" STARTINTERVAL" if "StartInterval" in d else "")
+      + (" ENVKNOBS" if "CI_SWEEP_" in args else ""))
 PY
 }
+WANT_PRIMARY="Mon 08:00 + Fri 08:00"
+WANT_RETRY="Mon 09:00 + Fri 09:00"
 if [ ! -f "$PLIST" ]; then
   bad "launchd/com.seq.ci-sweep.plist is missing — the schedule is not versioned"
 else
   consistency=$((consistency+1))
   sched="$(read_schedule "$PLIST")"
-  if [ "$sched" = "07:00" ]; then
-    ok "the primary plist fires exactly once a day at 07:00, with no interval and no env knobs"
+  if [ "$sched" = "$WANT_PRIMARY" ]; then
+    ok "the primary plist fires exactly Monday and Friday at 08:00 — no other day, no other time, no interval, no env knobs, not at load"
   else
-    bad "the primary plist schedule is '$sched', expected exactly '07:00' once a day"
+    bad "the primary plist schedule is '$sched', expected exactly '$WANT_PRIMARY' (owner, 2 Oct 2026)"
   fi
 fi
 if [ ! -f "$RETRY_PLIST" ]; then
@@ -349,10 +368,10 @@ if [ ! -f "$RETRY_PLIST" ]; then
 else
   consistency=$((consistency+1))
   rsched="$(read_schedule "$RETRY_PLIST")"
-  if [ "$rsched" = "08:00" ]; then
-    ok "the retry plist fires exactly once a day at 08:00, with no interval and no env knobs"
+  if [ "$rsched" = "$WANT_RETRY" ]; then
+    ok "the retry plist fires exactly Monday and Friday at 09:00 — one hour after the primary, same two days, nothing else"
   else
-    bad "the retry plist schedule is '$rsched', expected exactly '08:00' once a day"
+    bad "the retry plist schedule is '$rsched', expected exactly '$WANT_RETRY' (owner, 2 Oct 2026)"
   fi
   consistency=$((consistency+1))
   if grep -q 'ci-sweep-retry-if-red.sh' "$RETRY_PLIST"; then
@@ -362,7 +381,7 @@ else
   fi
 fi
 if [ ! -x "$RETRY_SCRIPT" ]; then
-  bad "ci-sweep-retry-if-red.sh is missing or not executable — the 08:00 plist has nothing to run"
+  bad "ci-sweep-retry-if-red.sh is missing or not executable — the 09:00 plist has nothing to run"
 else
   consistency=$((consistency+1))
   if grep -q 'outcomes.tsv' "$RETRY_SCRIPT"; then
@@ -372,22 +391,32 @@ else
   fi
 fi
 if [ -f "$PLIST" ] && [ -f "$RETRY_PLIST" ]; then
-  for f in "$README" "$SWEEP" "$PROMPT"; do
+  # Each description must name the two days AND the primary hour together
+  # ("Monday and Friday at 08:00", "Mon+Fri 08:00"), and the 09:00 retry.
+  DAYS_RE='Mon(day)?[^.|]{0,40}Fri(day)?[^.|]{0,40}08:00'
+  for f in "$README" "$SWEEP" "$PROMPT" "$NOTIFY" "$RETRY_SCRIPT"; do
     consistency=$((consistency+1))
-    if grep -q '07:00' "$f"; then ok "$(basename "$f") states the 07:00 primary schedule"
-    else bad "$(basename "$f") does not state 07:00 — the docs have drifted from the plist"; fi
+    if grep -qE "$DAYS_RE" "$f"; then ok "$(basename "$f") states the Mon+Fri 08:00 primary schedule"
+    else bad "$(basename "$f") does not state Mon+Fri 08:00 — the docs have drifted from the plist"; fi
     consistency=$((consistency+1))
-    if grep -q '08:00' "$f"; then ok "$(basename "$f") states the 08:00 retry"
-    else bad "$(basename "$f") does not state 08:00 — the retry has drifted out of the docs"; fi
+    if grep -q '09:00' "$f"; then ok "$(basename "$f") states the 09:00 retry"
+    else bad "$(basename "$f") does not state 09:00 — the retry has drifted out of the docs"; fi
   done
   consistency=$((consistency+1))
   row="$(grep -E '^\| `ci-sweep\.sh` \|' "$README")"
-  if printf '%s' "$row" | grep -q '07:00' && printf '%s' "$row" | grep -q '08:00' \
-     && ! printf '%s' "$row" | grep -qE ':07:|:37|10:00|22:00|every 30'; then
-    ok "the README row for ci-sweep.sh names 07:00 and the 08:00 retry, and nothing older"
+  if printf '%s' "$row" | grep -qE "$DAYS_RE" && printf '%s' "$row" | grep -q '09:00' \
+     && ! printf '%s' "$row" | grep -qE ':07:|:37|10:00|22:00|every 30|07:00|daily|tomorrow'; then
+    ok "the README row for ci-sweep.sh names Mon+Fri 08:00 and the 09:00 retry, and nothing older"
   else
-    bad "the README row for ci-sweep.sh does not correctly describe 07:00 + the 08:00 retry"
+    bad "the README row for ci-sweep.sh does not correctly describe Mon+Fri 08:00 + the 09:00 retry"
   fi
+  # The daily cadence must not survive as a current-tense description anywhere
+  # the sweep speaks from: these phrases were what the 07:00/08:00 design said.
+  consistency=$((consistency+1))
+  stale_cadence="$(grep -nE "tomorrow's 07:00|07:00 tomorrow|07:00 daily|once a day at 07:00|today's 08:00 retry|08:00 today, once|fired once a day|runs at 07:00" \
+                   "$SWEEP" "$PROMPT" "$README" "$NOTIFY" "$RETRY_SCRIPT" "$PLIST" "$RETRY_PLIST" 2>/dev/null)"
+  if [ -z "$stale_cadence" ]; then ok "no current-tense daily-cadence phrase survives (07:00 tomorrow, today's 08:00 retry, …)"
+  else bad "the daily cadence is still described as current: $(printf '%s' "$stale_cadence" | head -3 | tr '\n' ' ')"; fi
 fi
 # Every `claude -p` in the wrapper carries --model opus; zero invocations is a failure.
 inv="$(grep -nE '^[^#]*"\$CLAUDE" -p' "$SWEEP")"

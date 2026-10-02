@@ -186,7 +186,7 @@ check "a banner is sent even when green" grep -q '^\[notify:dry\] banner: "CI sw
 absent "a green run files no issue" grep -q 'notify:dry\] issue' "$LOGS/run-green.log"
 check "no claude round was run" [ "$(rounds)" -eq 0 ]
 check "no carryover is left" [ ! -f "$CARRY" ]
-check "the log names tomorrow's 07:00 run, nothing more today" grep -q 'next run: 07:00 tomorrow (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
+check "the log names the next Mon/Fri 08:00 run, nothing more today" grep -q 'next run: 08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
 check "nothing schedules a retry" no_retry_anywhere run-green
 
 # =============================================================================
@@ -217,7 +217,7 @@ check "…titled as parked" grep -q 'title: \[ci-sweep\] beta is parked on your 
 absent "no issue is filed on alpha (it is fixed)" grep -q 'notify:dry\] issue -> seq23/alpha' "$LOGS/run-park.log"
 check "every claude -p ran with --model opus" every_claude_is_opus
 check "round 2 resumed round 1's session" grep -q -- '--resume' <(sed -n 2p "$TMP/claude-args.log")
-check "tomorrow's carryover names the parked repo" grep -q 'beta: rotate the BETA_API_KEY' "$CARRY"
+check "the next run's carryover names the parked repo" grep -q 'beta: rotate the BETA_API_KEY' "$CARRY"
 check "nothing schedules a retry" no_retry_anywhere run-park
 absent "nothing was ever closed" grep -q '^pr close' "$TMP/gh-calls.log"
 
@@ -290,7 +290,7 @@ sweep run-tempfix
 check "verdict is MAIN-RED-TEMPFIX" [ "$(last_verdict)" = "MAIN-RED-TEMPFIX" ]
 check "a REJECTED note went on the PR" grep -q '^pr comment 7 --repo seq23/alpha' "$TMP/gh-calls.log"
 absent "the sweep never merged or closed anything" grep -qE '^pr (merge|close)' "$TMP/gh-calls.log"
-check "tomorrow is told what was rejected" grep -q 'alpha#7' "$CARRY"
+check "the next run is told what was rejected" grep -q 'alpha#7' "$CARRY"
 check "a run-level issue is filed on alpha" grep -q 'notify:dry\] issue -> seq23/alpha' "$LOGS/run-tempfix.log"
 check "nothing schedules a retry" no_retry_anywhere run-tempfix
 setup red-a1
@@ -357,33 +357,33 @@ setup red-ab
 out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROBE_BIN="$TMP/probe.sh" \
         CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
 check "dry run exits 0 (rc=$rc)" [ "$rc" -eq 0 ]
-check "it names the schedule and the model" grep -q '07:00 CT.*retry at 08:00' <<<"$out"
+check "it names the schedule and the model" grep -q 'Mon+Fri 08:00 CT.*retry at 09:00' <<<"$out"
 check "…the model" grep -q 'model: every claude -p runs --model opus' <<<"$out"
 check "…and the repos round 1 would dispatch to, with their merge route" grep -q 'beta — build — merge route: gh' <<<"$out"
 check "no claude was invoked" [ "$(rounds)" -eq 0 ]
 check "no lock was taken" [ ! -d "$LOGS/.lock" ]
 
 # =============================================================================
-# 13-14: the 08:00 retry note, read from the SAME ledger the standalone
+# 13-14: the 09:00 retry note, read from the SAME ledger the standalone
 # ci-sweep-retry-if-red.sh reads (state/outcomes.tsv). The ledger accumulates
 # across every scenario above in this one test run, all dated "today" — that's
 # fine for last_verdict() (it only reads the tail), but this check counts
 # TODAY's rows, so it needs a clean ledger to mean anything.
-echo "=== 13. a non-green run that is the day's only run so far names the 08:00 retry ==="
+echo "=== 13. a non-green run that is the day's only run so far names the 09:00 retry ==="
 setup green
 rm -f "$LEDGER"
 sweep run-retry1 PATH="$TMP/nogh:$BIN:$PATH"
 check "still MAIN-UNKNOWN (gh unauthenticated)" [ "$(last_verdict)" = "MAIN-UNKNOWN" ]
-check "the log names today's 08:00 retry, once" \
-  grep -q 'next run: 08:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green.' \
+check "the log names today's 09:00 retry, once" \
+  grep -q 'next run: 09:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green.' \
   "$LOGS/run-retry1.log"
 
-echo "=== 14. a SECOND non-green run today (the retry already ran) names tomorrow, not another retry ==="
+echo "=== 14. a SECOND non-green run today (the retry already ran) names the next Mon/Fri, not another retry ==="
 setup green
 sweep run-retry2 PATH="$TMP/nogh:$BIN:$PATH"
 check "still MAIN-UNKNOWN" [ "$(last_verdict)" = "MAIN-UNKNOWN" ]
-check "the log names tomorrow's 07:00 run, not another retry" \
-  grep -q "next run: 07:00 tomorrow (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today." \
+check "the log names the next Mon/Fri 08:00 run, not another retry" \
+  grep -q "next run: 08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today." \
   "$LOGS/run-retry2.log"
 rm -f "$LEDGER"
 
@@ -484,7 +484,7 @@ check "the probe was never called" [ ! -f "$TMP/probe-n" ]
 check "gh was never called" [ ! -s "$TMP/gh-calls.log" ]
 check "no lock was taken" [ ! -d "$LOGS/.lock" ]
 absent "no banner, no issue: nothing ran, nothing to report" grep -q 'notify:dry\]' "$LOGS/run-paused.log"
-check "the pause file is kept for tomorrow" [ -f "$PAUSE" ]
+check "the pause file is kept for the next run" [ -f "$PAUSE" ]
 echo "=== 20b. a future pause date pauses too; the dry run reports it and dispatches nothing ==="
 setup red-a1 green
 echo "2999-12-31" > "$PAUSE"

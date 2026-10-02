@@ -603,15 +603,29 @@ sleep 12
 # does not even wait for. The run watched here is the one the Deploy waits for: `deploy.yml`
 # names it in `workflow_run: workflows: [..]`. A repo with no deploy.yml, or none of that
 # workflow's runs on the list, gets the newest run, as before.
+# THE WORKFLOW THAT JUDGED THE PR JUDGES THE MERGE. 2 Oct 2026, local-guides-citation-velocity #163
+# and #166: that repo has no deploy.yml, so no gate was named and "main's run" was `[0]` of the
+# list — a 20-second "CI Health Red Recovery" run. This script printed "completed success" and
+# "LANDED — main is green" while Validate Repo on #163's merge commit had been CANCELLED, and the
+# release lane went red behind that sentence. The PR's own checks name the workflow that gates this
+# repo (PR_WF); pick_run prefers it whenever deploy.yml's gate has no run on the list. Unreadable
+# is empty, and empty behaves exactly as before. RUNID is step 1's read; an already-merged PR
+# skipped step 1, so its checks are read here (tolerantly: this only chooses which run to watch).
+PR_RUNID="${RUNID:-}"
+[ -n "$PR_RUNID" ] || PR_RUNID="$(gh pr checks "$PR" --json name,bucket,link 2>/dev/null | jq -r '[.[] | .link | capture("/actions/runs/(?<id>[0-9]+)") | .id][0] // empty' 2>/dev/null || true)"
+PR_WF=""
+[ -z "$PR_RUNID" ] || PR_WF="$(gh run view "$PR_RUNID" --json workflowName -q '.workflowName // empty' 2>/dev/null || true)"
+case "$PR_WF" in *\"*|*\\*) PR_WF="" ;; esac   # never splice a quote or backslash into pick_run's jq filter: fall back to "newest"
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
 GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
 pick_run() {
-  # $1: a jq boolean over one run. Newest matching run of the gate workflow; else the newest match.
+  # $1: a jq boolean over one run. Newest matching run of the gate workflow (deploy.yml's); else
+  # of the workflow that ran the PR's own checks (PR_WF); else the newest match.
   # The full e2e workflow (E2E_WF, routes block) is never "main's run": production waits for it
   # separately, and the fast check is what a merge is judged on.
   gh run list --branch main --limit 20 --json databaseId,headSha,event,name \
-    -q "[.[] | select($1) | select(.name != \"${E2E_WF:-}\")] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
+    -q "[.[] | select($1) | select(.name != \"${E2E_WF:-}\")] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // (\$r | map(select(.name == \"${PR_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
 }
 # --- pick_run end ---
 if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
@@ -621,6 +635,7 @@ if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
 else
 RID="$(pick_run "true")"
 fi
+[ -z "$RID" ] || echo "     watching run $RID${PR_WF:+ (the PR was judged by \"$PR_WF\"${GATE_WF:+; deploy.yml gate \"$GATE_WF\"})}"
 if [ -z "$RID" ]; then
   die "could not read main's latest run (API error or rate limit). #$PR IS MERGED. Nothing was deployed. Re-run 'land $PR' when the API answers, or deploy by hand once main is green."
 fi

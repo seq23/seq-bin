@@ -14,6 +14,7 @@
 #
 #   land            # the PR for the current branch
 #   land 96         # that PR number
+#   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
 # It refuses rather than guesses: not green, head moved, main red -> it stops and
@@ -37,6 +38,16 @@
 # origin/main carries .github/workflows/promote.yml promotes itself on a green e2e: --promote waits
 # for any in-flight promote run (bounded) before reading production, never deploys on top of one.
 # Repos with no E2E_WF on their route are unchanged: merge -> production, as before.
+#
+# ON DEMAND ONLY, AND AFTER A LARGE CHANGE (owner, 2 Oct 2026). The e2e workflows no longer run on
+# any schedule (`workflow_dispatch` only), so nothing would ever run them after a merge unless a
+# person remembered. That is Rule 0 with a person in the loop. So on an E2E_WF route, when the
+# merged sha has no green run, `land <pr>` measures the PR (the `large` block below: lines, files,
+# a schema or browser-test change, a UI surface touched) and, when it is LARGE, dispatches the e2e
+# workflow on main itself, waits for it (bounded), and ships production only on green — printing
+# WHY it decided the change was large, and recording that reason on the GitHub Deployment. A small
+# change still prints WAITING; `land <pr> --run-e2e` forces the suite for any size. A red run is a
+# NAMED STOP: staging runs the sha, production is untouched.
 set -uo pipefail
 
 # RUN FROM A COPY. bash reads a script incrementally, so editing this file while a `land` is in
@@ -62,7 +73,6 @@ for a in "$@"; do
     *) if [ "$MODE" = promote ]; then TARGET="$a"; else PR="$a"; fi ;;
   esac
 done
-[ -z "$RUN_E2E" ] || [ "$MODE" = promote ] || die "--run-e2e only means something with --promote"
 if [ -n "$TARGET" ]; then
   case "$TARGET" in */*|.*) : ;; *) [ -d "$TARGET" ] || TARGET="$HOME/GitHub/$TARGET" ;; esac
   [ -d "$TARGET" ] || die "no such repo directory: $TARGET"
@@ -247,6 +257,37 @@ promote_pick() {
 }
 # --- plan end ---
 
+# WHAT COUNTS AS A LARGE CHANGE. Pure — no gh — so tests/test-land-large.sh can prove every rule.
+# --- large begin (tests/test-land-large.sh evals this block verbatim) ---
+# large_reason ADDITIONS DELETIONS CHANGED_FILES < the changed paths, one per line
+#   -> prints WHY the change is large (one line, with the numbers that decided it) and returns 0;
+#      prints nothing and returns 1 for a small change. The thresholds are env-overridable so a
+#      repo can be driven harder or softer from the shell without editing this file:
+#   LAND_LARGE_LINES     additions + deletions at or above this is large                (200)
+#   LAND_LARGE_FILES     changed files at or above this is large                         (8)
+#   LAND_LARGE_UI_LINES  a UI-surface file touched AND this many lines changed is large (40)
+#   Any change to a migration, the e2e specs or a Playwright config is large at any size: the
+#   schema and the browser-test contract are exactly what the suite exists to prove.
+LAND_LARGE_LINES="${LAND_LARGE_LINES:-200}"
+LAND_LARGE_FILES="${LAND_LARGE_FILES:-8}"
+LAND_LARGE_UI_LINES="${LAND_LARGE_UI_LINES:-40}"
+LAND_UI_PATH='(^|/)(client|app|public|pages|components|views|ui|routes|functions)/|\.(tsx|jsx|html|css|vue|svelte)$'
+LAND_CONTRACT_PATH='(^|/)(migrations|e2e)/|(^|/)tests/e2e/|(^|/)playwright[a-z.]*\.config\.[jt]s$'
+large_reason() {
+  local add="${1-}" del="${2-}" files="${3-}" lines paths ui contract
+  case "${add:-?}${del:-?}${files:-?}" in *[!0-9]*) echo "PR size unreadable (+${add:-?}/-${del:-?}, ${files:-?} files) — treated as large, fail closed"; return 0 ;; esac
+  lines=$((add + del))
+  paths="$(cat)"
+  contract="$(grep -E "$LAND_CONTRACT_PATH" <<<"$paths" | head -1)"
+  ui="$(grep -Ec "$LAND_UI_PATH" <<<"$paths")"
+  if [ "$lines" -ge "$LAND_LARGE_LINES" ]; then echo "$lines lines changed (+$add/-$del) ≥ $LAND_LARGE_LINES"; return 0; fi
+  if [ "$files" -ge "$LAND_LARGE_FILES" ]; then echo "$files files changed ≥ $LAND_LARGE_FILES"; return 0; fi
+  if [ -n "$contract" ]; then echo "touches the schema or the browser-test contract ($contract)"; return 0; fi
+  if [ "$ui" -gt 0 ] && [ "$lines" -ge "$LAND_LARGE_UI_LINES" ]; then echo "$ui UI-surface file(s) touched with $lines lines changed (≥ $LAND_LARGE_UI_LINES)"; return 0; fi
+  return 1
+}
+# --- large end ---
+
 # The newest completed run of the e2e workflow on exactly this sha, or "" (none, or none finished).
 e2e_verdict() { # $1 sha
   gh run list --workflow "$E2E_WF" --branch main --limit 50 --json headSha,status,conclusion \
@@ -316,6 +357,41 @@ last_duration() { # $1 workflow -> seconds of its newest completed run on main (
   gh run list --workflow "$1" --branch main --status completed --limit 1 --json createdAt,updatedAt \
     -q '.[0] | ((.updatedAt | fromdateiso8601) - (.createdAt | fromdateiso8601))' 2>/dev/null | grep -E '^[0-9]+$' || echo 1800
 }
+# Run the full e2e workflow on main's head (or adopt the run already in flight on it) and wait,
+# bounded by 1.5x its last completed duration (floor 10 min). Sets RID and CONC; never dies, so the
+# caller words the stop for its own path.
+run_e2e_on_main() { # $1 sha of main's head
+  local sha="$1" t0 ceil
+  RID="$(gh run list --workflow "$E2E_WF" --branch main --limit 10 --json databaseId,headSha,status \
+          -q "[.[] | select(.headSha == \"$sha\" and .status != \"completed\")][0].databaseId // empty" 2>/dev/null)"
+  if [ -z "$RID" ]; then
+    t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    gh workflow run "$E2E_WF" --ref main >/dev/null || { CONC="could-not-dispatch"; return 1; }
+    for _ in $(seq 1 12); do
+      sleep 10
+      RID="$(gh run list --workflow "$E2E_WF" --branch main --event workflow_dispatch --limit 5 --json databaseId,headSha,createdAt \
+              -q "[.[] | select(.headSha == \"$sha\" and .createdAt >= \"$t0\")][0].databaseId // empty" 2>/dev/null)"
+      [ -n "$RID" ] && break
+    done
+    [ -n "$RID" ] || { CONC="no-run-appeared"; return 1; }
+  fi
+  ceil=$(( $(last_duration "$E2E_WF") * 3 / 2 )); [ "$ceil" -ge 600 ] || ceil=600
+  echo "     run $RID, ceiling $((ceil / 60)) min (1.5x the last completed run)"
+  CONC="$(wait_run_bounded "$RID" "$ceil")" || true
+  echo "     $E2E_WF on ${sha:0:7}: $CONC"
+  [ "$CONC" = success ]
+}
+# The PR's size, read from GitHub, judged by large_reason. Prints the reason (0) or nothing (1).
+# A size that cannot be read is judged large by large_reason itself (fail closed: the suite runs).
+pr_large_reason() { # $1 pr number
+  local stats add del files
+  stats="$(gh pr view "$1" --json additions,deletions,changedFiles,files \
+            -q '"\(.additions) \(.deletions) \(.changedFiles)", (.files[].path)' 2>/dev/null)" || stats=""
+  [ -n "$stats" ] || stats="? ? ?"
+  read -r add del files <<<"$(head -1 <<<"$stats")"
+  tail -n +2 <<<"$stats" | large_reason "$add" "$del" "$files"
+}
+
 # NEVER RACE THE REPO'S OWN PROMOTE. 26 Sep 2026: sheila-creator-dashboard grew promote.yml (fires
 # on a green e2e run of main, deploys production from that sha, records the GitHub Deployment). Its
 # already-live check only catches the SEQUENTIAL case; a person running `land --promote` in the same
@@ -374,24 +450,13 @@ if [ "$MODE" = promote ]; then
   fi
   if [ -z "$CAND" ] && [ -n "$RUN_E2E" ]; then
     say "2/4  no e2e-green commit newer than production — running $E2E_WF on main ${HEADSHA:0:7} (--run-e2e)"
-    # An in-flight run on the head (the nightly, or someone's dispatch) is waited for, not doubled.
-    RID="$(gh run list --workflow "$E2E_WF" --branch main --limit 10 --json databaseId,headSha,status \
-            -q "[.[] | select(.headSha == \"$HEADSHA\" and .status != \"completed\")][0].databaseId // empty" 2>/dev/null)"
-    if [ -z "$RID" ]; then
-      T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      gh workflow run "$E2E_WF" --ref main >/dev/null || die "could not dispatch $E2E_WF on main"
-      for _ in $(seq 1 12); do
-        sleep 10
-        RID="$(gh run list --workflow "$E2E_WF" --branch main --event workflow_dispatch --limit 5 --json databaseId,headSha,createdAt \
-                -q "[.[] | select(.headSha == \"$HEADSHA\" and .createdAt >= \"$T0\")][0].databaseId // empty" 2>/dev/null)"
-        [ -n "$RID" ] && break
-      done
-      [ -n "$RID" ] || die "dispatched $E2E_WF on main but no run appeared in 2 minutes. Check: gh run list --workflow $E2E_WF"
-    fi
-    CEIL=$(( $(last_duration "$E2E_WF") * 3 / 2 )); [ "$CEIL" -ge 600 ] || CEIL=600
-    echo "     run $RID, ceiling $((CEIL / 60)) min (1.5x the last completed run)"
-    CONC="$(wait_run_bounded "$RID" "$CEIL")" || true
-    echo "     $E2E_WF on ${HEADSHA:0:7}: $CONC"
+    # An in-flight run on the head (someone's dispatch) is waited for, not doubled.
+    RID=""; CONC=""
+    run_e2e_on_main "$HEADSHA" || true
+    case "$CONC" in
+      could-not-dispatch) die "could not dispatch $E2E_WF on main" ;;
+      no-run-appeared) die "dispatched $E2E_WF on main but no run appeared in 2 minutes. Check: gh run list --workflow $E2E_WF" ;;
+    esac
     [ "$CONC" = success ] || die "$E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC. Nothing promoted; production stays on ${PROD:-its current build}. Fix main first: gh run view $RID"
     # That success is exactly what the repo's promote.yml (if any) fires on: wait for it, then
     # read production again — it has usually just shipped this very sha.
@@ -749,6 +814,13 @@ MSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>
 E2E_CONC=""; [ -z "$E2E_WF" ] || E2E_CONC="$(e2e_verdict "$MSHA")"
 PLAN="$(land_plan "$DEPLOY" "$STAGING" "$E2E_WF" "$E2E_CONC")"
 say "5/5  ${MSHA:0:7}: $PLAN${E2E_WF:+ ($E2E_WF on this sha: ${E2E_CONC:-no completed run})}"
+ship_production() { # $1 sha  $2 deployment note
+  say "     production <- ${1:0:7}"
+  deploy_at "$1" "$DEPLOY" || die "#$PR IS MERGED and main is green, but the production deploy from ${1:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
+  if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
+  [ -z "$E2E_WF" ] || record_production "$1" "$2"
+  say "LANDED — #$PR is merged, main is green, ${STAGING:+staging and }production run ${1:0:7}."
+}
 for step in $PLAN; do
   case "$step" in
     staging)
@@ -756,15 +828,37 @@ for step in $PLAN; do
       deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and main is green, but the STAGING deploy from ${MSHA:0:7} failed — read the error, it explains itself. Production untouched."
       ;;
     production)
-      say "     production <- ${MSHA:0:7}"
-      deploy_at "$MSHA" "$DEPLOY" || die "#$PR IS MERGED and main is green, but the production deploy from ${MSHA:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
-      if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${MSHA:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
-      [ -z "$E2E_WF" ] || record_production "$MSHA" "land #$PR from ${MSHA:0:7}"
-      say "LANDED — #$PR is merged, main is green, ${STAGING:+staging and }production run ${MSHA:0:7}."
+      ship_production "$MSHA" "land #$PR from ${MSHA:0:7}"
       ;;
     waiting)
-      say "WAITING — #$PR is merged, main's fast check is green${STAGING:+, staging runs ${MSHA:0:7}}."
-      say "production waits for full $E2E_WF on $MSHA; run \`land --promote $NAME\` after it passes (or \`land --promote $NAME --run-e2e\` to run it now)"
+      # A LARGE CHANGE RUNS THE SUITE NOW (owner, 2 Oct 2026; header). The e2e workflows are
+      # dispatch-only, so after a merge nothing runs them unless this does. Measured, never guessed:
+      # the reason is printed here and recorded on the production deployment.
+      if [ -n "$RUN_E2E" ]; then REASON="--run-e2e given"; else REASON="$(pr_large_reason "$PR")" || REASON=""; fi
+      if [ -z "$REASON" ]; then
+        say "WAITING — #$PR is merged, main's fast check is green${STAGING:+, staging runs ${MSHA:0:7}}."
+        echo "     small change (under $LAND_LARGE_LINES lines, $LAND_LARGE_FILES files, no schema/e2e/UI-surface trigger): the suite is not run for it"
+        say "production waits for full $E2E_WF on $MSHA; run \`land --promote $NAME\` after it passes (or \`land --promote $NAME --run-e2e\` to run it now)"
+        continue
+      fi
+      say "     LARGE CHANGE — $REASON: running $E2E_WF on main before production"
+      git fetch -q origin main 2>/dev/null || true
+      HEADSHA="$(git rev-parse origin/main 2>/dev/null)"; [ -n "$HEADSHA" ] || HEADSHA="$MSHA"
+      [ "$HEADSHA" = "$MSHA" ] || echo "     main has moved on to ${HEADSHA:0:7} since #$PR merged — the suite proves that head, which contains #$PR"
+      RID=""; CONC=""
+      run_e2e_on_main "$HEADSHA" || true
+      case "$CONC" in
+        could-not-dispatch) die "NAMED STOP [E2E_NOT_DISPATCHED] could not dispatch $E2E_WF on main for #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Run it: land --promote $NAME --run-e2e" ;;
+        no-run-appeared) die "NAMED STOP [E2E_NOT_DISPATCHED] dispatched $E2E_WF on main for #$PR ($REASON) but no run appeared in 2 minutes. ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Check: gh run list --workflow $E2E_WF" ;;
+        success) : ;;
+        *) die "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] $E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC after #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Fix main first: gh run view $RID" ;;
+      esac
+      # That success is exactly what the repo's promote.yml (if any) fires on: wait for it, then
+      # read production — it has usually just shipped this very sha.
+      promote_wait_inflight "$HEADSHA"
+      PROD="$(production_sha)"
+      if [ "$PROD" = "$HEADSHA" ]; then say "LANDED — #$PR is merged, $E2E_WF is green on ${HEADSHA:0:7} ($REASON), and the repo's own $PROMOTE_WF shipped it to production."
+      else ship_production "$HEADSHA" "land #$PR, large change ($REASON), $E2E_WF green on ${HEADSHA:0:7}"; fi
       ;;
   esac
 done

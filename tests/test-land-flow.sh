@@ -61,6 +61,8 @@ case "$a" in
   "pr merge "*) : > "$FAKE_DIR/merged"; exit 0 ;;
   "pr view "*"--json state "*) merged && echo MERGED || echo OPEN; exit 0 ;;
   "pr view "*mergeCommit*) echo "$MERGESHA"; exit 0 ;;
+  # pr-size = "ADD DEL FILES" + paths, one per line (cases 15-17); absent = the read fails (unhandled).
+  "pr view "*additions*) [ -f "$FAKE_DIR/pr-size" ] || { echo "HTTP 500" >&2; exit 1; }; cat "$FAKE_DIR/pr-size"; exit 0 ;;
   # --- promote fakes (cases 11-14). promote-inflight = a promote.yml run 777 is in flight on
   # origin/main; each conclusion read counts down promote-ticks, and when it reaches 0 the run is
   # done and production's deployment record says origin/main. promote-hang = it never finishes.
@@ -77,7 +79,8 @@ case "$a" in
   "run list --workflow e2e "*"databaseId,headSha,status"*) [ -f "$FAKE_DIR/e2e-pending" ] && echo 800; exit 0 ;;
   "run list --workflow e2e "*"--status completed"*) echo 100; exit 0 ;;
   "run list --workflow e2e "*) exit 0 ;;
-  "run view 800 "*conclusion*) rm -f "$FAKE_DIR/e2e-pending"; : > "$FAKE_DIR/promote-inflight"; echo success; exit 0 ;;  # green e2e fires promote.yml
+  "run view 800 "*conclusion*) rm -f "$FAKE_DIR/e2e-pending"
+    if [ -f "$FAKE_DIR/e2e-red" ]; then echo failure; else : > "$FAKE_DIR/promote-inflight"; echo success; fi; exit 0 ;;  # green e2e fires promote.yml
   "api repos/{owner}/{repo}/deployments?environment=production"*)
     [ -f "$FAKE_DIR/promote-done" ] && echo "$ORIGIN_MAIN"; exit 0 ;;
   "api -X POST repos/{owner}/{repo}/deployments"*) echo 4242; exit 0 ;;                    # record_production
@@ -257,6 +260,50 @@ check "then waited for the promote run it triggered" has "promote run 777 in fli
 check "NOTHING TO PROMOTE — promote.yml shipped the head" has "shipped main's head ${ORIGIN_MAIN:0:7}"
 check "no deploy from this side" [ ! -f "$FAKE/npm-ran" ]
 
+# --- land <pr> after a LARGE change on an e2e route — 2 Oct 2026 --------------------------------------
+# The e2e workflows are dispatch-only now, so after a merge nothing runs them unless land does. A
+# large PR (measured by the `large` block, tests/test-land-large.sh) makes land run the suite on
+# main's head and ship production only on green; a small one still prints WAITING.
+# Here the merge commit IS main's head and the merge sha the fake answers is ORIGIN_MAIN.
+echo "=== 15. a large PR (300 lines): land runs the suite, waits, and the repo's promote.yml ships it ==="
+fixture sheila-creator-dashboard promote
+MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
+printf '250 50 3\nworker/domain/sync.ts\napp/pages/Calendar.tsx\nshared/types.ts\n' > "$FAKE/pr-size"
+: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
+run_land sheila-creator-dashboard
+check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "says why: 300 lines ≥ 200" has "LARGE CHANGE — 300 lines changed (+250/-50) ≥ 200"
+check "staging deployed first, from the merge sha" grep -qx "head=$ORIGIN_MAIN" "$FAKE/npm-ran"
+check "waited for the in-flight e2e run 800 (adopted, not doubled)" [ "$(grep -c '^run view 800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
+check "then waited for the promote run the green fired" has "promote run 777 in flight"
+check "LANDED — promote.yml shipped it" has "LANDED" && has "promote.yml shipped it to production"
+check "never WAITING" eval '! has "WAITING"'
+
+echo "=== 16. a small PR (12 lines, worker only): WAITING as before, no suite run ==="
+fixture sheila-creator-dashboard promote
+MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
+printf '10 2 1\nworker/domain/sync.ts\n' > "$FAKE/pr-size"
+: > "$FAKE/e2e-pending"; mkdir "$W/sheila-creator-dashboard/node_modules"
+run_land sheila-creator-dashboard
+check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "WAITING, with the small-change reason" has "WAITING" && has "small change (under 200 lines, 8 files"
+check "the suite was neither adopted nor dispatched" eval '! grep -q "^run view 800" "$FAKE/calls" && ! grep -q "^workflow run" "$FAKE/calls"'
+check "production never deployed from this side (staging only)" [ "$(grep -c 'head=' "$FAKE/npm-ran")" -eq 1 ]
+check "…but --run-e2e forces it for any size" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; OUT="$(cd "$W/sheila-creator-dashboard" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" 7 --run-e2e 2>&1)"; has "LARGE CHANGE — --run-e2e given" && has "LANDED"'
+
+echo "=== 17. a large PR whose suite goes RED: NAMED STOP, staging deployed, production untouched ==="
+fixture sheila-creator-dashboard promote
+MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
+printf '3 0 1\nmigrations/0042_posts.sql\n' > "$FAKE/pr-size"
+: > "$FAKE/e2e-pending"; : > "$FAKE/e2e-red"; mkdir "$W/sheila-creator-dashboard/node_modules"
+run_land sheila-creator-dashboard
+check "rc 1" [ "$RC" -eq 1 ]
+check "a migration is large at any size" has "LARGE CHANGE — touches the schema or the browser-test contract (migrations/0042_posts.sql)"
+check "NAMED STOP names the run and the reason" has "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 800"
+check "staging ran once, production never" [ "$(grep -c 'head=' "$FAKE/npm-ran")" -eq 1 ] && ! has "production <-"
+check "the size read that cannot be answered is large, fail closed" eval 'rm -f "$FAKE/pr-size" "$FAKE/e2e-red" "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land sheila-creator-dashboard; has "LARGE CHANGE — PR size unreadable" && has "LANDED"'
+MERGESHA="2222222222222222222222222222222222222222"; export MERGESHA
+
 echo "=== negative proof: a land that does not wait for the promote run deploys on top of it ==="
 BROKEN="$W/land-no-wait"; sed '/^  promote_wait_inflight$/d' "$LAND" > "$BROKEN"
 check "the broken copy differs (the wait call was removed)" eval '! cmp -s "$LAND" "$BROKEN"'
@@ -267,6 +314,6 @@ check "the broken land raced the run and deployed (this harness catches it)" [ -
 check "…without ever watching run 777" eval '! grep -q "^run view 777" "$FAKE/calls"'
 
 # Rule 0: this must have examined something.
-[ "$passes" -ge 55 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }
+[ "$passes" -ge 72 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-land-flow: $fails failure(s), $passes passed"; exit 1; }
-echo "test-land-flow: $passes checks passed — land leaves her tree alone, never reads could-not-check as an answer, and never races a repo's own promote run"
+echo "test-land-flow: $passes checks passed — land leaves her tree alone, never reads could-not-check as an answer, never races a repo's own promote run, and runs the suite itself after a large change"

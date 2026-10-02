@@ -54,26 +54,37 @@ done <<< "$SITES"
 got="$(route_for no-such-repo-xyz)"
 case "$got" in DIED:*) echo "  ok   unknown repo stops: ${got#DIED: }" ;; *) echo "  FAIL unknown repo did not stop: '$got'"; fails=$((fails+1)) ;; esac
 # 26 Sep 2026: the build-first repo carries a staging command and names its full e2e workflow,
-# so land deploys staging on every merge and holds production for a green e2e on the sha.
+# so land deploys staging on every merge; production then follows the plan block (2 Oct 2026: a
+# small change ships on the fast check, a large one on a green e2e — tests/test-land-plan.sh).
 # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
-# mercedes-creator-dashboard (26 Sep 2026) is the same shape: stages on every land, waits for e2e,
+# mercedes-creator-dashboard (26 Sep 2026) is the same shape: stages on every land, names e2e,
 # smokes its own custom domain (never Sheila's URL).
 for build_first in sheila-creator-dashboard mercedes-creator-dashboard; do
   staged="$( ( NAME=$build_first; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
-  if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   $build_first stages (npm run deploy:staging) and waits for e2e"
+  if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   $build_first stages (npm run deploy:staging) and names its e2e workflow"
   else echo "  FAIL $build_first route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
 done
 smoke="$( ( NAME=mercedes-creator-dashboard; DEPLOY=""; SELF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$SMOKE" ) )"
 if [ "$smoke" = "https://dashboard.justbeingmercedes.com/healthz" ]; then echo "  ok   mercedes-creator-dashboard smokes its own domain"
 else echo "  FAIL mercedes-creator-dashboard smoke: got '$smoke'"; fails=$((fails+1)); fi
-# 26 Sep 2026: boss-os names its full e2e workflow (no staging target), so land holds production
-# for a green `e2e` on the sha and `land --promote boss-os` ships it. And a route with E2E_WF must
+# 26 Sep 2026: boss-os names its full e2e workflow (no staging target), so the plan block governs
+# its production and `land --promote boss-os` ships an e2e-green commit. 2 Oct 2026: it also names
+# deploy.yml as the workflow that ships on a green e2e (PROMOTE_WF), so land waits for that run
+# after the suite instead of racing it from the laptop. And a route with E2E_WF must
 # not take the "wait for the Deploy run" branch: that deploy.yml fires on e2e now, and the newest
 # Deploy run on main would be an older commit's. Proven by reading the guard out of land itself.
 # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
-bossed="$( ( NAME=boss-os; DEPLOY=""; SELF=""; STAGING=""; E2E_WF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
-if [ "$bossed" = "|e2e" ]; then echo "  ok   boss-os waits for e2e (no staging target)"
-else echo "  FAIL boss-os route: expected '|e2e', got '$bossed'"; fails=$((fails+1)); fi
+bossed="$( ( NAME=boss-os; DEPLOY=""; SELF=""; STAGING=""; E2E_WF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF|$PROMOTE_WF|$PROMOTE_VIA" ) )"
+if [ "$bossed" = "|e2e|deploy.yml|" ]; then echo "  ok   boss-os names e2e (no staging target) and waits for its own deploy.yml after a green suite"
+else echo "  FAIL boss-os route: expected '|e2e|deploy.yml|', got '$bossed'"; fails=$((fails+1)); fi
+# Every other route waits for promote.yml when the repo carries one (the default), and names no
+# PROMOTE_VIA unless it is listed below.
+for r in sheila-creator-dashboard mercedes-creator-dashboard west-peek-os approvalprep; do
+  # shellcheck disable=SC2034
+  got="$( ( NAME="$r"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$PROMOTE_WF|$PROMOTE_VIA" ) )"
+  if [ "$got" = "promote.yml|" ]; then echo "  ok   $r: PROMOTE_WF promote.yml, no PROMOTE_VIA"
+  else echo "  FAIL $r: expected 'promote.yml|', got '$got'"; fails=$((fails+1)); fi
+done
 # The guard reads deploy.yml from origin/main (never the working tree: her checkout may be on any
 # branch, #14) AND skips routes with E2E_WF (deploy.yml fires on e2e, not CI, #18). Both, on one line.
 if grep -q '^if git cat-file -e origin/main:.github/workflows/deploy.yml 2>/dev/null && \[ -z "\$E2E_WF" \]; then' "$LAND" \
@@ -88,5 +99,25 @@ for r in secondaries founder-dilution-dashboard justbeingmercedes; do
   case "$self" in *staging*e2e*) echo "  ok   $r self-deploy sentence names staging and the e2e gate" ;;
     *) echo "  FAIL $r self-deploy sentence does not name staging + e2e: '$self'"; fails=$((fails+1)) ;; esac
 done
+# 2 Oct 2026: those three are the routes whose production moves through the repo's OWN workflow.
+# land must be able to drive it — the e2e workflow named (so the plan and the known-red rule apply)
+# and the workflow to dispatch named (PROMOTE_VIA, which is then also the run it waits for). Without
+# these land confirmed the staging build and stopped: production never moved for a small change.
+while IFS='|' read -r r via; do
+  [ -n "$r" ] || continue
+  # shellcheck disable=SC2034
+  got="$( ( NAME="$r"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$E2E_WF|$PROMOTE_VIA|$PROMOTE_WF" ) )"
+  if [ "$got" = "|e2e|$via|$via" ]; then echo "  ok   $r ships production through its own $via, on the plan (e2e named)"
+  else echo "  FAIL $r: expected '|e2e|$via|$via', got '$got'"; fails=$((fails+1)); fi
+done <<'VIA'
+secondaries|promote.yml
+founder-dilution-dashboard|promote.yml
+justbeingmercedes|deploy.yml
+VIA
+# …and land does not stop at the staging build for them: the self-deploy branch exits only when the
+# route names no PROMOTE_VIA.
+if grep -q '^  \[ -n "\$PROMOTE_VIA" \] && \[ -n "\$E2E_WF" \] || exit 0$' "$LAND"; then
+  echo "  ok   a PROMOTE_VIA route falls through from the staging build to the plan"
+else echo "  FAIL land exits at the staging build even for a PROMOTE_VIA route (or the guard moved)"; fails=$((fails+1)); fi
 [ "$fails" -eq 0 ] || { echo "test-land-routes: $fails failure(s)"; exit 1; }
 echo "test-land-routes: $n site repos routed, unknown repo refused"

@@ -85,14 +85,14 @@ jobs:
       - name: ci-sweep-stream.py must leave a line-by-line round log with the sentinel intact
         run: ./tests/test-stream-filter.sh
 
-      # Her design of 2026-09-23: once a day at 06:00, park per repo, rounds while
+      # Her design of 2026-09-23 (then once a day at 06:00; Mon+Fri 08:00 since 2 Oct 2026): park per repo, rounds while
       # progress, the sweep merges only what it read green, opus pinned, one summary.
       # Drives ci-sweep.sh end to end through fake claude/gh/land/probe/audit.
-      # 26 Sep 2026: the 08:00 gate found the 07:00 run still in flight and lost the day's retry.
-      - name: the 08:00 retry gate waits for an in-flight run and decides from its row
+      # 26 Sep 2026 (then daily 07:00/08:00): the retry gate found the primary run still in flight and lost the day's retry.
+      - name: the 09:00 retry gate waits for an in-flight run and decides from its row
         run: ./tests/test-retry-gate.sh
 
-      - name: ci-sweep.sh daily design — park per repo, progress rounds, verified merges
+      - name: ci-sweep.sh per-run design (tests/test-sweep-daily.sh) — park per repo, progress rounds, verified merges
         run: ./tests/test-sweep-daily.sh
 
       # The detectors must not be able to go back to matching strings. This runs

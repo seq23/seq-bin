@@ -1,5 +1,5 @@
-Scheduled CI sweep — runs at 07:00 CT, budget 3h30 (done by about 10:30), with one automatic
-retry at 08:00 if that run did not end green. Goal:
+Scheduled CI sweep — runs Monday and Friday at 08:00 CT (Mon+Fri since 2 Oct 2026), budget 3h30
+(done by about 11:30), with one automatic retry at 09:00 if that run did not end green. Goal:
 every repo's `main` green. Find every red GitHub Actions run across Sequoia's repos and FIX
 them at the root. She should not be getting daily failure notifications.
 
@@ -11,7 +11,7 @@ whatever was last chosen with /model is the defect this line exists to prevent.
 
 `gh api notifications` returns ONLY UNREAD items and silently undercounts. Always use both sources and take the UNION:
 
-    gh api "notifications?all=true&since=$(date -u -v-26H +%Y-%m-%dT%H:%M:%SZ)" --paginate \
+    gh api "notifications?all=true&since=$(date -u -v-98H +%Y-%m-%dT%H:%M:%SZ)" --paginate \
       -q '.[] | select(.reason=="ci_activity") | "\(.repository.full_name)\t\(.subject.title)"'
 
     gh run list --repo seq23/<name> --status failure --limit 5 --json name,createdAt,databaseId
@@ -40,7 +40,7 @@ live site sat degraded. **Nothing was red, because nothing ran.**
 So after the failure sweep, run a SILENCE sweep. For every repo with commits since
 the last sweep, check it produced at least one CI run:
 
-    WINDOW=$(date -u -v-26H +%Y-%m-%dT%H:%M:%SZ)   # a day since the last daily run, plus slack
+    WINDOW=$(date -u -v-98H +%Y-%m-%dT%H:%M:%SZ)   # the longest gap between runs (Mon->Fri, 96h), plus slack
 
     # commits in the window vs runs in the window
     gh api "repos/seq23/<name>/commits?since=$WINDOW" -q 'length'
@@ -157,8 +157,8 @@ merged and the fact that it did not work. **Rounds continue while they make prog
 a red lane went away, or a red lane's failure signature changed (a new root cause
 surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget
 ends it as UNFINISHED, with the exact unfinished list carried to the next run. **This run never retries itself**: if it does not end MAIN-GREEN, a
-separate 08:00 check (`ci-sweep-retry-if-red.sh`) runs the whole sweep again exactly once;
-a second non-green ending waits for tomorrow's 07:00 run, briefed with what both tries did.
+separate 09:00 check (`ci-sweep-retry-if-red.sh`) runs the whole sweep again exactly once;
+a second non-green ending waits for the next Mon/Fri 08:00 run, briefed with what both tries did.
 
 This exists because of 2026-09-08. `Velocity Content Release` in
 `local-guides-citation-velocity` failed at 02:00 and 08:38. The 10:07 sweep dispatched

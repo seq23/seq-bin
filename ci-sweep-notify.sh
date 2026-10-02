@@ -3,8 +3,9 @@
 #
 #   ci-sweep-notify.sh <VERDICT> <SUMMARY> <RUN_LOG> [ISSUES_TSV] [DETAIL]
 #
-# THE MORNING SUMMARY (design of 23 Sep 2026: one run a day at 07:00, one answer;
-# one automatic retry at 08:00 added 24 Sep 2026 if the 07:00 run was not green)
+# THE MORNING SUMMARY (design of 23 Sep 2026: one run per run day, one answer;
+# one automatic retry an hour later added 24 Sep 2026 if the primary run was not
+# green; 2 Oct 2026, owner: run days are Mon+Fri at 08:00, retry 09:00)
 # · A macOS banner, ALWAYS: which repos are green, fixed, parked, stuck. One banner
 #   per run — so a retry day gets two — replacing the old 30-minute retry loop's
 #   many banners; a green one is information, not noise.
@@ -52,14 +53,14 @@ case "$VERDICT" in
     ACT="Two rounds in a row changed nothing, so the stuck repos need a look or a decision. Each has an issue on its repo; parked ones name the decision needed." ;;
   MAIN-RED-UNFINISHED)
     HEAD="work left unfinished — not green yet"
-    ACT="The run ended with work the sweep could not finish here: lanes still red when the 3h30 budget ran out, fixes merged whose lanes have not re-run on main, or its own fix PRs still open. The exact list is in the carryover, and the next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) resumes from it." ;;
+    ACT="The run ended with work the sweep could not finish here: lanes still red when the 3h30 budget ran out, fixes merged whose lanes have not re-run on main, or its own fix PRs still open. The exact list is in the carryover, and the next run (today's 09:00 retry if this wasn't green, otherwise the next Mon/Fri 08:00) resumes from it." ;;
   MAIN-RED-KILLED)
     HEAD="was killed before it reached a verdict"
     ACT="Something ended the sweep from outside (a signal to its supervisor). Main is unverified; the next run resumes."
     RUN_LEVEL=1 ;;
   MAIN-RED-TEMPFIX)
     HEAD="caught a fix weakening a test — DO NOT MERGE it"
-    ACT="A fixing agent tried to reach green by disabling a check. The PR is marked REJECTED on the PR itself and the run ended. Close or rewrite that PR; tomorrow's run is told to fix the root cause."
+    ACT="A fixing agent tried to reach green by disabling a check. The PR is marked REJECTED on the PR itself and the run ended. Close or rewrite that PR; the next run is told to fix the root cause."
     RUN_LEVEL=1 ;;
   MAIN-RED-HUNG)
     HEAD="hung and was killed"
@@ -67,7 +68,7 @@ case "$VERDICT" in
     RUN_LEVEL=1 ;;
   MAIN-RED-INTERRUPTED)
     HEAD="interrupted by the Mac sleeping"
-    ACT="The round in flight was ended, not finished; its open PRs are parked, never merged. Main is unverified until the next run (today's 08:00 retry, or tomorrow's 07:00). Check pmset if it recurs: sleep should be 0."
+    ACT="The round in flight was ended, not finished; its open PRs are parked, never merged. Main is unverified until the next run (today's 09:00 retry, or the next Mon/Fri 08:00). Check pmset if it recurs: sleep should be 0."
     RUN_LEVEL=1 ;;
   MAIN-UNKNOWN)
     HEAD="could not run"
@@ -131,7 +132,7 @@ file_issue() { # repo title body
 }
 
 FOOTER="---
-Filed by \`~/bin/ci-sweep.sh\` (07:00 daily, one retry at 08:00 if not green). **Run verdict:** \`$VERDICT\` · **When:** $WHEN · **Log:** \`$RUN_LOG\`
+Filed by \`~/bin/ci-sweep.sh\` (Mon+Fri 08:00 CT, one retry at 09:00 if not green). **Run verdict:** \`$VERDICT\` · **When:** $WHEN · **Log:** \`$RUN_LOG\`
 
 **Morning summary:** $SUMMARY"
 
@@ -147,7 +148,7 @@ if [ "$n_issue_lines" -gt 0 ]; then
 
 **What is needed:** $need
 
-The sweep stopped working this repo and carried on with the rest. The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) re-checks it; record the decision (or supply the credential) and it will pick it up.
+The sweep stopped working this repo and carried on with the rest. The next run (today's 09:00 retry if this wasn't green, otherwise the next Mon/Fri 08:00) re-checks it; record the decision (or supply the credential) and it will pick it up.
 
 $FOOTER" ;;
       UNVERIFIED)
@@ -156,7 +157,7 @@ $FOOTER" ;;
 
 **Unfinished:** $need
 
-The fix is merged, but the lane has not run on main since, so the sweep cannot call it green. The sweep dispatches such a lane itself where it can; this one it could not (no manual trigger, or a repo whose lanes it never runs by hand). The next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) re-checks it from GitHub.
+The fix is merged, but the lane has not run on main since, so the sweep cannot call it green. The sweep dispatches such a lane itself where it can; this one it could not (no manual trigger, or a repo whose lanes it never runs by hand). The next run (today's 09:00 retry if this wasn't green, otherwise the next Mon/Fri 08:00) re-checks it from GitHub.
 
 $FOOTER" ;;
       *)
@@ -165,7 +166,7 @@ $FOOTER" ;;
 
 **Still failing:** $need
 
-Rounds stopped changing this failure (or the budget ran out while it was still red). It likely needs a decision, a credential, or a platform-side flag rather than another code fix — say which, and the next run (today's 08:00 retry if this wasn't green, otherwise tomorrow's 07:00) will act on it.
+Rounds stopped changing this failure (or the budget ran out while it was still red). It likely needs a decision, a credential, or a platform-side flag rather than another code fix — say which, and the next run (today's 09:00 retry if this wasn't green, otherwise the next Mon/Fri 08:00) will act on it.
 
 $FOOTER" ;;
     esac

@@ -1,5 +1,5 @@
 #!/bin/bash
-# ci-sweep-retry-if-red.sh, the 08:00 gate, against a fake ledger, a fake lock and a
+# ci-sweep-retry-if-red.sh, the 09:00 gate (08:00 until 2 Oct 2026, when the cadence went Mon+Fri), against a fake ledger, a fake lock and a
 # fake sweep. What is under test is the gate's OWN decision:
 #   · no row today, nothing in flight        -> run the sweep
 #   · a MAIN-GREEN row today                  -> do nothing
@@ -7,7 +7,7 @@
 #   · one non-green row today                 -> run the sweep (the one retry)
 #   · two rows today                          -> do nothing
 #   · no row today, a sweep IN FLIGHT         -> wait for it, then decide from ITS row
-#     (26 Sep 2026: the 07:00 run was in round 2 at 08:00; the gate ran the sweep, the
+#     (26 Sep 2026, then daily 07:00/08:00: the 07:00 run was in round 2 at 08:00; the gate ran the sweep, the
 #     lock no-oped it, and the day could never get its retry)
 #   · in flight past its ceiling              -> hand it to the sweep (whose lock reclaims)
 #   · in flight, then gone with no row        -> run the sweep
@@ -100,4 +100,4 @@ fi
 [ "$asserts" -eq 0 ] && { echo "RULE 0 [ASSERTED_NOTHING]"; exit 2; }
 echo "=== $asserts assertion(s), $failed failed ==="
 [ "$failed" -eq 0 ] || exit 1
-echo "the 08:00 gate waits for an in-flight run, decides from its row, and never loses the day's retry."
+echo "the 09:00 gate waits for an in-flight run, decides from its row, and never loses the day's retry."

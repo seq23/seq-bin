@@ -260,6 +260,14 @@ case "$NAME" in
   # justbeingmercedes.com by the same deploy.yml's production path (workflow_run on a green e2e,
   # or land's dispatch with the sha and the small-change reason — PROMOTE_VIA, 2 Oct 2026).
   justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages (deploy.yml): main -> staging preview on push; justbeingmercedes.com by deploy.yml's production path (small change: on the fast check; large: on a green e2e)" ; E2E_WF="e2e" ; PROMOTE_VIA="deploy.yml" ;;
+  # wrangler.toml pages_build_output_dir = "public"; Pages project topbarz-voting (Direct Upload:
+  # public/ + Pages Functions, D1 and R2; voting.topbarz.xyz). Its deploy.yml fires on a green
+  # Validate on main and ships that sha itself — preview database migrated, staging published, a
+  # live check, then production database migrated, production published, a live check — so land
+  # WAITS for that Deploy run (the deploy.yml guard below) and never races it with a second
+  # `d1 migrations apply` from the laptop. The command here is the same full path by hand
+  # (break-glass). No browser suite in the repo, so no E2E_WF. Added 2 Oct 2026.
+  topbarz-voting)       DEPLOY="npm run deploy:production" ; SELF="" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

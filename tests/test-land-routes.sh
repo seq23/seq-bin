@@ -35,6 +35,7 @@ justbeingmercedes|self
 local-guides-generator|self
 sheila-creator-dashboard|npm run deploy:production
 mercedes-creator-dashboard|npm run deploy:production
+topbarz-voting|npm run deploy:production
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
@@ -79,7 +80,7 @@ if [ "$bossed" = "|e2e|deploy.yml|" ]; then echo "  ok   boss-os names e2e (no s
 else echo "  FAIL boss-os route: expected '|e2e|deploy.yml|', got '$bossed'"; fails=$((fails+1)); fi
 # Every other route waits for promote.yml when the repo carries one (the default), and names no
 # PROMOTE_VIA unless it is listed below.
-for r in sheila-creator-dashboard mercedes-creator-dashboard west-peek-os approvalprep; do
+for r in sheila-creator-dashboard mercedes-creator-dashboard west-peek-os approvalprep topbarz-voting; do
   # shellcheck disable=SC2034
   got="$( ( NAME="$r"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$PROMOTE_WF|$PROMOTE_VIA" ) )"
   if [ "$got" = "promote.yml|" ]; then echo "  ok   $r: PROMOTE_WF promote.yml, no PROMOTE_VIA"
@@ -119,5 +120,13 @@ VIA
 if grep -q '^  \[ -n "\$PROMOTE_VIA" \] && \[ -n "\$E2E_WF" \] || exit 0$' "$LAND"; then
   echo "  ok   a PROMOTE_VIA route falls through from the staging build to the plan"
 else echo "  FAIL land exits at the staging build even for a PROMOTE_VIA route (or the guard moved)"; fails=$((fails+1)); fi
+# 2 Oct 2026: topbarz-voting ships through its own deploy.yml on a green Validate (staging, a live
+# check, production, a live check) and has no browser suite. So its route must name NO e2e workflow
+# and NO staging command: with either set, land would skip the "wait for the Deploy run" branch and
+# deploy from the laptop, racing the workflow's `d1 migrations apply`.
+# shellcheck disable=SC2034  # NAME is read by the eval'd routes block
+tbz="$( ( NAME=topbarz-voting; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$SELF|$STAGING|$E2E_WF|$PROMOTE_VIA" ) )"
+if [ "$tbz" = "npm run deploy:production||||" ]; then echo "  ok   topbarz-voting waits for its own Deploy run (no e2e workflow, no staging command, no PROMOTE_VIA)"
+else echo "  FAIL topbarz-voting route: expected 'npm run deploy:production||||', got '$tbz'"; fails=$((fails+1)); fi
 [ "$fails" -eq 0 ] || { echo "test-land-routes: $fails failure(s)"; exit 1; }
 echo "test-land-routes: $n site repos routed, unknown repo refused"

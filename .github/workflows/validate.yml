@@ -75,6 +75,11 @@ jobs:
       # plan block (two pure functions) and carries a negative proof.
       - name: land must hold production for a green full e2e and promote the newest green
         run: ./tests/test-land-plan.sh
+      # On demand only, after a large change (2 Oct 2026): the e2e workflows are dispatch-only, so
+      # land runs the suite itself when the PR is large. Evals land's large block: every threshold
+      # at its edge, every path trigger, unreadable = large, with a negative proof.
+      - name: land must measure "large change", never guess it
+        run: ./tests/test-land-large.sh
 
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh

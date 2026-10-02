@@ -95,3 +95,26 @@ the scripts those workflows call where a browser could hide behind an npm alias.
   "the Deploy workflow shipped it" from the previous commit's Deploy run. That sentence is the bug the
   E2E_WF guard in this PR removes; boss-os's first production move is the 07:00 UTC nightly (or
   `land --promote boss-os --run-e2e`).
+
+## 2 Oct 2026 — small changes ship on the fast check (supersedes "prints WAITING" above)
+
+Owner, asked and answered: with the browser suites on demand only, a SMALL change ships to
+production on the fast check alone; e2e gates production only after a LARGE change (`land`
+measures it and runs the suite) or when asked (`--run-e2e`). Before this, `land <pr>` on a small
+change printed WAITING for a green e2e nothing would ever run, and six repos sat on staging.
+
+- **One definition of "large"**: the `large` block in `land`. The repos point at it; none restates
+  the thresholds.
+- **Every change production has not seen is judged**, not only the PR in hand (`range` block): a
+  large commit whose suite never ran makes the next land run it.
+- **Known red blocks**: the newest e2e run on main that reached a verdict (cancelled/skipped passed
+  over) must be `success` or absent, else `NAMED STOP [E2E_KNOWN_RED]`. A red run on the exact sha
+  blocks likewise. An unreadable history is exit 75.
+- **Routes**: `secondaries`, `founder-dilution-dashboard` (`promote.yml`) and `justbeingmercedes`
+  (`deploy.yml`) gain `E2E_WF="e2e"` and `PROMOTE_VIA` — land dispatches the repo's own workflow
+  with `-f sha=` / `-f reason=` and reads the GitHub Deployment it records. `boss-os` gains
+  `PROMOTE_WF="deploy.yml"`: after a green suite land waits for that run instead of deploying the
+  same sha from the laptop (two `d1 migrations apply` at once).
+- **In each repo**: the promote/deploy workflow's dispatch path accepts a sha with a green e2e, or
+  — with a `reason` — a sha whose fast check is green while the suite is not known red; its
+  validator pins both halves.

@@ -70,14 +70,16 @@ jobs:
       # Drives the whole of land against a fake gh and a real git origin.
       - name: land must leave her checkout alone and never read could-not-check as an answer
         run: ./tests/test-land-flow.sh
-      # Build first, test in batches (26 Sep 2026): staging on every land, production only on a
-      # green full e2e for the exact sha, `land --promote` ships the newest green. Evals land's
-      # plan block (two pure functions) and carries a negative proof.
-      - name: land must hold production for a green full e2e and promote the newest green
+      # Build first, test in batches (26 Sep 2026): staging on every land, `land --promote` ships
+      # the newest green. 2 Oct 2026: a small change ships on the fast check; a large one only
+      # through the suite; a known-red or unread suite blocks a small change. Evals land's plan
+      # and verdict blocks and carries five negative proofs.
+      - name: land must ship a small change on the fast check, a large one only through the suite, and never past a known-red suite
         run: ./tests/test-land-plan.sh
       # On demand only, after a large change (2 Oct 2026): the e2e workflows are dispatch-only, so
       # land runs the suite itself when the PR is large. Evals land's large block: every threshold
-      # at its edge, every path trigger, unreadable = large, with a negative proof.
+      # at its edge, every path trigger, unreadable = large, with a negative proof — and the range
+      # block: every commit production has not seen is judged by the same rule.
       - name: land must measure "large change", never guess it
         run: ./tests/test-land-large.sh
 

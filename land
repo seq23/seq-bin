@@ -17,6 +17,10 @@
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
+# A SMALL change ships to production on the fast check alone; a LARGE one (or --run-e2e) runs the
+# full e2e suite on main first and ships only on green. "Large" is defined once, in the `large`
+# block of this file. A suite already known red on main blocks a small change (E2E_KNOWN_RED).
+#
 # It refuses rather than guesses: not green, head moved, main red -> it stops and
 # says which, and it does NOT deploy. A red main after a merge is the case this
 # repo has actually hit (PR #16 in boss-os passed on its head and the merge
@@ -26,10 +30,9 @@
 # BUILD FIRST, TEST IN BATCHES (26 Sep 2026). A repo whose route names a full e2e workflow
 # (E2E_WF) no longer runs that suite per merge: the merge gate is the fast check, and the browser
 # suites run nightly + on dispatch. So for those repos `land <pr>` is: fast check green -> merge ->
-# main's FAST run green -> deploy STAGING from the merge sha -> production ONLY if a completed run
-# of the e2e workflow on that exact sha concluded success; otherwise it prints WAITING and exits 0.
-# `land --promote <repo>` then ships the newest main commit whose e2e run passed and that is newer
-# than what production runs. Production's record is the GitHub Deployments API (environment
+# main's FAST run green -> deploy STAGING from the merge sha -> production as the plan block decides
+# (SMALL CHANGES SHIP ON THE FAST CHECK, below). `land --promote <repo>` ships the newest main
+# commit whose e2e run passed and that is newer than what production runs. Production's record is the GitHub Deployments API (environment
 # "production", one deployment per land, `gh api repos/../deployments`), written by this script on
 # every production deploy of an e2e-routed repo and read back by --promote; nothing is written to
 # the git graph. Both deploys run from a clean detached worktree at exactly that sha, never the
@@ -45,9 +48,35 @@
 # merged sha has no green run, `land <pr>` measures the PR (the `large` block below: lines, files,
 # a schema or browser-test change, a UI surface touched) and, when it is LARGE, dispatches the e2e
 # workflow on main itself, waits for it (bounded), and ships production only on green — printing
-# WHY it decided the change was large, and recording that reason on the GitHub Deployment. A small
-# change still prints WAITING; `land <pr> --run-e2e` forces the suite for any size. A red run is a
-# NAMED STOP: staging runs the sha, production is untouched.
+# WHY it decided the change was large, and recording that reason on the GitHub Deployment.
+# `land <pr> --run-e2e` forces the suite for any size. A red run is a NAMED STOP: staging runs the
+# sha, production is untouched.
+#
+# SMALL CHANGES SHIP ON THE FAST CHECK (owner, 2 Oct 2026, asked and answered). With the suites on
+# demand only, a small change used to print WAITING and hold production for a green e2e on its sha
+# that nothing would ever run: six repos sat on staging behind CI/docs/test-only changes. Her
+# ruling: a SMALL change ships to production on the fast check alone (typecheck, unit, validators);
+# e2e gates production only after a LARGE change or when asked (--run-e2e). So on an E2E_WF route:
+#   · SMALL  -> main's fast check green -> production from the merge sha, printing and recording
+#               "small change: N lines, M files; shipped on the fast check, e2e on demand".
+#   · LARGE  -> unchanged: the suite runs on main's head, production only on green.
+#   · EVERY CHANGE PRODUCTION HAS NOT SEEN IS JUDGED, not only this PR: each commit between what
+#     production runs (its GitHub Deployment record) and the sha about to ship is measured by the
+#     same `large` block. One that is large and still unproven (its suite never dispatched, was
+#     cancelled, or it was merged without land) makes this land run the suite — a large change
+#     never rides out on the small one behind it. Production unreadable, or not an ancestor: large.
+#   · KNOWN RED BLOCKS. The newest run of the e2e workflow on main that reached a verdict
+#     (cancelled and skipped runs are not verdicts: e2e.yml cancels a superseded dispatch by
+#     design) must be success, or there must be none at all. Anything else — failure, timed_out,
+#     startup_failure — is a suite KNOWN RED with no green run after it, and a small change is not
+#     shipped past it: NAMED STOP [E2E_KNOWN_RED], staging runs the sha, production untouched; fix
+#     main and `land <pr> --run-e2e` ships it on a green suite. A red run on the exact sha blocks
+#     likewise. A history that cannot be read is not "not red": exit 75, production untouched.
+# A self-deploying repo whose production moves through its own workflow (PROMOTE_VIA on the route:
+# secondaries, founder-dilution-dashboard, justbeingmercedes) follows the same plan: land confirms
+# the staging build, then dispatches that workflow with the sha and the reason; the workflow checks
+# the fast check and the known-red rule itself before it moves production, and records the
+# GitHub Deployment.
 set -uo pipefail
 
 # RUN FROM A COPY. bash reads a script incrementally, so editing this file while a `land` is in
@@ -134,18 +163,24 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
 # tests/test-land-routes.sh evals this block verbatim and fails if one is missing.
 # A row may also set: STAGING (a staging deploy command, run from the merge sha right after
 # main's fast check is green), E2E_WF (the name of the full post-merge browser workflow; set,
-# production waits for a green run of it on the exact sha — see the header), and SMOKE (a URL
-# that must answer 200 with "ok":true after a production deploy).
+# a LARGE change waits for a green run of it; a small one ships on the fast check — see the header),
+# SMOKE (a URL that must answer 200 with "ok":true after a production deploy), PROMOTE_VIA (a
+# self-deploying repo's own workflow that moves production; land dispatches it with `-f sha=` and
+# `-f reason=` instead of running a deploy command) and PROMOTE_WF (the repo workflow that ships
+# production by itself on a green e2e — waited for, never raced; default promote.yml, and
+# PROMOTE_VIA when that is set).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
-STAGING=""; E2E_WF=""; SMOKE=""
+STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"
 case "$NAME" in
   west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
   # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
   # `e2e.yml` (nightly 07:00 UTC + workflow_dispatch), so a merge waits only on the fast CI run and
-  # production moves only to a sha the journeys passed — deploy.yml fires on e2e's success and
-  # records the GitHub Deployment; `land <pr>` prints WAITING; `land --promote boss-os [--run-e2e]`
-  # ships the newest e2e-green commit from here. No staging target in this repo.
-  boss-os)              DEPLOY="npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ;;
+  # deploy.yml fires on e2e's success and records the GitHub Deployment; `land --promote boss-os
+  # [--run-e2e]` ships the newest e2e-green commit from here. No staging target in this repo.
+  # 2 Oct 2026: e2e is dispatch-only; `land <pr>` ships a small change on the fast check and runs
+  # the suite after a large one — and then WAITS for deploy.yml (PROMOTE_WF) instead of racing it
+  # with a second `d1 migrations apply` from the laptop.
+  boss-os)              DEPLOY="npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
   westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
   # The loop repos run in GitHub Actions straight from main: the merge IS the
   # deploy. Every scheduled lane checks out main at fire time.
@@ -170,8 +205,9 @@ case "$NAME" in
   creator-network)      DEPLOY="npm run deploy:state" ; SELF="" ;;
   # Sheila's creator dashboard: one Worker (app + API + crons). The script builds the client,
   # applies D1 migrations and deploys with FAKE_SERVICES=0. Added 25 Sep 2026 with the repo.
-  # 26 Sep 2026: staging on every land; production waits for the `e2e` workflow (jobs e2e,
-  # e2e-open, help-screenshots — nightly 08:00 UTC + workflow_dispatch) on the exact sha.
+  # 26 Sep 2026: staging on every land. 2 Oct 2026: the `e2e` workflow (jobs e2e, e2e-open,
+  # help-screenshots) is dispatch-only — a small change ships on the fast check, a large one on a
+  # green run of it.
   sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://sheilastudio.seq-taylor.workers.dev/healthz" ;;
   # Mercedes Studio (seq23/mercedes-creator-dashboard): a full-history copy of Sheila's dashboard for
   # Mercedes Asare, same shape (check.yml gate, staging on every land, promote.yml on a green nightly
@@ -190,11 +226,12 @@ case "$NAME" in
   west-peek-network-os) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (network.joinwestpeek.com)" ;;
   # 26 Sep 2026 (build first, test in batches): Pages builds every push to main as the STAGING
   # preview (main.<project>.pages.dev) and the `production` branch as production; only the repo's
-  # promote.yml moves that branch, on a green nightly e2e (secondaries 07:40 UTC, dilution 07:20).
-  # The "Cloudflare Pages" check-run on the merge commit is the staging build, and that is what
-  # pages_watch confirms here. Promote by hand: gh workflow run e2e.yml --ref main (in that repo).
-  secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (venturedeals.joinwestpeek.com) = the production branch, moved by promote.yml on a green nightly e2e" ;;
-  founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (dilution.joinwestpeek.com) = the production branch, moved by promote.yml on a green nightly e2e" ;;
+  # promote.yml moves that branch. The "Cloudflare Pages" check-run on the merge commit is the
+  # staging build, and that is what pages_watch confirms here. 2 Oct 2026: e2e is dispatch-only,
+  # so land drives promote.yml (PROMOTE_VIA): dispatched with the sha and the small-change reason
+  # after the fast check, or fired by the green e2e land runs after a large change.
+  secondaries)          DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (venturedeals.joinwestpeek.com) = the production branch, moved by promote.yml (small change: on the fast check; large: on a green e2e)" ; E2E_WF="e2e" ; PROMOTE_VIA="promote.yml" ;;
+  founder-dilution-dashboard) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages: main -> staging preview on push; production (dilution.joinwestpeek.com) = the production branch, moved by promote.yml (small change: on the fast check; large: on a green e2e)" ; E2E_WF="e2e" ; PROMOTE_VIA="promote.yml" ;;
   # Grid velocity/canonical sites, added 25 Sep 2026 when six green query-coverage PRs could not land.
   # Each read from the repo's wrangler config AND the check-runs GitHub records on its main commit
   # (the Cloudflare app's "Cloudflare Pages" / "Workers Builds" run links the production project),
@@ -220,27 +257,45 @@ case "$NAME" in
   # .github/workflows/deploy.yml runs `wrangler pages deploy` on push to main with the vault's
   # cloudflare-claude-deploy token (repo secret CLOUDFLARE_API_TOKEN); first green run 36191953200.
   # 26 Sep 2026: deploy.yml publishes the `staging` preview on every push to main and
-  # justbeingmercedes.com only from a sha the nightly e2e.yml (08:20 UTC) passed (workflow_run).
-  justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages (deploy.yml): main -> staging preview on push; justbeingmercedes.com only from an e2e-green sha, nightly" ;;
+  # justbeingmercedes.com by the same deploy.yml's production path (workflow_run on a green e2e,
+  # or land's dispatch with the sha and the small-change reason — PROMOTE_VIA, 2 Oct 2026).
+  justbeingmercedes)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages (deploy.yml): main -> staging preview on push; justbeingmercedes.com by deploy.yml's production path (small change: on the fast check; large: on a green e2e)" ; E2E_WF="e2e" ; PROMOTE_VIA="deploy.yml" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
+[ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"
 # --- routes end ---
 
 # WHAT LANDS WHERE. Pure — no gh, no git — so tests/test-land-plan.sh can prove every branch.
 # --- plan begin (tests/test-land-plan.sh evals this block verbatim) ---
-# land_plan DEPLOY STAGING E2E_WF E2E_CONCLUSION -> the steps, space-separated, in order, out of:
+# land_plan DEPLOY STAGING E2E_WF E2E_CONCLUSION LARGE LAST_VERDICT -> the steps, space-separated,
+# in order, out of:
 #   staging     deploy staging from the merge sha
-#   production  deploy production (no e2e workflow on the route, or its run on this sha succeeded)
-#   waiting     production waits for a green full-e2e run on this sha (land --promote ships it)
+#   production  deploy production now: no e2e workflow on the route; or its run on this sha
+#               succeeded; or the change is SMALL and the suite is not known red
+#   suite       a LARGE change (or --run-e2e): run the e2e workflow on main, production only on green
+#   blocked     a small change, but the suite is KNOWN RED — or whether it is could not be read:
+#               production untouched
 #   self        the repo deploys itself; nothing for this script to run
+# DEPLOY is the route's deploy command, or its PROMOTE_VIA workflow (either means "land ships it").
 # E2E_CONCLUSION is the conclusion of the newest COMPLETED run of E2E_WF on the exact sha, or ""
 # when there is none (still running counts as none: a run that has not finished proves nothing).
+# LARGE is why the change is large (non-empty: the large block's reason, an unproven large commit
+# production has not seen, or "--run-e2e given"), or "" for a small change.
+# LAST_VERDICT is the conclusion of the newest e2e run on main that reached a verdict (cancelled and
+# skipped are not verdicts), "none" when no run ever did, or "" when the history could not be read.
+# FAIL CLOSED: "" is never "not red", and neither is any word this does not know.
 land_plan() {
-  local deploy="$1" staging="$2" e2e="$3" conc="$4" out=""
+  local deploy="$1" staging="$2" e2e="$3" conc="$4" large="${5-}" last="${6-}" out=""
   [ -n "$staging" ] && out="staging"
   if [ -z "$deploy" ]; then printf '%s\n' "${out:+$out }self"; return 0; fi
   if [ -z "$e2e" ] || [ "$conc" = success ]; then printf '%s\n' "${out:+$out }production"; return 0; fi
-  printf '%s\n' "${out:+$out }waiting"
+  if [ -n "$large" ]; then printf '%s\n' "${out:+$out }suite"; return 0; fi
+  # A small change. A red verdict on this exact sha blocks it whatever came after.
+  case "$conc" in ""|cancelled|skipped) : ;; *) printf '%s\n' "${out:+$out }blocked"; return 0 ;; esac
+  case "$last" in
+    success|none) printf '%s\n' "${out:+$out }production" ;;
+    *) printf '%s\n' "${out:+$out }blocked" ;;
+  esac
 }
 # promote_pick PRODUCTION_SHA < "sha<TAB>green|other" lines, main's commits NEWEST FIRST
 #   -> prints the newest green commit that is newer than production, exit 0; exit 1 if none.
@@ -293,12 +348,64 @@ e2e_verdict() { # $1 sha
   gh run list --workflow "$E2E_WF" --branch main --limit 50 --json headSha,status,conclusion \
     -q "[.[] | select(.headSha == \"$1\" and .status == \"completed\")][0].conclusion // empty" 2>/dev/null
 }
+# --- verdict begin (tests/test-land-plan.sh evals this block verbatim) ---
+# KNOWN RED (header). The newest run of the e2e workflow on main that reached a verdict: cancelled
+# and skipped runs are passed over. Prints "<conclusion><TAB><run id><TAB><sha>", or "none" when no
+# run on main ever reached one. Prints NOTHING when the history could not be read (after gh_read's
+# retries) — land_plan reads nothing as blocked, never as "not red".
+e2e_last_verdict() {
+  gh_read $'^(none|[a-z_]+\t[0-9]+\t[0-9a-f]{40})$' run list --workflow "$E2E_WF" --branch main --limit 30 --json conclusion,headSha,databaseId,status \
+    -q '[.[] | select(.status == "completed" and .conclusion != "cancelled" and .conclusion != "skipped")][0] | if . == null then "none" else "\(.conclusion)\t\(.databaseId)\t\(.headSha)" end' || true
+}
+# --- verdict end ---
+# What production runs, as an ANSWER: the sha, "unrecorded" (no production deployment yet), or
+# "unreadable" (the API did not answer — never mistaken for unrecorded).
+production_state() {
+  gh_read '^(unrecorded|[0-9a-f]{40})$' api "repos/{owner}/{repo}/deployments?environment=production&per_page=1" --jq '.[0].sha // "unrecorded"' || echo unreadable
+}
+# --- range begin (tests/test-land-large.sh evals this block verbatim, after the large block) ---
+# EVERY CHANGE PRODUCTION HAS NOT SEEN IS JUDGED (header). Walks main's commits between what
+# production runs and the sha about to ship (first-parent: one commit per squash-merged PR) and
+# judges each with large_reason from its own diff. Prints why (0) when one is large, or when the
+# range cannot be judged (fail closed); prints nothing (1) when every one is small. An unrecorded
+# production has no range to judge: the PR alone decides.
+LAND_RANGE_MAX="${LAND_RANGE_MAX:-30}"
+unshipped_large_reason() { # $1 production state  $2 sha about to ship
+  local prod="$1" sha="$2" c n=0 stat add del files why subj
+  case "$prod" in
+    unrecorded) return 1 ;;
+    unreadable) echo "what production runs could not be read, so the changes it has not seen cannot be judged — treated as large, fail closed"; return 0 ;;
+  esac
+  [ "$prod" != "$sha" ] || return 1
+  git merge-base --is-ancestor "$prod" "$sha" 2>/dev/null \
+    || { echo "production's recorded sha ${prod:0:7} is not an ancestor of ${sha:0:7} in this checkout, so the changes it has not seen cannot be judged — treated as large, fail closed"; return 0; }
+  n="$(git rev-list --count --first-parent "$prod..$sha" 2>/dev/null)" || n=""
+  case "${n:-?}" in *[!0-9]*) echo "the commits since production ${prod:0:7} could not be counted — treated as large, fail closed"; return 0 ;; esac
+  [ "$n" -le "$LAND_RANGE_MAX" ] || { echo "$n commits on main since production ${prod:0:7} (more than $LAND_RANGE_MAX) — treated as large"; return 0; }
+  for c in $(git rev-list --first-parent "$prod..$sha"); do
+    stat="$(git diff --numstat "$c^" "$c" 2>/dev/null)" || { echo "commit ${c:0:7} since production ${prod:0:7} could not be measured — treated as large, fail closed"; return 0; }
+    add="$(awk -F'\t' '{a += $1} END {print a + 0}' <<<"$stat")"; del="$(awk -F'\t' '{d += $2} END {print d + 0}' <<<"$stat")"
+    files="$(grep -c . <<<"$stat" || true)"
+    if why="$(cut -f3- <<<"$stat" | large_reason "$add" "$del" "$files")"; then
+      subj="$(git log --format=%s -1 "$c" 2>/dev/null)"
+      echo "main carries ${c:0:7} (${subj:0:50}) past production ${prod:0:7}, large and not yet proven: $why"
+      return 0
+    fi
+  done
+  echo "     judged all $n change(s) main carries past production ${prod:0:7}: none is large" >&2
+  return 1
+}
+# --- range end ---
 # What production runs, from the GitHub Deployments record this script writes (newest first).
 production_sha() {
   gh api "repos/{owner}/{repo}/deployments?environment=production&per_page=1" --jq '.[0].sha // empty' 2>/dev/null
 }
 record_production() { # $1 sha  $2 note -> one GitHub deployment (environment production) + a success status
-  local id
+  # GitHub refuses a description over 140 characters (422), and a refused record is an unrecorded
+  # production. Quotes and backslashes would break the JSON below. Neither is worth losing it for.
+  local id note
+  note="${2//\"/}"; note="${note//\\/}"; note="${note:0:140}"
+  set -- "$1" "$note"
   id="$(printf '{"ref":"%s","environment":"production","auto_merge":false,"required_contexts":[],"description":"%s","production_environment":true}' "$1" "$2" \
         | gh api -X POST "repos/{owner}/{repo}/deployments" --input - --jq '.id' 2>/dev/null)"
   if [ -z "$id" ]; then
@@ -381,15 +488,41 @@ run_e2e_on_main() { # $1 sha of main's head
   echo "     $E2E_WF on ${sha:0:7}: $CONC"
   [ "$CONC" = success ]
 }
-# The PR's size, read from GitHub, judged by large_reason. Prints the reason (0) or nothing (1).
-# A size that cannot be read is judged large by large_reason itself (fail closed: the suite runs).
-pr_large_reason() { # $1 pr number
-  local stats add del files
+# The PR's size, read from GitHub into PR_ADD / PR_DEL / PR_FILES / PR_PATHS (so the small-change
+# reason can print the numbers that decided it), then judged by large_reason: pr_large_reason
+# prints the reason (0) or nothing (1). A size that cannot be read is judged large by large_reason
+# itself (fail closed: the suite runs).
+PR_ADD="?"; PR_DEL="?"; PR_FILES="?"; PR_PATHS=""
+pr_size() { # $1 pr number
+  local stats
   stats="$(gh pr view "$1" --json additions,deletions,changedFiles,files \
             -q '"\(.additions) \(.deletions) \(.changedFiles)", (.files[].path)' 2>/dev/null)" || stats=""
   [ -n "$stats" ] || stats="? ? ?"
-  read -r add del files <<<"$(head -1 <<<"$stats")"
-  tail -n +2 <<<"$stats" | large_reason "$add" "$del" "$files"
+  read -r PR_ADD PR_DEL PR_FILES <<<"$(head -1 <<<"$stats")"
+  PR_PATHS="$(tail -n +2 <<<"$stats")"
+}
+pr_large_reason() { large_reason "$PR_ADD" "$PR_DEL" "$PR_FILES" <<<"$PR_PATHS"; }
+# A SELF-DEPLOYING REPO SHIPS PRODUCTION THROUGH ITS OWN WORKFLOW (PROMOTE_VIA, routes block): one
+# writer of production, and a gate that runs where the deploy runs. land dispatches it with the sha
+# and the reason, finds the run it started, and waits for it — bounded by 1.5x that workflow's last
+# completed run (floor 6 min), cancelled past it. 0 only when that run concluded success.
+promote_dispatch() { # $1 sha  $2 reason
+  local sha="$1" why t0 rid="" ceil conc
+  why="${2//\"/}"; why="${why//\\/}"; why="${why:0:140}"
+  t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  gh workflow run "$PROMOTE_VIA" --ref main -f sha="$sha" -f reason="$why" >/dev/null || { echo "     could not dispatch $PROMOTE_VIA"; return 1; }
+  for _ in $(seq 1 12); do
+    sleep 10
+    rid="$(gh run list --workflow "$PROMOTE_VIA" --event workflow_dispatch --limit 5 --json databaseId,createdAt \
+            -q "[.[] | select(.createdAt >= \"$t0\")][0].databaseId // empty" 2>/dev/null)"
+    [ -n "$rid" ] && break
+  done
+  [ -n "$rid" ] || { echo "     dispatched $PROMOTE_VIA for ${sha:0:7} but no run appeared in 2 minutes. Check: gh run list --workflow $PROMOTE_VIA"; return 1; }
+  ceil=$(( $(last_duration "$PROMOTE_VIA") * 3 / 2 )); [ "$ceil" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || ceil=${LAND_WAIT_FLOOR_SECS:-360}
+  echo "     $PROMOTE_VIA run $rid for ${sha:0:7} — waiting (ceiling $((ceil / 60)) min)"
+  conc="$(wait_run_bounded "$rid" "$ceil")" || true
+  echo "     $PROMOTE_VIA run $rid: $conc"
+  [ "$conc" = success ]
 }
 
 # NEVER RACE THE REPO'S OWN PROMOTE. 26 Sep 2026: sheila-creator-dashboard grew promote.yml (fires
@@ -403,7 +536,7 @@ pr_large_reason() { # $1 pr number
 # promote.yml on origin/main has nothing to wait for and this is silent.
 # $1 (optional): a sha whose promote run is EXPECTED to appear (the --run-e2e path: promote.yml
 # fires on the e2e success just waited for) — polled for up to LAND_PROMOTE_APPEAR_SECS (120 s).
-PROMOTE_WF="promote.yml"
+# PROMOTE_WF comes from the routes block (promote.yml unless the route names another).
 promote_wait_inflight() {
   local expect="${1:-}" appear_by=$((SECONDS + ${LAND_PROMOTE_APPEAR_SECS:-120})) row="" rid sha st ceil conc
   git cat-file -e "origin/main:.github/workflows/$PROMOTE_WF" 2>/dev/null || return 0
@@ -425,7 +558,7 @@ promote_wait_inflight() {
 # ---------------------------------------------------------------------------------------------
 # land --promote [<repo>] [--run-e2e]: the newest e2e-green main commit, newer than production.
 if [ "$MODE" = promote ]; then
-  [ -n "$DEPLOY" ] && [ -n "$E2E_WF" ] || die "$NAME has no full-e2e route (E2E_WF unset): land <pr> ships it to production directly, so there is nothing to promote"
+  { [ -n "$DEPLOY" ] || [ -n "$PROMOTE_VIA" ]; } && [ -n "$E2E_WF" ] || die "$NAME has no full-e2e route (E2E_WF unset): land <pr> ships it to production directly, so there is nothing to promote"
   say "1/4  reading main, production and the $E2E_WF runs for $NAME"
   git fetch -q origin main || die "could not fetch main"
   HEADSHA="$(git rev-parse origin/main)"
@@ -467,15 +600,22 @@ if [ "$MODE" = promote ]; then
   fi
   if [ -z "$CAND" ]; then
     HEADCONC="$(e2e_verdict "$HEADSHA")"
-    die "nothing to promote: no main commit newer than production ${PROD:0:7} has a green $E2E_WF run (main head ${HEADSHA:0:7}: ${HEADCONC:-no completed run}). Run one: land --promote $NAME --run-e2e"
+    die "nothing to promote: no main commit newer than production ${PROD:0:7} has a green $E2E_WF run (main head ${HEADSHA:0:7}: ${HEADCONC:-no completed run}). A small change ships on the fast check with: land <pr> (a merged PR is fine). To prove the head with the suite: land --promote $NAME --run-e2e"
   fi
   say "2/4  promoting ${CAND:0:7} — $(git log --format='%s' -1 "$CAND")"
   [ "$CAND" = "$HEADSHA" ] || echo "     (main's head ${HEADSHA:0:7} has no green $E2E_WF run yet; ${CAND:0:7} is the newest that does)"
   say "3/4  deploying production from exactly ${CAND:0:7}"
+  if [ -n "$PROMOTE_VIA" ]; then
+    promote_dispatch "$CAND" "land --promote: $E2E_WF green on ${CAND:0:7}" || die "$NAME's own $PROMOTE_VIA did not ship ${CAND:0:7}. Production's record is unchanged (still ${PROD:-unrecorded}). Read that run: gh run list --workflow $PROMOTE_VIA"
+    say "4/4  smoke + record"
+    if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed; read the $PROMOTE_VIA run."; fi
+    [ "$(production_sha)" = "$CAND" ] || die "$PROMOTE_VIA ran green for ${CAND:0:7} but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
+  else
   deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed — read the error, it explains itself. Production's record is unchanged (still ${PROD:-unrecorded})."
   say "4/4  smoke + record"
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   record_production "$CAND" "land --promote from ${CAND:0:7}"
+  fi
   say "PROMOTED — $NAME production now runs ${CAND:0:7} (full $E2E_WF green on that sha)."
   exit 0
 fi
@@ -765,12 +905,17 @@ if [ -z "$DEPLOY" ]; then
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
   PW_OUT="$(pages_watch "$MSHA_PAGES")"; PW=$?
+  # A route with PROMOTE_VIA is only STAGED by that build: production moves through the repo's own
+  # workflow, and the plan below decides when (small: now, on the fast check; large: after a green
+  # suite). Every other self-deploying repo is done here, as before.
   case "$PW" in
-    0) say "LANDED — #$PR is merged, main is green, and every Cloudflare build on ${MSHA_PAGES:0:7} succeeded." ;;
-    2) say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run" ;;
+    0) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: every Cloudflare build on ${MSHA_PAGES:0:7} succeeded"
+       else say "LANDED — #$PR is merged, main is green, and every Cloudflare build on ${MSHA_PAGES:0:7} succeeded."; fi ;;
+    2) if [ -n "$PROMOTE_VIA" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; staging is published by the repo's own workflow on push"
+       else say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run"; fi ;;
     *) die "#$PR IS MERGED and main's workflows are green, but a Cloudflare build on ${MSHA_PAGES:0:7} did not succeed — that project was NOT updated: $(echo "$PW_OUT" | paste -sd';' -). Fix main now." ;;
   esac
-  exit 0
+  [ -n "$PROMOTE_VIA" ] && [ -n "$E2E_WF" ] || exit 0
 fi
 
 # DO NOT RACE THE WORKFLOW. Since `deploy.yml` landed, a green `main` deploys itself, and this
@@ -785,7 +930,7 @@ fi
 # A ROUTE WITH E2E_WF IS NOT DEPLOYED BY GREEN MAIN. Since 26 Sep 2026 boss-os's deploy.yml fires on
 # the nightly e2e workflow, not on CI: after a merge there is no Deploy run to wait for, and the
 # newest "Deploy" on the list would be an OLDER commit's — "LANDED, the Deploy workflow shipped it"
-# about a deploy that never happened. Those routes fall through to the plan below (WAITING).
+# about a deploy that never happened. Those routes fall through to the plan below.
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
 if git cat-file -e origin/main:.github/workflows/deploy.yml 2>/dev/null && [ -z "$E2E_WF" ]; then
   say "5/5  $NAME deploys itself on green main — waiting for that run rather than racing it"
@@ -823,17 +968,50 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   exit 0
 fi
 
-# STAGING NOW, PRODUCTION WHEN THE FULL E2E SAYS SO (routes with STAGING / E2E_WF; header above).
+# STAGING NOW; PRODUCTION AS THE PLAN DECIDES (routes with STAGING / E2E_WF / PROMOTE_VIA; header).
 MSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
 [ -n "$MSHA" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so nothing was deployed. Re-run 'land $PR'."
-E2E_CONC=""; [ -z "$E2E_WF" ] || E2E_CONC="$(e2e_verdict "$MSHA")"
-PLAN="$(land_plan "$DEPLOY" "$STAGING" "$E2E_WF" "$E2E_CONC")"
+E2E_CONC=""; REASON=""; LAST=""; PROD_STATE=""; SMALL_NOTE=""
+if [ -n "$E2E_WF" ]; then
+  E2E_CONC="$(e2e_verdict "$MSHA")"
+  PROD_STATE="$(production_state)"
+  # NEVER BACKWARDS, NEVER TWICE. Landing an already-merged PR again (a retry, or shipping what an
+  # older land left on staging) must not roll production back to an older commit, nor deploy the
+  # sha it already runs a second time.
+  case "$PROD_STATE" in unrecorded|unreadable) : ;; *)
+    if [ "$PROD_STATE" = "$MSHA" ] || git merge-base --is-ancestor "$MSHA" "$PROD_STATE" 2>/dev/null; then
+      say "5/5  LANDED — #$PR is merged, main is green, and production already runs ${PROD_STATE:0:7}$([ "$PROD_STATE" = "$MSHA" ] || echo ", which contains ${MSHA:0:7}") (GitHub Deployment record). Nothing to deploy."
+      exit 0
+    fi ;;
+  esac
+  if [ "$E2E_CONC" != success ]; then
+    # Measured, never guessed: this PR, then every other change production has not seen.
+    pr_size "$PR"
+    if [ -n "$RUN_E2E" ]; then REASON="--run-e2e given"
+    else
+      REASON="$(pr_large_reason)" || REASON=""
+      [ -n "$REASON" ] || REASON="$(unshipped_large_reason "$PROD_STATE" "$MSHA")" || REASON=""
+    fi
+    if [ -z "$REASON" ]; then
+      LAST="$(e2e_last_verdict)"
+      SMALL_NOTE="small change: $((PR_ADD + PR_DEL)) lines, $PR_FILES files; shipped on the fast check, e2e on demand"
+    fi
+  fi
+fi
+PLAN="$(land_plan "${DEPLOY:-$PROMOTE_VIA}" "$STAGING" "$E2E_WF" "$E2E_CONC" "$REASON" "${LAST%%$'\t'*}")"
 say "5/5  ${MSHA:0:7}: $PLAN${E2E_WF:+ ($E2E_WF on this sha: ${E2E_CONC:-no completed run})}"
 ship_production() { # $1 sha  $2 deployment note
   say "     production <- ${1:0:7}"
+  if [ -n "$PROMOTE_VIA" ]; then
+    promote_dispatch "$1" "$2" || die "#$PR IS MERGED and main is green, but $NAME's own $PROMOTE_VIA did not ship ${1:0:7} — production untouched. Read that run: gh run list --workflow $PROMOTE_VIA"
+    if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed; read the $PROMOTE_VIA run."; fi
+    [ "$(production_sha)" = "$1" ] || die "#$PR IS MERGED and $PROMOTE_VIA ran green for ${1:0:7}, but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
+    echo "     recorded by $PROMOTE_VIA: production = ${1:0:7}"
+  else
   deploy_at "$1" "$DEPLOY" || die "#$PR IS MERGED and main is green, but the production deploy from ${1:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   [ -z "$E2E_WF" ] || record_production "$1" "$2"
+  fi
   say "LANDED — #$PR is merged, main is green, ${STAGING:+staging and }production run ${1:0:7}."
 }
 for step in $PLAN; do
@@ -843,19 +1021,33 @@ for step in $PLAN; do
       deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and main is green, but the STAGING deploy from ${MSHA:0:7} failed — read the error, it explains itself. Production untouched."
       ;;
     production)
-      ship_production "$MSHA" "land #$PR from ${MSHA:0:7}"
+      if [ -z "$SMALL_NOTE" ]; then
+        ship_production "$MSHA" "land #$PR from ${MSHA:0:7}"
+      else
+        # A SMALL CHANGE SHIPS ON THE FAST CHECK (owner, 2 Oct 2026; header). The reason is printed
+        # here and recorded on the production deployment. A repo promote run already in flight (a
+        # green e2e someone dispatched) is waited for first, never deployed on top of.
+        say "     SMALL CHANGE — $SMALL_NOTE (last $E2E_WF verdict on main: ${LAST%%$'\t'*}). To prove it with the suite instead: land $PR --run-e2e"
+        promote_wait_inflight
+        if [ "$(production_sha)" = "$MSHA" ]; then say "LANDED — #$PR is merged, main is green, and the repo's own $PROMOTE_WF already shipped ${MSHA:0:7} to production."
+        else ship_production "$MSHA" "land #$PR, $SMALL_NOTE"; fi
+      fi
       ;;
-    waiting)
+    blocked)
+      # KNOWN RED BLOCKS A SMALL CHANGE (header). Unread is not "not red": a different stop, exit 75.
+      if [ -z "$LAST" ] && { [ -z "$E2E_CONC" ] || [ "$E2E_CONC" = cancelled ] || [ "$E2E_CONC" = skipped ]; }; then
+        printf '\n\033[31mSTOPPED: could not verify (%s) — the %s history on main could not be read, so "the suite is not known red" is unproven: %s. #%s IS MERGED%s; production untouched. Land again when GitHub answers: land %s\033[0m\n' \
+          "$(gh_kind "$(gh_err)")" "$E2E_WF" "$(gh_err)" "$PR" "${STAGING:+, staging runs ${MSHA:0:7}}" "$PR"
+        exit "$LAND_RC_UNVERIFIED"
+      fi
+      IFS=$'\t' read -r LCONC LRID LSHA <<<"$LAST"
+      case "$E2E_CONC" in ""|cancelled|skipped) : ;; *) LCONC="$E2E_CONC"; LRID=""; LSHA="$MSHA" ;; esac
+      die "NAMED STOP [E2E_KNOWN_RED] $E2E_WF is known red on main: ${LRID:+run $LRID }on ${LSHA:0:7} ended $LCONC and no green run is newer. #$PR is small ($((PR_ADD + PR_DEL)) lines, $PR_FILES files) and would have shipped on the fast check, but a known-red suite is never shipped past. ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Fix main, then: land $PR --run-e2e${LRID:+   (the red run: gh run view $LRID)}"
+      ;;
+    suite)
       # A LARGE CHANGE RUNS THE SUITE NOW (owner, 2 Oct 2026; header). The e2e workflows are
       # dispatch-only, so after a merge nothing runs them unless this does. Measured, never guessed:
       # the reason is printed here and recorded on the production deployment.
-      if [ -n "$RUN_E2E" ]; then REASON="--run-e2e given"; else REASON="$(pr_large_reason "$PR")" || REASON=""; fi
-      if [ -z "$REASON" ]; then
-        say "WAITING — #$PR is merged, main's fast check is green${STAGING:+, staging runs ${MSHA:0:7}}."
-        echo "     small change (under $LAND_LARGE_LINES lines, $LAND_LARGE_FILES files, no schema/e2e/UI-surface trigger): the suite is not run for it"
-        say "production waits for full $E2E_WF on $MSHA; run \`land --promote $NAME\` after it passes (or \`land --promote $NAME --run-e2e\` to run it now)"
-        continue
-      fi
       say "     LARGE CHANGE — $REASON: running $E2E_WF on main before production"
       git fetch -q origin main 2>/dev/null || true
       HEADSHA="$(git rev-parse origin/main 2>/dev/null)"; [ -n "$HEADSHA" ] || HEADSHA="$MSHA"
@@ -868,8 +1060,8 @@ for step in $PLAN; do
         success) : ;;
         *) die "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] $E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC after #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Fix main first: gh run view $RID" ;;
       esac
-      # That success is exactly what the repo's promote.yml (if any) fires on: wait for it, then
-      # read production — it has usually just shipped this very sha.
+      # That success is exactly what the repo's own promote workflow (if any) fires on: wait for it,
+      # then read production — it has usually just shipped this very sha.
       promote_wait_inflight "$HEADSHA"
       PROD="$(production_sha)"
       if [ "$PROD" = "$HEADSHA" ]; then say "LANDED — #$PR is merged, $E2E_WF is green on ${HEADSHA:0:7} ($REASON), and the repo's own $PROMOTE_WF shipped it to production."

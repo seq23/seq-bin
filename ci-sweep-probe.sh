@@ -78,6 +78,26 @@ GRACE_MIN="${CI_SWEEP_GRACE_MIN:-5}"
 
 log() { echo "$*" >&2; }
 
+# GitHub's run list is served from replicas that can lag: the SAME call, seconds
+# apart, returns an older snapshot missing the newest runs. Confirmed 2026-10-05:
+# three identical reads of sprylabs-hpc-site in the window gave 0, 0, then 9 runs
+# (round 1 declared it SILENT), and hicks-consulting-canonical Content Publish
+# read as its 09-28 failure while newer runs existed (declared RED twice). A stale
+# snapshot only ever MISSES runs, so the union of several reads by run id is the
+# freshest view; any read that fails is dropped, all failing is a failure.
+merged_runs() {
+  local repo="$1" branch="$2" acc="" one i
+  for i in 1 2 3; do
+    one="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
+          --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)" || one=""
+    printf '%s' "$one" | jq -e 'type=="array"' >/dev/null 2>&1 || continue
+    acc="$acc$one"
+    [ "$i" -lt 3 ] && sleep 2
+  done
+  [ -z "$acc" ] && return 1
+  printf '%s' "$acc" | jq -s 'add|unique_by(.databaseId)|sort_by(.createdAt)|reverse'
+}
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-sweep-probe.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -181,8 +201,7 @@ for dir in "$GITHUB_DIR"/*/; do
   # GitHub still will not answer, the repo is unproven (PENDING), never silent.
   runs=""
   for attempt in 1 2 3; do
-    if runs="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
-          --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)" \
+    if runs="$(merged_runs "$repo" "$branch")" \
        && printf '%s' "$runs" | jq -e 'type=="array"' >/dev/null 2>&1; then
       break
     fi
@@ -296,8 +315,7 @@ for dir in "$GITHUB_DIR"/*/; do
   if [ "$runs_in_window" -eq 0 ] && [ "$settled" -gt 0 ] && grep -q "	YES	" "$VERDICTS"; then
     for _ in 1 2; do
       sleep 5
-      recheck="$(gh run list --repo "$OWNER/$repo" --branch "$branch" --limit 80 \
-            --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)"
+      recheck="$(merged_runs "$repo" "$branch")"
       if printf '%s' "$recheck" | jq -e 'type=="array"' >/dev/null 2>&1; then
         runs="$recheck"
         runs_in_window="$(printf '%s' "$runs" | jq --arg s "$SINCE" '[.[]|select(.createdAt>$s)]|length' 2>/dev/null || echo 0)"
@@ -415,8 +433,9 @@ for dir in "$GITHUB_DIR"/*/; do
     if [ "$status" = "completed" ] && ! printf '%s' "$concl" | grep -qxE 'success|skipped|neutral'; then
       wpath_r="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
       if [ -n "$wpath_r" ]; then
-        fresh="$(gh api "repos/$OWNER/$repo/actions/workflows/$(basename "$wpath_r")/runs?branch=$branch&per_page=1" \
-              -q '.workflow_runs[0]|select(.)|{databaseId:.id,status,conclusion,createdAt:.created_at}' 2>/dev/null || true)"
+        fresh="$(for _ in 1 2 3; do gh api "repos/$OWNER/$repo/actions/workflows/$(basename "$wpath_r")/runs?branch=$branch&per_page=1" \
+              -q '.workflow_runs[0]|select(.)|{databaseId:.id,status,conclusion,createdAt:.created_at}' 2>/dev/null; sleep 1; done \
+              | jq -sc 'sort_by(.createdAt)|last // empty' 2>/dev/null || true)"
         if [ -n "$fresh" ] && [ "$(printf '%s' "$fresh" | jq -r '.databaseId')" != "$rid" ] \
            && [ "$(printf '%s' "$fresh" | jq -r '.createdAt')" \> "$(printf '%s' "$latest" | jq -r '.createdAt')" ]; then
           log "  $repo/$flow: run list was stale (newest listed #$rid); lane's own endpoint has #$(printf '%s' "$fresh" | jq -r '.databaseId')"

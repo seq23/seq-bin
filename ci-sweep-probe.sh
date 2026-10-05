@@ -406,6 +406,31 @@ for dir in "$GITHUB_DIR"/*/; do
       pending=$((pending+1)); continue
     fi
 
+    # A repo-wide `gh run list` answer can be an older snapshot that is missing
+    # a lane's newest runs. Confirmed 2026-10-05: hicks-consulting-canonical
+    # Content Publish was reported RED on the 09-28 run while six newer green
+    # runs on main existed; the same call moments later listed them. A RED is
+    # never declared off that list alone: it is re-read from the lane's own
+    # workflow endpoint, and the newer answer wins.
+    if [ "$status" = "completed" ] && ! printf '%s' "$concl" | grep -qxE 'success|skipped|neutral'; then
+      wpath_r="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+      if [ -n "$wpath_r" ]; then
+        fresh="$(gh api "repos/$OWNER/$repo/actions/workflows/$(basename "$wpath_r")/runs?branch=$branch&per_page=1" \
+              -q '.workflow_runs[0]|select(.)|{databaseId:.id,status,conclusion,createdAt:.created_at}' 2>/dev/null || true)"
+        if [ -n "$fresh" ] && [ "$(printf '%s' "$fresh" | jq -r '.databaseId')" != "$rid" ] \
+           && [ "$(printf '%s' "$fresh" | jq -r '.createdAt')" \> "$(printf '%s' "$latest" | jq -r '.createdAt')" ]; then
+          log "  $repo/$flow: run list was stale (newest listed #$rid); lane's own endpoint has #$(printf '%s' "$fresh" | jq -r '.databaseId')"
+          status="$(printf '%s' "$fresh" | jq -r '.status')"
+          concl="$(printf '%s' "$fresh" | jq -r '.conclusion // ""')"
+          rid="$(printf '%s' "$fresh" | jq -r '.databaseId')"
+          if [ "$status" != "completed" ]; then
+            printf 'PENDING\t%s\t%s\t%s|%s|PENDING\trun #%s is %s\n' "$repo" "$flow" "$repo" "$flow" "$rid" "$status"
+            pending=$((pending+1)); continue
+          fi
+        fi
+      fi
+    fi
+
     case "$concl" in
       success|skipped|neutral)
         printf 'GREEN\t%s\t%s\t%s|%s|%s\trun #%s\n' "$repo" "$flow" "$repo" "$flow" "$concl" "$rid"

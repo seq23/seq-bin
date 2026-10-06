@@ -401,8 +401,18 @@ for repo in "$GITHUB_DIR"/*/; do
     [ -z "$num" ] && continue
     examined=$((examined + 1))
     diff="$(cd "$repo" && gh pr diff "$num" 2>/dev/null || true)"
+    # GitHub refuses `pr diff` past 300 files (HTTP 406, too_large). Confirmed
+    # 2026-10-05 on sprylabs-hpc-site#116 (387 files, a producer re-render): that
+    # PR would have been skipped as "unreadable" and merged unaudited. Rebuild
+    # the diff from the per-file patches instead, which have no such cap.
     if [ -z "$diff" ]; then
-      say "  ? $name#$num — diff unreadable; not audited"
+      diff="$(cd "$repo" && gh api --paginate "repos/{owner}/{repo}/pulls/$num/files?per_page=100" \
+            -q '.[] | "diff --git a/\(.filename) b/\(.filename)\n--- a/\(.filename)\n+++ b/\(.filename)\n\(.patch // "")"' \
+            2>/dev/null || true)"
+    fi
+    if [ -z "$diff" ]; then
+      say "  ? SUSPECT $name#$num — diff unreadable by both routes; NOT audited, so not mergeable"
+      suspect=1
       continue
     fi
 

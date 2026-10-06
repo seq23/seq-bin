@@ -157,8 +157,9 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
 }
 # --- verify helpers end ---
 
-# How this repo reaches production. westpeek-live deploys itself through Workers
-# Builds on merge; the two Worker repos deploy only when a person runs the script.
+# How this repo reaches production. westpeek-live deploys itself through its own GitHub workflow
+# (DEPLOY_WF) on green main — Workers Builds only uploads it — and land waits for that run; the
+# two Worker repos deploy only when a person runs the script.
 # Every West Peek web property the "web property change" lane can target MUST have a row here —
 # tests/test-land-routes.sh evals this block verbatim and fails if one is missing.
 # A row may also set: STAGING (a staging deploy command, run from the merge sha right after
@@ -168,9 +169,13 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
 # self-deploying repo's own workflow that moves production; land dispatches it with `-f sha=` and
 # `-f reason=` instead of running a deploy command) and PROMOTE_WF (the repo workflow that ships
 # production by itself on a green e2e — waited for, never raced; default promote.yml, and
-# PROMOTE_VIA when that is set).
+# PROMOTE_VIA when that is set) and DEPLOY_WF (the repo workflow file that ships production by
+# itself on green main, for a route with no E2E_WF — land finds its run on the merge commit, waits
+# for it, bounded, and reports its real conclusion; never races it. Default deploy.yml for a route
+# with a DEPLOY command; a self-deploying route names it, or tests/test-land-routes.sh fails when
+# the repo carries a Cloudflare deploy workflow the route does not wait for).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
-STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"
+STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""
 case "$NAME" in
   west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
   # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
@@ -181,7 +186,12 @@ case "$NAME" in
   # the suite after a large one — and then WAITS for deploy.yml (PROMOTE_WF) instead of racing it
   # with a second `d1 migrations apply` from the laptop.
   boss-os)              DEPLOY="npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
-  westpeek-live)        DEPLOY="" ; SELF="deploys itself through Workers Builds" ;;
+  # 6 Oct 2026: Workers Builds is upload-only for west-peek-live. Production ships ONLY through
+  # .github/workflows/deploy-cloudflare-worker.yml ("Deploy Cloudflare Worker"): workflow_run on a
+  # green "Repository validation" of a push to main, D1 migrations, deploy, postdeploy smoke. Before
+  # this row named it, land saw no Cloudflare check-run it understood, printed "nothing to run" and
+  # exited 0 before production moved — and said nothing when deploy run 37505035965 went red.
+  westpeek-live)        DEPLOY="" ; SELF="deploys itself through its own Deploy Cloudflare Worker workflow on green main (Workers Builds only uploads)" ; DEPLOY_WF="deploy-cloudflare-worker.yml" ; SMOKE="https://westpeek.live/api/runtime/health" ;;
   # The loop repos run in GitHub Actions straight from main: the merge IS the
   # deploy. Every scheduled lane checks out main at fire time.
   how-we-know)          DEPLOY="" ; SELF="runs its lanes from main in GitHub Actions" ;;
@@ -918,12 +928,19 @@ if [ -z "$DEPLOY" ]; then
   # suite). Every other self-deploying repo is done here, as before.
   case "$PW" in
     0) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: every Cloudflare build on ${MSHA_PAGES:0:7} succeeded"
+       elif [ -n "$DEPLOY_WF" ]; then echo "     every Cloudflare build on ${MSHA_PAGES:0:7} succeeded (upload only — production moves through $DEPLOY_WF)"
        else say "LANDED — #$PR is merged, main is green, and every Cloudflare build on ${MSHA_PAGES:0:7} succeeded."; fi ;;
     2) if [ -n "$PROMOTE_VIA" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; staging is published by the repo's own workflow on push"
+       elif [ -n "$DEPLOY_WF" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; production moves through $DEPLOY_WF"
        else say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run"; fi ;;
     *) die "#$PR IS MERGED and main's workflows are green, but a Cloudflare build on ${MSHA_PAGES:0:7} did not succeed — that project was NOT updated: $(echo "$PW_OUT" | paste -sd';' -). Fix main now." ;;
   esac
-  [ -n "$PROMOTE_VIA" ] && [ -n "$E2E_WF" ] || exit 0
+  # A DEPLOY_WF route is not deployed by that build either: production moves only when the repo's
+  # own deploy workflow finishes on the merge commit, so it falls through to the wait below.
+  { [ -n "$PROMOTE_VIA" ] && [ -n "$E2E_WF" ]; } || [ -n "$DEPLOY_WF" ] || exit 0
+  if [ -n "$DEPLOY_WF" ] && ! git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null; then
+    die "NAMED STOP [DEPLOY_WF_MISSING] #$PR IS MERGED and main is green, but $NAME's route ships production through .github/workflows/$DEPLOY_WF and origin/main carries no such file, so production was NOT confirmed. Fix the route in ~/bin/land (or restore the workflow)."
+  fi
 fi
 
 # DO NOT RACE THE WORKFLOW. Since `deploy.yml` landed, a green `main` deploys itself, and this
@@ -940,24 +957,60 @@ fi
 # newest "Deploy" on the list would be an OLDER commit's — "LANDED, the Deploy workflow shipped it"
 # about a deploy that never happened. Those routes fall through to the plan below.
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
-if git cat-file -e origin/main:.github/workflows/deploy.yml 2>/dev/null && [ -z "$E2E_WF" ]; then
-  say "5/5  $NAME deploys itself on green main — waiting for that run rather than racing it"
-  sleep 20
-  DRID="$(gh run list --branch main --limit 10 --json databaseId,name,headSha \
-            -q "[.[]|select(.name==\"Deploy\")][0].databaseId" 2>/dev/null)"
-  if [ -z "$DRID" ]; then
-    say "     no Deploy run found yet. #$PR IS MERGED and main is green; the workflow fires on its own."
-    say "     Check with:  gh run list --branch main"
-    exit 0
-  fi
-  gh run watch "$DRID" >/dev/null 2>&1 || true
-  DCONC="$(gh run view "$DRID" --json conclusion -q '.conclusion' 2>/dev/null)"
+# The run is found BY THE MERGE COMMIT (deploy_wf_pick), never "the newest run named Deploy": that
+# was an older commit's run whenever this one had not appeared yet, and a workflow named anything
+# else ("Deploy Cloudflare Worker") was never found at all.
+# --- deploy_wf begin (tests/test-land-routes.sh evals this block verbatim) ---
+# deploy_wf_pick SHA < rows "id<TAB>headSha<TAB>status<TAB>conclusion", newest first -> the newest
+# run whose headSha CONTAINS sha (it, or a later main commit — a concurrency group that cancels an
+# older run in progress ships the newer one, which carries this merge), skipping runs that were
+# skipped (the job's `if` refused that trigger) or cancelled (superseded). Prints
+# "id<TAB>status<TAB>conclusion", or nothing when no such run exists yet. contains_sha is
+# overridable (tests); here it asks git.
+contains_sha() { [ "$1" = "$2" ] || git merge-base --is-ancestor "$1" "$2" 2>/dev/null; } # $1 sha  $2 later?
+deploy_wf_pick() {
+  local sha="$1" rid head st conc
+  while IFS=$'\t' read -r rid head st conc || [ -n "$rid" ]; do
+    [ -n "$rid" ] || continue
+    case "$conc" in skipped|cancelled) continue ;; esac
+    contains_sha "$sha" "$head" || continue
+    printf '%s\t%s\t%s\n' "$rid" "$st" "$conc"; return 0
+  done
+  return 0
+}
+# --- deploy_wf end ---
+DEPLOY_WF="${DEPLOY_WF:-deploy.yml}"
+if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -z "$E2E_WF" ]; then
+  say "5/5  $NAME deploys itself on green main through $DEPLOY_WF — waiting for its run on the merge commit rather than racing it"
+  DMSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
+  [ -n "$DMSHA" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the $DEPLOY_WF run was not found. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
+  git fetch -q origin main 2>/dev/null || true
+  DCEIL=$(( $(last_duration "$DEPLOY_WF") * 3 / 2 )); [ "$DCEIL" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || DCEIL=${LAND_WAIT_FLOOR_SECS:-360}
+  DAPPEAR=$((SECONDS + ${LAND_DEPLOY_APPEAR_SECS:-300})); DSEEN=""
+  while :; do
+    DROWS="$(gh run list --workflow "$DEPLOY_WF" --limit 20 --json databaseId,headSha,status,conclusion \
+              -q '.[] | "\(.databaseId)\t\(.headSha)\t\(.status)\t\(.conclusion // "")"' 2>/dev/null)"
+    DPICK="$(deploy_wf_pick "$DMSHA" <<<"$DROWS")"
+    if [ -z "$DPICK" ]; then
+      DSEEN="$(awk -F'\t' -v s="$DMSHA" '$2 == s {print $1 " " $4}' <<<"$DROWS" | paste -sd, -)"
+      [ "$SECONDS" -lt "$DAPPEAR" ] || die "NAMED STOP [DEPLOY_RUN_NOT_FOUND] #$PR IS MERGED and main is green, but no $DEPLOY_WF run that ships ${DMSHA:0:7} appeared in $(( ${LAND_DEPLOY_APPEAR_SECS:-300} / 60 )) min${DSEEN:+ (only skipped/cancelled: $DSEEN)}. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
+      sleep 15; git fetch -q origin main 2>/dev/null || true; continue
+    fi
+    IFS=$'\t' read -r DRID DST DCONC <<<"$DPICK"
+    if [ "$DST" != completed ]; then
+      echo "     $DEPLOY_WF run $DRID ($DST) — waiting (ceiling $((DCEIL / 60)) min, 1.5x its last completed run)"
+      DCONC="$(wait_run_bounded "$DRID" "$DCEIL")" || true
+      [ "$DCONC" != cancelled-at-ceiling ] || die "NAMED STOP [DEPLOY_RUN_PAST_CEILING] #$PR IS MERGED, but $DEPLOY_WF run $DRID ran past $((DCEIL / 60)) min and was cancelled. Production NOT confirmed: gh run view $DRID"
+      # Superseded while we waited (concurrency cancel-in-progress): the newer run carries this merge.
+      [ "$DCONC" != cancelled ] || { echo "     run $DRID was cancelled (superseded) — looking for the run that carries ${DMSHA:0:7}"; DAPPEAR=$((SECONDS + ${LAND_DEPLOY_APPEAR_SECS:-300})); continue; }
+    fi
+    break
+  done
   case "$DCONC" in
-    success) say "LANDED — #$PR is merged, main is green, and the Deploy workflow shipped it."; exit 0 ;;
-    skipped) say "#$PR IS MERGED. That Deploy run was skipped (it fired on a superseded CI run)."
-             say "A later run carries your commit. Watch:  gh run list --branch main"; exit 0 ;;
-    "")      die "#$PR IS MERGED and main is green, but the Deploy run's outcome could not be read. Check it before assuming production changed." ;;
-    *)       die "#$PR IS MERGED and main is green, but the Deploy workflow finished $DCONC. Production was NOT updated. Read that run." ;;
+    success) if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR IS MERGED and $DEPLOY_WF run $DRID finished green, but the production smoke check failed. Read that run: gh run view $DRID"; fi
+             say "LANDED — #$PR is merged, main is green, and $DEPLOY_WF run $DRID shipped ${DMSHA:0:7} to production."; exit 0 ;;
+    "")      die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
+    *)       die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID finished $DCONC. Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
   esac
 fi
 

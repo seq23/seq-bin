@@ -123,6 +123,9 @@ GH_OWNER="${CI_SWEEP_GH_OWNER:-seq23}"
 STATE_DIR="$LOG_DIR/state"
 LEDGER="$STATE_DIR/outcomes.tsv"
 NEXT_CARRY="$STATE_DIR/carryover-next.md"
+# Boss OS's grid inbox: stale PRs its grid watcher found, one open task per repo, rewritten
+# daily by `npm run grid:post` in boss-os. ci-sweep-grid-lanes.sh turns it into lanes.
+GRID_INBOX="${CI_SWEEP_GRID_INBOX:-$STATE_DIR/grid-inbox.tsv}"
 #   fixed-unverified.tsv  repo \t workflow \t failing run id \t note — lanes whose fix
 #                      merged but which have NOT run on main since. Read by the next run
 #                      so it neither re-works them nor calls them green; an entry lapses
@@ -208,6 +211,17 @@ sweep_prs_opened_this_run() {
     gh pr list --repo "$GH_OWNER/$repo" --state open --limit 30 --json number,createdAt,title,headRefName,isDraft \
       --jq ".[] | select(.createdAt >= \"$since\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null
   done
+  # Boss OS grid tasks (7 Oct 2026): a stale PR from the grid inbox, in a repo this run
+  # worked, is this run's to land like its own — audited, checks read by the wrapper, merged
+  # with land. Its lane comes from ci-sweep-grid-lanes.sh via the probe.
+  if [ -s "$GRID_INBOX" ]; then
+    awk -F'\t' '$2=="pr_stale"{n=$3; sub(/.*\/pull\//,"",n); sub(/[^0-9].*/,"",n); r=$1; sub(/.*\//,"",r); if (n!="") print r "\t" n}' "$GRID_INBOX" | sort -u |
+    while IFS=$'\t' read -r repo num; do
+      grep -qxF "$repo" "$WORK/scope-repos" 2>/dev/null || continue
+      gh pr view "$num" --repo "$GH_OWNER/$repo" --json state,number,title,headRefName,isDraft \
+        --jq "select(.state==\"OPEN\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null </dev/null
+    done
+  fi
   # The previous run's unfinished fix PRs are this run's to finish, while still open.
   [ -s "$WORK/carried-prs.tsv" ] || return 0
   while IFS=$'\t' read -r repo num _; do

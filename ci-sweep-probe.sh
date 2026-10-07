@@ -470,6 +470,22 @@ for dir in "$GITHUB_DIR"/*/; do
   done < "$VERDICTS"
 done
 
+# BOSS OS GRID TASKS (7 Oct 2026). A stale pull request Boss OS's grid watcher found is
+# invisible to the lane scan above, so its task reaches the sweep through the grid inbox:
+# RED while the PR is open, GREEN once it is merged or closed. See ci-sweep-grid-lanes.sh.
+GRID_LANES="${CI_SWEEP_GRID_LANES_BIN:-$(dirname "$0")/ci-sweep-grid-lanes.sh}"
+if [ -x "$GRID_LANES" ]; then
+  grid_out="$("$GRID_LANES")"
+  if [ -n "$grid_out" ]; then
+    printf '%s\n' "$grid_out"
+    lanes=$((lanes + $(printf '%s\n' "$grid_out" | grep -cE '^(RED|GREEN)	' || true)))
+    red=$((red + $(printf '%s\n' "$grid_out" | grep -cE '^RED	' || true)))
+  fi
+else
+  log "NAMED STOP [NO_GRID_LANES] $GRID_LANES is missing — Boss OS's grid tasks would reach no executor."
+  exit 3
+fi
+
 # RULE 0. Probing nothing is not a clean bill of health.
 if [ "$lanes" -eq 0 ]; then
   log "NAMED STOP [PROBED_NOTHING] no repository under $GITHUB_DIR resolved to a non-archived $OWNER repo."

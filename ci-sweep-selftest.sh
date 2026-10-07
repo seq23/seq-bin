@@ -299,6 +299,43 @@ else
   else bad "failed run listing produced neither SILENT nor RUNS_UNREADABLE — the probe examined nothing"; fi
 fi
 
+echo "=== 7c. Boss OS grid tasks reach the sweep as lanes ====================="
+# 7 Oct 2026: 48 Boss OS "fix this repo" tasks sat queued from 16 Sep with nothing to claim
+# them. A stale PR in the grid inbox must be a RED lane while open, GREEN once merged or
+# closed, QUIET (not blocking) when unreadable; other kinds are the probe's own business;
+# a repeated line is one lane; CI_SWEEP_ONLY_REPOS is honoured.
+G="$(mktemp -d)"
+printf '#!/bin/bash\n# fake gh: gh pr view <n> --repo <r> --json state --jq .state\ncase "$3" in\n  1) echo OPEN ;;\n  2) echo MERGED ;;\n  3) echo CLOSED ;;\n  *) exit 1 ;;\nesac\n' > "$G/gh"; chmod +x "$G/gh"
+printf 'seq23/alpha\tpr_stale\thttps://github.com/seq23/alpha/pull/1\ttsk_a\tPR #1 has sat.\n' > "$G/inbox"
+printf 'seq23/alpha\tpr_stale\thttps://github.com/seq23/alpha/pull/1\ttsk_a\tsame PR again\n' >> "$G/inbox"
+printf 'seq23/beta\tpr_stale\thttps://github.com/seq23/beta/pull/2\ttsk_b\tPR #2 has sat.\n' >> "$G/inbox"
+printf 'seq23/gamma\tpr_stale\thttps://github.com/seq23/gamma/pull/3\ttsk_c\tPR #3 has sat.\n' >> "$G/inbox"
+printf 'seq23/delta\tpr_stale\thttps://github.com/seq23/delta/pull/9\ttsk_d\tPR #9 has sat.\n' >> "$G/inbox"
+printf 'seq23/alpha\tci_red\thttps://github.com/seq23/alpha/actions/runs/5\ttsk_e\tred build\n' >> "$G/inbox"
+gout="$(PATH="$G:$PATH" CI_SWEEP_GRID_INBOX="$G/inbox" "$BIN/ci-sweep-grid-lanes.sh")"
+gonly="$(PATH="$G:$PATH" CI_SWEEP_GRID_INBOX="$G/inbox" CI_SWEEP_ONLY_REPOS="beta" "$BIN/ci-sweep-grid-lanes.sh")"
+gnone="$(PATH="$G:$PATH" CI_SWEEP_GRID_INBOX="$G/missing" "$BIN/ci-sweep-grid-lanes.sh")"; gnone_rc=$?
+rm -rf "$G"
+gc=0
+[ "$(printf '%s\n' "$gout" | grep -c $'^RED\talpha\tgrid: stale PR #1\t')" = 1 ] && gc=$((gc+1)) || bad "an open grid PR is not exactly one RED lane"
+printf '%s\n' "$gout" | grep -q $'^GREEN\tbeta\tgrid: stale PR #2\t' && gc=$((gc+1)) || bad "a merged grid PR is not GREEN"
+printf '%s\n' "$gout" | grep -q $'^GREEN\tgamma\tgrid: stale PR #3\t' && gc=$((gc+1)) || bad "a closed grid PR is not GREEN"
+printf '%s\n' "$gout" | grep -q $'^QUIET\tdelta\t' && gc=$((gc+1)) || bad "an unreadable grid PR is not QUIET"
+printf '%s\n' "$gout" | grep -q 'runs/5' && bad "a ci_red inbox line became a grid lane (the probe judges lane health)" || gc=$((gc+1))
+printf '%s\n' "$gout" | grep -q 'run #' && bad "a grid lane's detail says 'run #' — FIXED-UNVERIFIED would try to dispatch a PR" || gc=$((gc+1))
+[ "$(printf '%s\n' "$gonly" | grep -c .)" = 1 ] && printf '%s\n' "$gonly" | grep -q $'\tbeta\t' && gc=$((gc+1)) || bad "CI_SWEEP_ONLY_REPOS was not honoured by the grid lanes"
+[ -z "$gnone" ] && [ "$gnone_rc" = 0 ] && gc=$((gc+1)) || bad "a missing grid inbox did not print nothing and exit 0"
+grep -q 'ci-sweep-grid-lanes.sh' "$BIN/ci-sweep-probe.sh" && gc=$((gc+1)) || bad "the probe does not run ci-sweep-grid-lanes.sh — the grid inbox reaches nothing"
+grep -q 'GRID_INBOX' "$BIN/ci-sweep.sh" && gc=$((gc+1)) || bad "ci-sweep.sh does not treat grid PRs as landable"
+if [ "$gc" = 10 ]; then ok "grid inbox: 10 assertions — open PR is RED once, merged/closed GREEN, unreadable QUIET, lane kinds left to the probe"; examined_fixtures=$((examined_fixtures+10)); fi
+if gh auth status >/dev/null 2>&1; then
+  out="$(CI_SWEEP_GRID_LANES_BIN=/nonexistent CI_SWEEP_ONLY_REPOS=heygetonmylevel "$BIN/ci-sweep-probe.sh" 2>&1)"; rc=$?
+  if [ "$rc" = 3 ] && printf '%s' "$out" | grep -q 'NO_GRID_LANES'; then ok "probe named-stops with NO_GRID_LANES when the grid lanes script is missing"
+  else bad "probe did not named-stop without the grid lanes script (rc=$rc)"; fi
+else
+  echo "  - NAMED SKIP [NO_GH_AUTH] the probe's NO_GRID_LANES stop needs a real gh."
+fi
+
 echo "=== 8. the docs cannot drift from the code ============================"
 # 22-23 Sep 2026: the README said 10:00-22:00 twice a day, the script header said a
 # 10:00-22:00 window with 6 attempts, the plist ran :07/:37 inside 05:00-08:00, and no

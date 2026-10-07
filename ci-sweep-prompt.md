@@ -126,7 +126,12 @@ so in the report rather than landing it.
   `land <pr>` where land knows the repo (that also deploys), otherwise `gh pr merge
   --merge --delete-branch` — and watches `main` to a terminal state. The next probe tells
   you whether it worked.
-- **Only PRs this run opened are merged.** To reuse yesterday's parked PR, open a new PR
+- **A `grid: stale PR #N` lane is a Boss OS grid task** (7 Oct 2026): a pull request in that
+  repo that has sat open. Your job is to make it landable — update it from `main`, fix what is
+  red on it, drive its checks green — and the wrapper lands it like your own. If it is
+  superseded or wrong, close it with a one-line reason instead. Either way the lane goes green
+  when the PR is no longer open. Do not open a duplicate PR for the same change.
+- **Only PRs this run opened, and grid PRs above, are merged.** To reuse yesterday's parked PR, open a new PR
   from it. A PR the audit names SUSPECT, or in a repo you parked, is left open for her.
 - **how-we-know is merged like every other repo** (her approval, 23 Sep 2026). What is
   still forbidden there: touching its LIVE LOOP STATE — no breaker resets, no

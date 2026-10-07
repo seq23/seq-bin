@@ -786,12 +786,26 @@ pick_run() {
     -q "[.[] | select($1) | select(.name != \"${E2E_WF:-}\")] as \$r | ((\$r | map(select(.name == \"${GATE_WF:-}\")) | .[0]) // (\$r | map(select(.name == \"${PR_WF:-}\")) | .[0]) // \$r[0]) | .databaseId // empty" 2>/dev/null
 }
 # --- pick_run end ---
-if [ -n "$ALREADY_MERGED" ] && [ -n "$MERGESHA" ]; then
-  # The run for THIS merge commit, not whatever landed on main most recently since.
-  RID="$(pick_run ".headSha == \"$MERGESHA\" and .event == \"push\"")"
-  [ -n "$RID" ] || RID="$(pick_run "true")"
-else
-RID="$(pick_run "true")"
+# THE RUN FOR THIS MERGE COMMIT, fresh merge or not. 7 Oct 2026 (sprylabs-hpc-site #119): a fresh
+# merge took pick_run "true" 12 s after merging, before GitHub had created the merge commit's run,
+# and watched a JULY "Validate Repo" run (30281425800) to "failure" - main was red on paper while the
+# real run for a8190f1 was still in progress. So the merge sha is read back and its push run is
+# waited for (LAND_RUN_APPEAR_SECS, default 180 s); only a repo whose merge starts no run at all
+# falls back to the newest run, and says so.
+[ -n "${MERGESHA:-}" ] || MERGESHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null || true)"
+RID=""
+if [ -n "$MERGESHA" ]; then
+  APPEAR_DEADLINE=$(( $(date +%s) + ${LAND_RUN_APPEAR_SECS:-180} ))
+  while :; do
+    RID="$(pick_run ".headSha == \"$MERGESHA\" and .event == \"push\"")"
+    [ -n "$RID" ] && break
+    [ "$(date +%s)" -ge "$APPEAR_DEADLINE" ] && break
+    sleep 10
+  done
+fi
+if [ -z "$RID" ]; then
+  RID="$(pick_run "true")"
+  [ -z "$RID" ] || echo "     no run for merge commit ${MERGESHA:0:7} appeared in ${LAND_RUN_APPEAR_SECS:-180} s — watching main's newest run instead"
 fi
 [ -z "$RID" ] || echo "     watching run $RID${PR_WF:+ (the PR was judged by \"$PR_WF\"${GATE_WF:+; deploy.yml gate \"$GATE_WF\"})}"
 if [ -z "$RID" ]; then

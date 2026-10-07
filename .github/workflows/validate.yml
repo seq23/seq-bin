@@ -55,6 +55,11 @@ jobs:
       - name: land must watch the gate run on a two-workflow main
         run: ./tests/test-land-pick-run.sh
 
+      # A fresh merge watched a July run 12 s after merging (sprylabs-hpc-site #119, 7 Oct 2026):
+      # land must wait for the run of its own merge commit before falling back to main's newest.
+      - name: land must watch its own merge commit's run
+        run: ./tests/test-land-merge-run.sh
+
       # The web property change lane (23 Sep 2026) lands partner changes with `land <pr>`; a site
       # repo with no route makes land stop after the work is built. Evals land's routes block.
       - name: land must know how every West Peek site repo reaches production

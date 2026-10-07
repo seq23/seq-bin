@@ -14,8 +14,8 @@ used = int(size * pct / 100) if size and pct is not None else None
 parts = [c(model, "1")]
 if used is not None:
     k = f"{used//1000}K/{size//1000}K ({pct:.0f}%)"
-    col = "31;1" if used >= 400_000 else "33" if used >= 200_000 else "32"
-    tag = "  ← HAND OFF" if used >= 200_000 else ""
+    col = "31;1" if used >= 700_000 else "33" if used >= 450_000 else "32"
+    tag = "  ← HAND OFF" if used >= 450_000 else ""
     parts.append("ctx " + c(k + tag, col))
 rl = d.get("rate_limits") or {}
 wk = rl.get("seven_day") or {}

@@ -36,6 +36,7 @@ local-guides-generator|self
 sheila-creator-dashboard|npm run deploy:production
 mercedes-creator-dashboard|npm run deploy:production
 topbarz-voting|npm run deploy:production
+creator-studios|self
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
@@ -108,7 +109,12 @@ else echo "  FAIL westpeek-live route: expected '|deploy-cloudflare-worker.yml|h
 wself="$( ( NAME=westpeek-live; DEPLOY=""; SELF=""; DEPLOY_WF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$SELF" ) )"
 case "$wself" in *"Workers Builds only uploads"*) echo "  ok   westpeek-live's sentence says Workers Builds only uploads" ;;
   *) echo "  FAIL westpeek-live's sentence still claims Workers Builds deploys it: '$wself'"; fails=$((fails+1)) ;; esac
-# Only westpeek-live names a DEPLOY_WF today; every other route leaves it empty (deploy.yml default).
+# 7 Oct 2026: creator-studios self-deploys through its own deploy.yml (workflow_run on `check`), so
+# land must wait for that run, with no E2E_WF gate (e2e is nightly/dispatch) and no deploy command.
+cs="$( ( NAME=creator-studios; DEPLOY=""; SELF=""; DEPLOY_WF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$DEPLOY_WF|$SMOKE|$E2E_WF|$STAGING|$PROMOTE_VIA" ) )"
+if [ "$cs" = "|deploy.yml||||" ]; then echo "  ok   creator-studios waits for its own deploy.yml run on green main, no e2e gate"
+else echo "  FAIL creator-studios route: expected '|deploy.yml||||', got '$cs'"; fails=$((fails+1)); fi
+# Only westpeek-live and creator-studios name a DEPLOY_WF; every other route leaves it empty (deploy.yml default).
 for r in west-peek-os boss-os topbarz-voting justbeingmercedes dream-wedding-builder how-we-know; do
   # shellcheck disable=SC2034
   got="$( ( NAME="$r"; DEPLOY=""; SELF=""; DEPLOY_WF=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY_WF" ) )"

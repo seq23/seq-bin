@@ -278,6 +278,13 @@ case "$NAME" in
   # `d1 migrations apply` from the laptop. The command here is the same full path by hand
   # (break-glass). No browser suite in the repo, so no E2E_WF. Added 2 Oct 2026.
   topbarz-voting)       DEPLOY="npm run deploy:production" ; SELF="" ;;
+  # Creator Studios (seq23/creator-studios): one codebase, one Worker per studio (studios/*.json).
+  # .github/workflows/deploy.yml fires on a completed `check` run of a push to main (workflow_run)
+  # and ships EVERY studio through `npm run deploy:all` (build once, each studio's D1 migrations,
+  # wrangler deploy --env <slug>); land waits for that run on the merge commit and reports its real
+  # conclusion. The `e2e` workflow (nightly + dispatch) is not a gate, so no E2E_WF; no staging.
+  # Added 7 Oct 2026 when land refused creator-studios #8.
+  creator-studios)      DEPLOY="" ; SELF="deploys itself through its own deploy.yml (npm run deploy:all, every studio) on a green check on main" ; DEPLOY_WF="deploy.yml" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

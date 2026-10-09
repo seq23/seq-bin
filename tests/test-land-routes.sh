@@ -37,6 +37,7 @@ sheila-creator-dashboard|npm run deploy:production
 mercedes-creator-dashboard|npm run deploy:production
 topbarz-voting|npm run deploy:production
 creator-studios|self
+aplayer-mode|scripts/deploy-api-production.sh && scripts/deploy-web-production.sh
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
@@ -114,6 +115,11 @@ case "$wself" in *"Workers Builds only uploads"*) echo "  ok   westpeek-live's s
 cs="$( ( NAME=creator-studios; DEPLOY=""; SELF=""; DEPLOY_WF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$DEPLOY_WF|$SMOKE|$E2E_WF|$STAGING|$PROMOTE_VIA" ) )"
 if [ "$cs" = "|deploy.yml||||" ]; then echo "  ok   creator-studios waits for its own deploy.yml run on green main, no e2e gate"
 else echo "  FAIL creator-studios route: expected '|deploy.yml||||', got '$cs'"; fails=$((fails+1)); fi
+# 8 Oct 2026: aplayer-mode ships the API then the web app by its own scripts (the API script refuses
+# while a migration is unapplied) and smokes the API health route; no e2e gate, no deploy workflow.
+apm="$( ( NAME=aplayer-mode; DEPLOY=""; SELF=""; DEPLOY_WF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$DEPLOY_WF|$SMOKE|$E2E_WF|$STAGING|$PROMOTE_VIA" ) )"
+if [ "$apm" = "scripts/deploy-api-production.sh && scripts/deploy-web-production.sh||https://api.aplayermode.com/v1/health|||" ]; then echo "  ok   aplayer-mode deploys API then web by script and smokes api.aplayermode.com"
+else echo "  FAIL aplayer-mode route: got '$apm'"; fails=$((fails+1)); fi
 # Only westpeek-live and creator-studios name a DEPLOY_WF; every other route leaves it empty (deploy.yml default).
 for r in west-peek-os boss-os topbarz-voting justbeingmercedes dream-wedding-builder how-we-know; do
   # shellcheck disable=SC2034

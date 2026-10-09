@@ -285,6 +285,13 @@ case "$NAME" in
   # conclusion. The `e2e` workflow (nightly + dispatch) is not a gate, so no E2E_WF; no staging.
   # Added 7 Oct 2026 when land refused creator-studios #8.
   creator-studios)      DEPLOY="" ; SELF="deploys itself through its own deploy.yml (npm run deploy:all, every studio) on a green check on main" ; DEPLOY_WF="deploy.yml" ;;
+  # A Player Mode (seq23/aplayer-mode): the API Worker aplayer-mode-api (api.aplayermode.com) and
+  # the web app Worker aplayermode-app (app.aplayermode.com), both shipped by the repo's own scripts
+  # from the merge sha (RUNBOOK → Deploy). The API script refuses while a database function the
+  # Worker needs is missing, so a migration that has not been applied stops the land, named.
+  # Its deploy-cloudflare.yml is workflow_dispatch only (staging), never fired by main.
+  # Added 8 Oct 2026 when land refused aplayer-mode #47.
+  aplayer-mode)         DEPLOY="scripts/deploy-api-production.sh && scripts/deploy-web-production.sh" ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

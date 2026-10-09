@@ -462,6 +462,13 @@ deploy_at() { # $1 sha  $2 command
     else
       (cd "$wt" && npm ci --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; return 1; }
     fi
+  elif [ -f "$wt/package.json" ]; then
+    # No lockfile at the sha (aplayer-mode keeps it untracked): `npm ci` cannot run, and a worktree
+    # with no node_modules builds nothing (8 Oct 2026: wrangler "Could not resolve @apm/ai", 22
+    # errors). Install in the worktree, seeded with this checkout's lockfile when there is one, so
+    # workspace packages resolve to the sha's own packages/, not this checkout's working tree.
+    [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$wt/package-lock.json"
+    (cd "$wt" && npm install --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; echo "     npm install failed in the worktree at ${sha:0:7}"; return 1; }
   fi
   (cd "$wt" && echo "     in $wt @ ${sha:0:7}: $cmd" && eval "$cmd"); rc=$?
   git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"

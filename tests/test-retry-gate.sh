@@ -11,6 +11,8 @@
 #     lock no-oped it, and the day could never get its retry)
 #   · in flight past its ceiling              -> hand it to the sweep (whose lock reclaims)
 #   · in flight, then gone with no row        -> run the sweep
+#   · a row today AND in flight (12 Oct 2026: an INTERRUPTED run resumed after sleep keeps
+#     its one row)                            -> wait for it, then decide from that same row
 # RULE 0: zero assertions is not a pass. The wait is proven negatively: with the wait
 # removed, the gate runs the sweep while the holder is still alive.
 set -uo pipefail
@@ -46,7 +48,10 @@ ran() { cat "$FAKE_RAN" 2>/dev/null; }
 hold() {
   local secs="$1" verdict="${2:-}"
   mkdir -p "$LOCK"; date +%s > "$LOCK/started"; echo run-0700 > "$LOCK/run-id"
-  ( sleep "$secs"; [ -n "$verdict" ] && row "$verdict" run-0700; rm -rf "$LOCK" ) &
+  # Like record_outcome: the holder's verdict REPLACES any earlier row of its own id.
+  ( sleep "$secs"
+    if [ -n "$verdict" ]; then awk -F'\t' '$4!="run-0700"' "$LEDGER" > "$LEDGER.t"; mv "$LEDGER.t" "$LEDGER"; row "$verdict" run-0700; fi
+    rm -rf "$LOCK" ) &
   HOLDER=$!; echo "$HOLDER" > "$LOCK/pid"
 }
 
@@ -81,13 +86,19 @@ reset; hold 3 MAIN-GREEN; gate
 check "an in-flight run that ends green: nothing to retry" [ -z "$(ran)" ]
 reset; hold 3; gate
 check "an in-flight run that ends with no row: runs (the sweep records the dead run)" [ "$(ran)" = "ran" ]
+# 12 Oct 2026: an INTERRUPTED 08:00 run resumed after sleep keeps its one row and may be
+# in flight at 09:00. The gate waits for it and decides from that same row.
+reset; row MAIN-RED-INTERRUPTED run-0700; hold 3 MAIN-RED-UNFINISHED; gate
+check "a resumed run in flight (today's row already written): waited for, then the one retry" [ "$(ran)" = "ran" ]
+reset; row MAIN-RED-INTERRUPTED run-0700; hold 3 MAIN-GREEN; gate
+check "a resumed run in flight that ends green: nothing to retry" [ -z "$(ran)" ]
 reset; hold 30; gate CI_SWEEP_RETRY_WAIT_UNTIL="$(( $(date +%s) + 2 ))"
 check "a holder past its ceiling is handed to the sweep's reclaim" [ "$(ran)" = "ran-while-holder-alive" ]
 check "…and the gate says so" grep -q 'still running past its ceiling' "$TMP/gate.out"
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; HOLDER=""
 
 echo "=== negative proof: without the wait, the gate runs the sweep under a live holder ==="
-sed 's/^if \[ "\$count" -eq 0 \] && holder="\$(holder_pid)"; then$/if false; then/' "$GATE" > "$TMP/nowait.sh"; chmod +x "$TMP/nowait.sh"
+sed 's/^if holder="\$(holder_pid)"; then$/if false; then/' "$GATE" > "$TMP/nowait.sh"; chmod +x "$TMP/nowait.sh"
 if cmp -s "$GATE" "$TMP/nowait.sh"; then
   bad "SETUP BROKEN — could not remove the wait, so the negative proof is void"
 else

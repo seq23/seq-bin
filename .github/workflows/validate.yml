@@ -104,6 +104,8 @@ jobs:
       - name: the 09:00 retry gate waits for an in-flight run and decides from its row
         run: ./tests/test-retry-gate.sh
 
+      - name: an interrupted sweep resumes on wake, and only that
+        run: ./tests/test-resume-on-wake.sh
       - name: ci-sweep.sh per-run design (tests/test-sweep-daily.sh) — park per repo, progress rounds, verified merges
         run: ./tests/test-sweep-daily.sh
 

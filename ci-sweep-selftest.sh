@@ -284,6 +284,21 @@ else
 fi
 
 # ===========================================================================
+echo "=== 7d. an INTERRUPTED run resumes on wake, and only that ================"
+# 12 Oct 2026, owner: "just pick up where it left off if I close the lid and then re-open".
+# The 08:04 run slept 627 s and ended MAIN-RED-INTERRUPTED; until then that was final.
+RESUME_SUITE="$BIN/tests/test-resume-on-wake.sh"
+if [ ! -x "$RESUME_SUITE" ]; then
+  bad "tests/test-resume-on-wake.sh is missing — resume-on-wake is unguarded"
+elif out="$("$RESUME_SUITE" "$BIN" 2>&1)"; then
+  n="$(printf '%s\n' "$out" | grep -oE '^=== [0-9]+ assertion' | grep -oE '[0-9]+')"
+  examined_fixtures=$((examined_fixtures + ${n:-0}))
+  ok "resume on wake: ${n:-?} assertions — resumes an INTERRUPTED row in budget; refuses a running sweep, past stop-by, a spent ceiling"
+else
+  bad "resume-on-wake suite failed:"; printf '%s\n' "$out" | grep -E '^  x' | sed 's/^/      /'
+fi
+
+# ===========================================================================
 echo "=== 7b. a failed GitHub read is unproven, never silence ================="
 # 2026-09-23: one failed `gh run list` became '[]' and the probe called a repo with 33
 # runs SILENT. A fake gh fails only that call; the probe must say PENDING, not SILENT.
@@ -455,6 +470,49 @@ if [ -f "$PLIST" ] && [ -f "$RETRY_PLIST" ]; then
   if [ -z "$stale_cadence" ]; then ok "no current-tense daily-cadence phrase survives (07:00 tomorrow, today's 08:00 retry, …)"
   else bad "the daily cadence is still described as current: $(printf '%s' "$stale_cadence" | head -3 | tr '\n' ' ')"; fi
 fi
+# RESUME ON WAKE (12 Oct 2026): a third plist, read the same way — label, a 300 s
+# StartInterval and NOTHING else (no calendar, not at load, no env knobs), invoking
+# ci-sweep-resume-on-wake.sh, never ci-sweep.sh directly. Proven negatively on 12 Oct
+# 2026 by changing the interval to 600 and watching this fail.
+RESUME_PLIST="$BIN/launchd/com.seq.ci-sweep-resume.plist"
+RESUME_SCRIPT="$BIN/ci-sweep-resume-on-wake.sh"
+consistency=$((consistency+1))
+if [ ! -f "$RESUME_PLIST" ]; then
+  bad "launchd/com.seq.ci-sweep-resume.plist is missing — resume on wake is not versioned"
+else
+  rplist="$(python3 - "$RESUME_PLIST" <<'PY'
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+args = d.get("ProgramArguments", [])
+print("%s interval=%s program=%s%s%s%s" % (
+    d.get("Label"), d.get("StartInterval"), (args[-1].rsplit("/", 1)[-1] if args else "NONE"),
+    " CALENDAR" if "StartCalendarInterval" in d else "",
+    " RUNATLOAD" if d.get("RunAtLoad") else "",
+    " ENVKNOBS" if any("CI_SWEEP_" in a for a in args) else ""))
+PY
+)"
+  WANT_RESUME="com.seq.ci-sweep-resume interval=300 program=ci-sweep-resume-on-wake.sh"
+  if [ "$rplist" = "$WANT_RESUME" ]; then
+    ok "the resume plist is com.seq.ci-sweep-resume, every 300 s, running ci-sweep-resume-on-wake.sh — no calendar, not at load, no env knobs"
+  else
+    bad "the resume plist reads '$rplist', expected exactly '$WANT_RESUME' (owner, 12 Oct 2026)"
+  fi
+fi
+consistency=$((consistency+1))
+if [ -x "$RESUME_SCRIPT" ] && grep -q 'outcomes.tsv' "$RESUME_SCRIPT" && grep -q 'MAIN-RED-INTERRUPTED' "$RESUME_SCRIPT"; then
+  ok "ci-sweep-resume-on-wake.sh is executable and decides from the ledger's INTERRUPTED row"
+else
+  bad "ci-sweep-resume-on-wake.sh is missing, not executable, or no longer reads outcomes.tsv for INTERRUPTED"
+fi
+for f in "$README" "$SWEEP" "$RETRY_SCRIPT" "$RESUME_SCRIPT"; do
+  consistency=$((consistency+1))
+  if grep -q 'com.seq.ci-sweep-resume' "$f" && grep -qE '300 ?s' "$f"; then
+    ok "$(basename "$f") names com.seq.ci-sweep-resume and its 300 s tick"
+  else
+    bad "$(basename "$f") does not name com.seq.ci-sweep-resume and 300 s — resume on wake has drifted out of the docs"
+  fi
+done
+
 # Every `claude -p` in the wrapper carries --model opus; zero invocations is a failure.
 inv="$(grep -nE '^[^#]*"\$CLAUDE" -p' "$SWEEP")"
 n_inv="$(printf '%s\n' "$inv" | grep -c .)"

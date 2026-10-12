@@ -175,7 +175,7 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
 # with a DEPLOY command; a self-deploying route names it, or tests/test-land-routes.sh fails when
 # the repo carries a Cloudflare deploy workflow the route does not wait for).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
-STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""
+STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""; PAGES_PROJECTS=""
 case "$NAME" in
   west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
   # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
@@ -199,12 +199,13 @@ case "$NAME" in
   sprylabs-hpc-site)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
   # Same shape as the hpc site (wrangler.toml pages_build_output_dir = dist); Deploy Distribution
   # (IndexNow/GSC) fires on a completed green Validate Repo. Added 21 Sep 2026 with PR #140.
-  # One build feeds six Cloudflare Pages projects (Git integration: check-runs "Cloudflare Pages:
-  # local-guides-generator-{trt,pi,dentistry,neuro,uscis-medical}" and the base project on the main
-  # commit), serving hormonesivhair.com, theaccidentguides.com, dentistryguides.com,
-  # neuroevalguides.com and uscisexam.com. Deploy Distribution (IndexNow/GSC) runs on push to main.
+  # One build feeds five Cloudflare Pages projects (Git integration: check-runs "Cloudflare Pages:
+  # local-guides-generator-{trt,pi,dentistry,neuro,uscis-medical}" on the main commit; the base
+  # project stopped posting one after 76781dc, 11 Oct 2026). PAGES_PROJECTS pins all five so land
+  # waits for each (12 Oct 2026, #61: it called the deploy done with one of five reported). They
+  # serve hormonesivhair.com, theaccidentguides.com, dentistryguides.com, neuroevalguides.com and uscisexam.com. Deploy Distribution (IndexNow/GSC) runs on push to main.
   # Added 25 Sep 2026 when the Bing Webmaster fix PR #48 had no route to land on.
-  local-guides-generator) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (6 projects, 5 domains)" ;;
+  local-guides-generator) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (5 projects, 5 domains)" ; PAGES_PROJECTS="local-guides-generator-uscis-medical local-guides-generator-pi local-guides-generator-dentistry local-guides-generator-trt local-guides-generator-neuro" ;;
   local-guides-citation-velocity) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main; Deploy Distribution fires on green Validate Repo" ;;
   # Client repo; Cloudflare Pages builds main on push, Content Publish fires on its schedule.
   # Added 23 Sep 2026 after #28 had to be merged and its deploy checked by hand.
@@ -906,32 +907,71 @@ case "$CONC" in
     ;;
 esac
 
-# A SELF-DEPLOYING REPO IS NOT DEPLOYED UNTIL ITS CLOUDFLARE BUILD SAYS SO. 25 Sep 2026,
+# A SELF-DEPLOYING REPO IS NOT DEPLOYED UNTIL EVERY ONE OF ITS CLOUDFLARE BUILDS SAYS SO. 25 Sep 2026,
 # local-guides-generator #48: main's GitHub workflows went green, this script printed "nothing to
 # run", and the base Cloudflare Pages project's production build had failed on the merge commit.
 # The Cloudflare app posts one check-run per project ("Cloudflare Pages: <project>", "Workers
-# Builds: <worker>") on the commit it builds; wait for those to reach a terminal state and refuse
-# on any that did not succeed. A repo whose deploy posts no such check (the Actions-driven loop
-# repos, ~/bin) gets the old sentence once none has appeared.
+# Builds: <worker>") on the commit it builds. 12 Oct 2026, local-guides-generator #61: this printed
+# "every Cloudflare build succeeded" with ONE of the repo's five projects reported — Cloudflare posts
+# each check-run only when that project's build finishes (already completed, ~30 s apart), so the
+# four still queued were simply absent and "nothing pending" read as "all done". So the set of
+# projects is now decided BEFORE looking at the merge commit: the route's PAGES_PROJECTS (passed as
+# $2) plus every Cloudflare check-run name on the newest earlier main commit whose Cloudflare runs all
+# finished (one commit, so a project retired since — the base project, 11 Oct — is not waited on). Each
+# expected project must post a completed, successful run on the merge commit; one not yet posted is
+# a WAIT, never a success. The deadline is 4x the slowest build on the last 3 such commits (commit -> last
+# check-run), floor 600 s, cap 3600 s — a fault detector, never a budget; PAGES_WAIT_SECS overrides.
+# Prints one line per project. A repo with nothing expected and nothing posted (the Actions-driven
+# loop repos, ~/bin) gets the old sentence (rc 2) once PAGES_APPEAR_SECS passes.
 # --- pages_watch begin (tests/test-land-pages-watch.sh evals this block verbatim) ---
-pages_watch() { # $1 merge sha -> 0 all succeeded | 1 failed or timed out (prints which) | 2 none posted
-  local sha="$1" rows pending failed
-  local appear_by=$((SECONDS + ${PAGES_APPEAR_SECS:-180})) deadline=$((SECONDS + ${PAGES_WAIT_SECS:-1200}))
+PAGES_RE='^(Cloudflare Pages|Workers Builds)'
+pages_history() { # $1 merge sha -> "<secs>\t<n>\t<check-run name>" for up to 3 earlier main commits with Cloudflare runs (n = 1 newest)
+  local s d out all used=0
+  while IFS=$'\t' read -r s d; do
+    [ -n "$s" ] && [ "$s" != "$1" ] || continue
+    all="$(gh api "repos/{owner}/{repo}/commits/$s/check-runs?per_page=100" \
+      --jq ".check_runs[] | select(.name | test(\"$PAGES_RE\")) | \"\(.completed_at)\t\(.name)\"" 2>/dev/null)"
+    [ -n "$all" ] || continue
+    # a commit whose builds never all finished (superseded mid-queue) is no evidence of the set
+    printf '%s\n' "$all" | grep -q '^null'$'\t' && continue
+    used=$((used + 1))
+    out="$(gh api "repos/{owner}/{repo}/commits/$s/check-runs?per_page=100" \
+      --jq ".check_runs[] | select(.name | test(\"$PAGES_RE\")) | select(.completed_at != null) | \"\((.completed_at | fromdateiso8601) - (\"$d\" | fromdateiso8601))\t$used\t\(.name)\"" 2>/dev/null)"
+    printf '%s\n' "$out"
+    [ "$used" -ge 3 ] && break
+  done < <(gh api "repos/{owner}/{repo}/commits?sha=main&per_page=10" --jq '.[] | "\(.sha)\t\(.commit.committer.date)"' 2>/dev/null)
+}
+pages_watch() { # $1 merge sha, $2 PAGES_PROJECTS -> 0 every expected build succeeded | 1 failed/timed out | 2 none expected, none posted
+  local sha="$1" hist expected p rows name st co line bad pending slow wait
+  hist="$(pages_history "$sha")"
+  expected="$( { for p in ${2:-}; do echo "Cloudflare Pages: $p"; done; [ -z "$hist" ] || printf '%s\n' "$hist" | awk -F'\t' '$2 == 1 {print $3}'; } | sort -u | sed '/^$/d')"
+  slow="$( [ -z "$hist" ] || printf '%s\n' "$hist" | cut -f1 | sort -n | tail -1)"; slow="${slow%%.*}"
+  wait=$(( ${slow:-0} * 4 )); [ "$wait" -lt 600 ] && wait=600; [ "$wait" -gt 3600 ] && wait=3600
+  local appear_by=$((SECONDS + ${PAGES_APPEAR_SECS:-180})) deadline=$((SECONDS + ${PAGES_WAIT_SECS:-$wait}))
   while :; do
-    rows="$(gh api "repos/{owner}/{repo}/commits/$sha/check-runs" \
-      --jq '.check_runs[] | select(.name | test("^(Cloudflare Pages|Workers Builds)")) | "\(.status)\t\(.conclusion)\t\(.name)"' 2>/dev/null)"
-    if [ -z "$rows" ]; then
+    rows="$(gh api "repos/{owner}/{repo}/commits/$sha/check-runs?per_page=100" \
+      --jq ".check_runs[] | select(.name | test(\"$PAGES_RE\")) | \"\(.status)\t\(.conclusion)\t\(.name)\"" 2>/dev/null)"
+    if [ -z "$expected" ] && [ -z "$rows" ]; then
       [ "$SECONDS" -ge "$appear_by" ] && return 2
     else
-      pending="$(printf '%s\n' "$rows" | awk -F'\t' '$1 != "completed"' | wc -l | tr -d ' ')"
-      if [ "$pending" = 0 ]; then
-        failed="$(printf '%s\n' "$rows" | awk -F'\t' '$2 != "success" && $2 != "skipped" && $2 != "neutral" {print $3 " (" $2 ")"}')"
-        [ -z "$failed" ] && return 0
-        printf '%s\n' "$failed"
-        return 1
-      fi
-      if [ "$SECONDS" -ge "$deadline" ]; then
-        printf 'still running at the deadline: %s\n' "$(printf '%s\n' "$rows" | awk -F'\t' '$1 != "completed" {print $3}' | paste -sd, -)"
+      # every project that should build, plus any that posted without being expected
+      expected="$( { printf '%s\n' "$expected"; [ -z "$rows" ] || printf '%s\n' "$rows" | cut -f3-; } | sed '/^$/d' | sort -u)"
+      pending=0; bad=0; line=""
+      while IFS= read -r name; do
+        st="$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$3 == n {print $1 "\t" $2; exit}')"
+        co="${st#*$'\t'}"; st="${st%%$'\t'*}"
+        if [ -z "$st" ]; then pending=$((pending + 1)); line+="     $name — not yet reported (queued)"$'\n'
+        elif [ "$st" != completed ]; then pending=$((pending + 1)); line+="     $name — $st"$'\n'
+        elif [ "$co" = success ] || [ "$co" = skipped ] || [ "$co" = neutral ]; then line+="     $name — $co"$'\n'
+        else bad=$((bad + 1)); line+="     $name — FAILED ($co)"$'\n'
+        fi
+      done <<<"$expected"
+      if [ "$pending" = 0 ] || [ "$bad" -gt 0 ] || [ "$SECONDS" -ge "$deadline" ]; then
+        if [ "$pending" -gt 0 ] && [ "$bad" = 0 ]; then
+          line="$(printf '%s' "$line" | sed -E "/ — (not yet reported \(queued\)|queued|in_progress|pending|waiting|requested)\$/s/\$/ — TIMED OUT at the ${PAGES_WAIT_SECS:-$wait}s deadline/")"$'\n'
+        fi
+        printf '%s' "$line"
+        [ "$pending" = 0 ] && [ "$bad" = 0 ] && return 0
         return 1
       fi
     fi
@@ -957,18 +997,20 @@ if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
-  PW_OUT="$(pages_watch "$MSHA_PAGES")"; PW=$?
+  PW_OUT="$(pages_watch "$MSHA_PAGES" "$PAGES_PROJECTS")"; PW=$?
+  [ -z "$PW_OUT" ] || printf '%s\n' "$PW_OUT"
+  PW_N="$(printf '%s\n' "$PW_OUT" | grep -c ' — ')"
   # A route with PROMOTE_VIA is only STAGED by that build: production moves through the repo's own
   # workflow, and the plan below decides when (small: now, on the fast check; large: after a green
   # suite). Every other self-deploying repo is done here, as before.
   case "$PW" in
-    0) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: every Cloudflare build on ${MSHA_PAGES:0:7} succeeded"
-       elif [ -n "$DEPLOY_WF" ]; then echo "     every Cloudflare build on ${MSHA_PAGES:0:7} succeeded (upload only — production moves through $DEPLOY_WF)"
-       else say "LANDED — #$PR is merged, main is green, and every Cloudflare build on ${MSHA_PAGES:0:7} succeeded."; fi ;;
+    0) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded"
+       elif [ -n "$DEPLOY_WF" ]; then echo "     all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded (upload only — production moves through $DEPLOY_WF)"
+       else say "LANDED — #$PR is merged, main is green, and all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded (each listed above)."; fi ;;
     2) if [ -n "$PROMOTE_VIA" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; staging is published by the repo's own workflow on push"
        elif [ -n "$DEPLOY_WF" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; production moves through $DEPLOY_WF"
        else say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run"; fi ;;
-    *) die "#$PR IS MERGED and main's workflows are green, but a Cloudflare build on ${MSHA_PAGES:0:7} did not succeed — that project was NOT updated: $(echo "$PW_OUT" | paste -sd';' -). Fix main now." ;;
+    *) die "#$PR IS MERGED and main's workflows are green, but not every Cloudflare build on ${MSHA_PAGES:0:7} succeeded — the project(s) listed above were NOT confirmed updated: $(echo "$PW_OUT" | grep -E 'FAILED|TIMED OUT|not yet reported' | sed 's/^ *//' | paste -sd';' -). Fix main now." ;;
   esac
   # A DEPLOY_WF route is not deployed by that build either: production moves only when the repo's
   # own deploy workflow finishes on the merge commit, so it falls through to the wait below.

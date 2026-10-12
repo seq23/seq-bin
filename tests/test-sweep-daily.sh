@@ -12,7 +12,7 @@
 #   · every `claude -p` carries `--model opus`;
 #   · every run ends with one banner; issues only for parked/stuck repos and
 #     run-level faults; a green run files nothing; nothing schedules a retry;
-#   · sleep is INTERRUPTED (not HUNG), a stall is HUNG, a TEMPFIX rejects the PR
+#   · sleep is INTERRUPTED (not HUNG) and RESUMED on wake as the same attempt, a stall is HUNG, a TEMPFIX rejects the PR
 #     without merging or closing it;
 #   · a state/pause-until date on or after today (America/Chicago) is a PAUSED row,
 #     exit 0 and NOTHING run (no lock, no probe, no gh, no claude); an expired date
@@ -323,6 +323,31 @@ else
   check "the lock was released" [ ! -d "$LOGS/.lock" ]
   check "a banner still went out" grep -q 'notify:dry\] banner: "CI sweep: interrupted' "$LOGS/run-sleep.log"
   check "nothing schedules a retry" no_retry_anywhere run-sleep
+fi
+
+# =============================================================================
+echo "=== 8a. RESUME ON WAKE: the interrupted run picks up where it left off ==="
+# Owner, 12 Oct 2026: "just pick up where it left off if I close the lid and then re-open".
+# The REAL ci-sweep-resume-on-wake.sh reads scenario 8's INTERRUPTED row and execs the sweep:
+# same ledger row (one attempt for the 09:00 gate), same stop-by, same claude session.
+if [ "$(last_verdict)" != "MAIN-RED-INTERRUPTED" ]; then
+  bad "scenario 8 left no INTERRUPTED row; the resume cannot be exercised"
+else
+  setup red-a1 green
+  SLEEP_SESSION="$(cat "$LOGS/run-sleep.d/session-id" 2>/dev/null)"
+  rows_before="$(grep -c . "$LEDGER")"
+  # sweep() puts its extra args before $SWEEP, so the resume script runs and $SWEEP is its ignored argument.
+  sweep run-resumed CI_SWEEP_BIN="$SWEEP" CI_SWEEP_TICK_SECS=1 "$ROOT/ci-sweep-resume-on-wake.sh"
+  check "the resume script decided to resume run-sleep" grep -q 'RESUMING run-sleep (attempt run-sleep) after sleep' "$LOGS/resume.log"
+  check "the resumed run says what it continues" grep -q 'RESUMED after sleep: continues run-sleep (ledger row run-sleep)' "$LOGS/run-resumed.log"
+  check "round 1 resumed the interrupted run's claude session ($SLEEP_SESSION)" grep -q -- "--resume $SLEEP_SESSION" <(sed -n 1p "$TMP/claude-args.log")
+  check "the same stop-by time as the interrupted run" [ "$(grep -oE 'stop by [0-9:]+' "$LOGS/run-sleep.log" | tail -1)" = "$(grep -oE 'stop by [0-9:]+' "$LOGS/run-resumed.log" | tail -1)" ]
+  check "the awake time already spent is carried against the hard kill" [ "$(cat "$LOGS/run-resumed.d/prior-awake-secs")" -gt 0 ]
+  check "ONE attempt: the ledger has the same number of rows" [ "$(grep -c . "$LEDGER")" -eq "$rows_before" ]
+  check "…the interrupted row now carries the resumed verdict and resumed-by" grep -qE $'\tMAIN-GREEN\trun-sleep\tresumed-by=run-resumed$' "$LEDGER"
+  absent "…and the resumed run has no row of its own" grep -qE $'\trun-resumed($|\t)' "$LEDGER"
+  CI_SWEEP_LOG_DIR="$LOGS" "$ROOT/ci-sweep-resume-on-wake.sh" > "$TMP/resume-again.out" 2>&1
+  check "a second tick after the resumed run ended green is a no-op" grep -q 'ended MAIN-GREEN — not a sleep interruption, nothing to resume' "$TMP/resume-again.out"
 fi
 
 # =============================================================================

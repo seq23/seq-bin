@@ -20,7 +20,7 @@
 # outside, the same way the supervisor bounds the body from outside.
 #
 # LOGIC (reads only, decides, then either execs ci-sweep.sh or exits 0):
-#   no run recorded for today yet, and a sweep is IN FLIGHT (live lock holder)
+#   a sweep is IN FLIGHT (live lock holder), with or without a row today
 #                                  -> WAIT for it, one bounded wait, then decide
 #                                     from its row (26 Sep 2026, then daily 07:00/08:00: the
 #                                     07:00 run was in round 2 at 08:00, the gate ran the sweep,
@@ -29,6 +29,12 @@
 #                                     the holder's own ceiling; a holder still alive
 #                                     past it is handed to ci-sweep.sh, whose lock
 #                                     reclaims it and records MAIN-RED-RECLAIMED.
+#                                     12 Oct 2026: also when today already has a row —
+#                                     an INTERRUPTED 08:00 run resumed after sleep
+#                                     (ci-sweep-resume-on-wake.sh, launchd com.seq.ci-sweep-resume
+#                                     every 300 s) keeps that one row and
+#                                     may be in flight at 09:00; launching beside it
+#                                     would be no-oped by the lock and lose the retry.
 #   no run recorded, nothing in flight -> run (the 08:00 slot was missed, or the run
 #                                     died without a row — ci-sweep.sh's reclaim
 #                                     writes that row)
@@ -63,10 +69,10 @@ read_rows() {
 }
 read_rows
 
-if [ "$count" -eq 0 ] && holder="$(holder_pid)"; then
+if holder="$(holder_pid)"; then
   started="$(cat "$LOCK/started" 2>/dev/null || date +%s)"
   deadline="${CI_SWEEP_RETRY_WAIT_UNTIL:-$(( started + HARD_KILL_MIN * 60 + 300 ))}"
-  say "no run recorded for $TODAY yet, and pid $holder ($(cat "$LOCK/run-id" 2>/dev/null || echo '?')) is in flight — waiting for its verdict (until $(date -r "$deadline" +%H:%M 2>/dev/null || date -d "@$deadline" +%H:%M))."
+  say "$count run(s) recorded for $TODAY so far, and pid $holder ($(cat "$LOCK/run-id" 2>/dev/null || echo '?')) is in flight — waiting for its verdict (until $(date -r "$deadline" +%H:%M 2>/dev/null || date -d "@$deadline" +%H:%M))."
   while [ -n "$(holder_pid)" ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep "$WAIT_POLL_SECS"; done
   if holder="$(holder_pid)"; then
     say "pid $holder is still running past its ceiling — handing it to ci-sweep.sh, whose lock reclaims it and records MAIN-RED-RECLAIMED."

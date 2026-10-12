@@ -16,6 +16,19 @@
 #     ending waits for the next Mon/Fri 08:00 run, briefed with what both tries did
 #     (state/carryover-next.md). If the Mac was asleep at 08:00, launchd fires
 #     the missed run once at wake, and the 09:00 retry check still runs as usual.
+#   · RESUME ON WAKE (owner, 12 Oct 2026: "just pick up where it left off if I close
+#     the lid and then re-open"). A run the Mac's sleep cut off (MAIN-RED-INTERRUPTED)
+#     is resumable, not final, while its budget has room: ci-sweep-resume-on-wake.sh
+#     (launchd com.seq.ci-sweep-resume, every 300 s, a no-op in under a second when
+#     there is nothing to do) starts this script again with CI_SWEEP_RESUME_FROM set.
+#     The resumed run keeps the SAME stop-by time (STARTED_AT is the original's), the
+#     SAME 240-awake-minute ceiling (the awake minutes already spent are subtracted),
+#     the SAME claude session (round 1 runs `--resume`, falling back to a fresh one on
+#     a dead handle exactly as later rounds do), the PRs it merged and the lanes it
+#     dispatched — and the SAME ledger row (CI_SWEEP_LEDGER_ID: the row is replaced,
+#     with a fifth column resumed-by=<run-id>), so the 09:00 retry still sees one
+#     attempt. Only INTERRUPTED resumes: KILLED is a signal from outside, HUNG is a
+#     fault, and a run that cannot finish by stop-by stays INTERRUPTED for the retry.
 #   · Round 1 probes main across the fleet and dispatches one fixing agent per red
 #     repo, in parallel. Every `claude -p` is pinned to `--model opus`; the prompt
 #     makes every fixing agent opus too. Nothing follows whatever /model last said.
@@ -111,6 +124,12 @@ KILL_AT=$((STARTED_AT + HARD_KILL_MIN * 60))
 RUN_ID="${CI_SWEEP_RUN_ID:-$(date +%Y-%m-%d-%H%M%S)-$$}"
 RUN_LOG="$LOG_DIR/$RUN_ID.log"
 WORK="$LOG_DIR/$RUN_ID.d"
+# RESUME ON WAKE (12 Oct 2026; see the header and ci-sweep-resume-on-wake.sh). Set only
+# by the resume script: the attempt this run continues, the ledger row it answers to,
+# and the awake seconds earlier attempts already spent against HARD_KILL_MIN.
+RESUME_FROM="${CI_SWEEP_RESUME_FROM:-}"
+LEDGER_ID="${CI_SWEEP_LEDGER_ID:-$RUN_ID}"
+PRIOR_AWAKE_SECS="${CI_SWEEP_PRIOR_AWAKE_SECS:-0}"
 NOTIFY="${CI_SWEEP_NOTIFY_BIN:-$HOME/bin/ci-sweep-notify.sh}"
 GITHUB_DIR="${CI_SWEEP_GITHUB_DIR:-$HOME/GitHub}"
 GH_OWNER="${CI_SWEEP_GH_OWNER:-seq23}"
@@ -146,11 +165,14 @@ at_time_utc() { local e="$1"; shift; date -u -r "$e" "$@" 2>/dev/null || date -u
 # --- the outcome ledger --------------------------------------------------------
 # Replaces any earlier line for this run id: the body may record a verdict and the
 # supervisor may then overrule it (a sleep gap, a hang), and a run counts once.
+# A resumed run answers to the row of the run it continues (LEDGER_ID): one attempt,
+# one row, with resumed-by=<this run> as a fifth column so the log can be found.
 record_outcome() {
-  local verdict="$1" id="${2:-$RUN_ID}" ts; ts="$(date +%s)"
+  local verdict="$1" id="${2:-$LEDGER_ID}" ts extra=""; ts="$(date +%s)"
   local tmp="$LEDGER.tmp.$$"
+  [ "$id" = "$LEDGER_ID" ] && [ "$LEDGER_ID" != "$RUN_ID" ] && extra="$(printf '\tresumed-by=%s' "$RUN_ID")"
   { [ -f "$LEDGER" ] && awk -F'\t' -v id="$id" '$4!=id' "$LEDGER"
-    printf '%s\t%s\t%s\t%s\n' "$ts" "$(at_time "$ts" +%Y-%m-%d)" "$verdict" "$id"; } > "$tmp"
+    printf '%s\t%s\t%s\t%s%s\n' "$ts" "$(at_time "$ts" +%Y-%m-%d)" "$verdict" "$id" "$extra"; } > "$tmp"
   mv "$tmp" "$LEDGER"
 }
 
@@ -814,9 +836,12 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
     fi
     rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { say "FAILED to take lock"; exit 3; }
   fi
+  SUP_T0="$(date +%s)"   # this supervisor's own start; STARTED_AT is the attempt's (older on a resume)
   echo $$ > "$LOCK/pid"
-  echo "$RUN_ID" > "$LOCK/run-id"
-  echo "$STARTED_AT" > "$LOCK/started"
+  # The ledger id: a reclaim of a wedged resumed run finds its row (INTERRUPTED) and
+  # leaves it resumable instead of adding a second row for the same attempt.
+  echo "$LEDGER_ID" > "$LOCK/run-id"
+  echo "$SUP_T0" > "$LOCK/started"
   date +%s > "$LOCK/heartbeat"
   release_lock() { [ "$(cat "$LOCK/pid" 2>/dev/null || echo)" = "$$" ] && rm -rf "$LOCK"; }
   # latest.log names the run IN FLIGHT, from its first line (26 Sep 2026: it still
@@ -826,8 +851,14 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   ln -sfn "$RUN_LOG" "$LOG_DIR/latest.log"
 
   say "=== CI sweep supervisor: convergence budget ${DEADLINE_MIN} min, hard kill at ${HARD_KILL_MIN} awake min ($(at_time "$KILL_AT" +%H:%M)) ==="
+  echo "$STARTED_AT" > "$WORK/started-at"
+  echo "$PRIOR_AWAKE_SECS" > "$WORK/prior-awake-secs"
+  if [ -n "$RESUME_FROM" ]; then
+    say "=== RESUMED after sleep: continues $RESUME_FROM (ledger row $LEDGER_ID); same stop-by, ${PRIOR_AWAKE_SECS}s of the ${HARD_KILL_MIN}-awake-minute ceiling already spent ==="
+  fi
 
-  export CI_SWEEP_SUPERVISED=1 CI_SWEEP_RUN_ID="$RUN_ID" CI_SWEEP_STARTED_AT="$STARTED_AT"
+  export CI_SWEEP_SUPERVISED=1 CI_SWEEP_RUN_ID="$RUN_ID" CI_SWEEP_STARTED_AT="$STARTED_AT" \
+         CI_SWEEP_LEDGER_ID="$LEDGER_ID" CI_SWEEP_RESUME_FROM="$RESUME_FROM" CI_SWEEP_PRIOR_AWAKE_SECS="$PRIOR_AWAKE_SECS"
 
   /usr/bin/python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
       /bin/bash "$0" "$@" &
@@ -847,7 +878,7 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   # the round in flight is a half round, so the run ends as INTERRUPTED and its
   # open PRs are parked, never merged.
   : > "$WORK/heartbeats"
-  ( prev="$(date +%s)"; ticks=0; limit=$(( HARD_KILL_MIN * 60 / TICK_SECS ))
+  ( prev="$(date +%s)"; ticks=0; limit=$(( (HARD_KILL_MIN * 60 - PRIOR_AWAKE_SECS) / TICK_SECS ))
     sh -c 'echo $PPID' > "$WORK/sentry-pid"
     while :; do
       sleep "$TICK_SECS"
@@ -869,7 +900,7 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   # (launchctl unload, a logout, a kill from a session) ends the body and records
   # MAIN-RED-KILLED; the EXIT trap backstops any other path out. Only kill -9 escapes
   # both, and the next run's lock reclaim records that one.
-  ledger_has_row() { awk -F'\t' -v id="$RUN_ID" '$4==id{f=1} END{exit !f}' "$LEDGER" 2>/dev/null; }
+  ledger_has_row() { awk -F'\t' -v id="$LEDGER_ID" '$4==id{f=1} END{exit !f}' "$LEDGER" 2>/dev/null; }
   on_supervisor_signal() {
     trap - TERM INT HUP
     kill_body_tree TERM; sleep 3; kill_body_tree KILL
@@ -887,9 +918,10 @@ if [ -z "${CI_SWEEP_SUPERVISED:-}" ]; then
   # handler exits, so reaching here means the body really ended.
   disown "$SENTRY" 2>/dev/null
   kill "$SENTRY" 2>/dev/null
-  ELAPSED=$(( $(date +%s) - STARTED_AT ))
+  # A resumed run counts from its own supervisor's start, plus what earlier attempts spent.
+  if [ -n "$RESUME_FROM" ]; then ELAPSED=$(( $(date +%s) - SUP_T0 )); else ELAPSED=$(( $(date +%s) - STARTED_AT )); fi
   ASLEEP="$(awk -v gap="$SLEEP_GAP_SECS" -v tick="$TICK_SECS" 'NR>1 && $1-p>gap {s+=$1-p-tick} {p=$1} END{print s+0}' "$WORK/heartbeats")"
-  AWAKE=$(( ELAPSED - ASLEEP ))
+  AWAKE=$(( ELAPSED - ASLEEP + PRIOR_AWAKE_SECS ))
   BODY_VERDICT="$(cat "$WORK/verdict" 2>/dev/null || echo "")"
 
   if [ -f "$WORK/interrupted" ] && [ "$BODY_VERDICT" != "MAIN-GREEN" ]; then
@@ -965,6 +997,16 @@ if [ -s "$UNFINISHED_PRS" ]; then
   cp "$UNFINISHED_PRS" "$WORK/carried-prs.tsv"
   cut -f1 "$WORK/carried-prs.tsv" >> "$WORK/scope-repos"
   say "resuming $(grep -c . "$WORK/carried-prs.tsv") fix PR(s) the previous run left open: $(awk -F'\t' '{printf "%s#%s ", $1, $2}' "$WORK/carried-prs.tsv")"
+fi
+# RESUME ON WAKE: what the interrupted attempt already did is this run's — its merges
+# (reported as fixed), the lanes it dispatched (not dispatched twice) and its claude
+# session (round 1 resumes it). Its open PRs arrive above, through unfinished-prs.tsv.
+if [ -n "$RESUME_FROM" ]; then
+  PREV_WORK="$LOG_DIR/$RESUME_FROM.d"
+  cat "$PREV_WORK/merged.tsv" >> "$WORK/merged.tsv" 2>/dev/null
+  cat "$PREV_WORK/dispatched.tsv" >> "$WORK/dispatched.tsv" 2>/dev/null
+  cp "$PREV_WORK/session-id" "$WORK/resumed-session-id" 2>/dev/null
+  say "resumed from $RESUME_FROM: $(grep -c . "$WORK/merged.tsv") merge(s) and $(grep -c . "$WORK/dispatched.tsv") dispatch(es) carried; claude session $(cat "$WORK/resumed-session-id" 2>/dev/null || echo 'none — round 1 starts fresh')"
 fi
 PROGRESS_LOG="$WORK/progress.tsv"; : > "$PROGRESS_LOG"
 
@@ -1092,6 +1134,13 @@ while :; do
       cat "$WORK/carryover-from-previous-run.md" > "$CARRY"
       say "round 1 briefed with the previous run's carryover ($(wc -c < "$CARRY" | tr -d ' ') bytes)."
     fi
+    if [ -n "$RESUME_FROM" ]; then
+      { echo
+        echo "# RESUMED AFTER SLEEP — the Mac slept mid-run and this run picks up where $RESUME_FROM left off"
+        echo "The round in flight was cut off, not finished: re-check what it was doing rather than"
+        echo "trusting it. The budget is unchanged (about $(remaining_min) minutes left); its open PRs are above."
+      } >> "$CARRY"
+    fi
   else
     CAP="$(capped "$ROUNDN_CAP_MIN")"; BG=$((32 * 60000))
     {
@@ -1189,12 +1238,15 @@ $(cat "$CARRY")"
         --dangerously-skip-permissions < /dev/null 2>&1 &
       tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; rc=$?; forget_pgid "$tpid"; exit "$rc"; } | python3 "$STREAM" > "$ROUND_LOG"
   }
-  if [ "$round" -eq 1 ]; then
+  if [ "$round" -eq 1 ] && [ ! -s "$WORK/resumed-session-id" ]; then
     SESSION_ID="$( (uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())') | tr 'A-Z' 'a-z')"
     echo "$SESSION_ID" > "$WORK/session-id"
     run_round --session-id "$SESSION_ID"
     RC=$?
   else
+    # Round 1 of a run RESUMED after sleep continues the interrupted attempt's session
+    # through the same path (and the same dead-handle fallback) as every later round.
+    [ "$round" -eq 1 ] && cp "$WORK/resumed-session-id" "$WORK/session-id"
     SESSION_ID="$(cat "$WORK/session-id" 2>/dev/null || true)"
     ROUND_T0=$(date +%s)
     run_round --resume "$SESSION_ID"

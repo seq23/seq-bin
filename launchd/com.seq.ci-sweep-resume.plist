@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.ci-sweep-resume</string>
+  <!-- Every 300 s (5 min). Owner, 12 Oct 2026: "just pick up where it left off
+       if I close the lid and then re-open". ci-sweep-resume-on-wake.sh reads
+       state/outcomes.tsv: if today's latest sweep run (Mon+Fri 08:00, or the
+       09:00 retry) ended MAIN-RED-INTERRUPTED because the Mac slept, no sweep
+       is running, and its budget still has room before its stop-by time, it
+       restarts ci-sweep.sh as a RESUME of that run (same ledger row, same
+       stop-by, same claude session). Otherwise it logs one no-op line to
+       ~/Library/Logs/ci-sweep/resume.log and exits in under a second. The
+       first tick after wake does the work; no wake hook (sleepwatcher) is
+       needed. launchd never overlaps a job with itself, so a resumed sweep
+       running under this job blocks further ticks until it ends.
+       Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep-resume.plist);
+       install with the steps in README.md. ci-sweep-selftest.sh asserts the
+       label, the 300 s interval and the program. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>/Users/sequoiataylor/bin/ci-sweep-resume-on-wake.sh</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/resume-launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/resume-launchd.err</string>
+  <key>RunAtLoad</key><false/>
+</dict></plist>

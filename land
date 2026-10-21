@@ -825,6 +825,39 @@ if [ -n "$MERGESHA" ]; then
     sleep 10
   done
 fi
+# A DROPPED PUSH IS RE-RAISED, NEVER WATCHED PAST. 21 Oct 2026, p-n-p #124 (3d4ae11): GitHub merged
+# the PR and moved main, but recorded no `pr_merge` in the repository activity log, no PushEvent, no
+# webhook — so no push-triggered workflow ran and Cloudflare Pages never built (its deployments list
+# has github:push for every merge before and after, and only a hand-triggered ad_hoc build for this
+# one). p-n-p's deploy-distribution.yml documents the same on 1c9c6cb6 (17 Sep). The fallback below
+# then watched the PREVIOUS commit's run to "success". So when no run for the merge sha appears AND
+# the activity log (which answered) has no entry for it, the push was dropped: the PR's own workflow
+# is dispatched on main (its run carries the merge sha), and step 5 triggers the Pages build itself.
+# --- dropped_push begin (tests/test-land-dropped-push.sh) ---
+DROPPED_PUSH=""
+if [ -z "$RID" ] && [ -n "$MERGESHA" ]; then
+  ACT="$(gh api "repos/{owner}/{repo}/activity?ref=refs/heads/main&per_page=50" --jq '.[].after' 2>/dev/null)" && [ -n "$ACT" ] \
+    && ! grep -qx "$MERGESHA" <<<"$ACT" && DROPPED_PUSH=1
+  if [ -n "$DROPPED_PUSH" ]; then
+    say "     GitHub dropped the push event for ${MERGESHA:0:7}: no activity-log entry and no run after ${LAND_RUN_APPEAR_SECS:-180} s, so nothing push-triggered (Actions or Cloudflare) will run on its own."
+    WF_PATH="$( [ -z "$PR_WF" ] || gh api "repos/{owner}/{repo}/actions/workflows?per_page=100" --jq ".workflows[] | select(.name == \"$PR_WF\") | .path" 2>/dev/null | head -1)"
+    if [ -n "$WF_PATH" ] && git show "origin/main:$WF_PATH" 2>/dev/null | grep -q '^[[:space:]]*workflow_dispatch:'; then
+      gh workflow run "$WF_PATH" --ref main >/dev/null 2>&1 || die "#$PR IS MERGED, GitHub dropped its push event, and dispatching $WF_PATH on main failed. Nothing ran on ${MERGESHA:0:7}; dispatch it by hand: gh workflow run $WF_PATH --ref main"
+      echo "     dispatched \"$PR_WF\" ($WF_PATH) on main in its place"
+      APPEAR_DEADLINE=$(( $(date +%s) + ${LAND_RUN_APPEAR_SECS:-180} ))
+      while :; do
+        RID="$(pick_run ".headSha == \"$MERGESHA\" and .event == \"workflow_dispatch\"")"
+        [ -n "$RID" ] && break
+        [ "$(date +%s)" -ge "$APPEAR_DEADLINE" ] && break
+        sleep 10
+      done
+      [ -n "$RID" ] || die "#$PR IS MERGED, GitHub dropped its push event, and the dispatched $WF_PATH run on ${MERGESHA:0:7} did not appear. Check: gh run list --branch main"
+    else
+      die "NAMED STOP [PUSH_DROPPED] #$PR IS MERGED, but GitHub dropped the push event for ${MERGESHA:0:7} and the PR's workflow (${PR_WF:-unknown}${WF_PATH:+, $WF_PATH}) has no workflow_dispatch to re-raise it. Nothing ran on the merge commit; main is NOT confirmed green or deployed."
+    fi
+  fi
+fi
+# --- dropped_push end ---
 if [ -z "$RID" ]; then
   RID="$(pick_run "true")"
   [ -z "$RID" ] || echo "     no run for merge commit ${MERGESHA:0:7} appeared in ${LAND_RUN_APPEAR_SECS:-180} s — watching main's newest run instead"
@@ -980,6 +1013,41 @@ pages_watch() { # $1 merge sha, $2 PAGES_PROJECTS -> 0 every expected build succ
 }
 # --- pages_watch end ---
 
+# A DROPPED PUSH ALSO MEANS CLOUDFLARE NEVER HEARD OF THE MERGE (dropped_push above): Pages' Git
+# integration builds on GitHub's push webhook, so nothing would ever post a check-run and pages_watch
+# would time out on a build that was never queued. So every Pages project that builds THIS repo from
+# Git is asked for a production build of main through the Pages API (deployment_trigger "ad_hoc"),
+# which builds main's head and posts the same check-run pages_watch then confirms. Auth is wrangler's
+# own OAuth login (refreshed by `wrangler whoami`); the token goes to curl on a file descriptor, never
+# on a command line.
+# --- pages_kick begin (tests/test-land-dropped-push.sh) ---
+pages_kick() { # -> 0 at least one build triggered | 1 none (named on stdout)
+  local cfg tok slug page=1 total=1 names n ok=0
+  wrangler whoami >/dev/null 2>&1 || true
+  cfg="$(ls -t "$HOME/.wrangler/config/default.toml" "$HOME/Library/Preferences/.wrangler/config/default.toml" 2>/dev/null | head -1)"
+  tok="$( [ -z "$cfg" ] || sed -n 's/^oauth_token = "\(.*\)"$/\1/p' "$cfg")"
+  [ -n "$tok" ] || { echo "     no wrangler OAuth login to trigger the Pages build with (run: wrangler login)"; return 1; }
+  slug="$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"' 2>/dev/null)"
+  [ -n "$slug" ] || { echo "     could not read this repo's owner/name"; return 1; }
+  cf() { curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "$@"; }
+  names=""
+  while [ "$page" -le "$total" ]; do
+    n="$(cf "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=$page")" || break
+    total="$(jq -r '.result_info.total_pages // 1' <<<"$n" 2>/dev/null)"; [ -n "$total" ] || total=1
+    names+="$(jq -r --arg s "$slug" '.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main") | .name' <<<"$n" 2>/dev/null)"$'\n'
+    page=$((page + 1))
+  done
+  names="$(sed '/^$/d' <<<"$names" | sort -u)"
+  [ -n "$names" ] || { echo "     no Cloudflare Pages project builds $slug from Git — nothing to trigger"; return 1; }
+  while IFS= read -r n; do
+    if cf -X POST -F branch=main "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$n/deployments" | jq -e '.success' >/dev/null 2>&1; then
+      echo "     triggered a Cloudflare Pages production build of main: $n"; ok=1
+    else echo "     Cloudflare refused the Pages build trigger for $n"; fi
+  done <<<"$names"
+  [ "$ok" = 1 ]
+}
+# --- pages_kick end ---
+
 # ~/bin IS PRODUCTION: launchd runs its working copy, so here — and only here — the local checkout
 # must move. Her uncommitted work in it is never touched: the fast-forward runs only on main and only
 # when no file she has changed is one the incoming commits change (git refuses to clobber either way).
@@ -997,6 +1065,7 @@ if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
+  [ -z "${DROPPED_PUSH:-}" ] || pages_kick || say "     the Pages build could not be triggered (above); pages_watch will report it unconfirmed"
   PW_OUT="$(pages_watch "$MSHA_PAGES" "$PAGES_PROJECTS")"; PW=$?
   [ -z "$PW_OUT" ] || printf '%s\n' "$PW_OUT"
   PW_N="$(printf '%s\n' "$PW_OUT" | grep -c ' — ')"

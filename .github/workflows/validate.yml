@@ -70,6 +70,11 @@ jobs:
       - name: land must refuse a merge whose Cloudflare build failed
         run: ./tests/test-land-pages-watch.sh
 
+      # 21 Oct 2026, p-n-p #124: GitHub dropped the merge's push event (no activity entry, no run, no
+      # Pages build) and land watched the previous commit's run. Evals dropped_push + pages_kick.
+      - name: land must re-raise a merge whose push event GitHub dropped
+        run: ./tests/test-land-dropped-push.sh
+
       # 26 Sep 2026: land aborted a sync in her dirty checkout AFTER merging (lgcv #159), merged on an
       # empty head after a 401 (how-we-know #130), and refused a green PR on a TLS timeout (horse #35).
       # Drives the whole of land against a fake gh and a real git origin.

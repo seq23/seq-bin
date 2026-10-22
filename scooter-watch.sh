@@ -157,9 +157,15 @@ fi
 # ---------------------------------------------------------------------------------------------
 # One retry (9 Oct 2026: 2 of 66 ticks failed on a transient D1 "success: false"; a failed tick only
 # delays mail by 15 min, but a retry 20 s later costs nothing and keeps the log honest).
+# Follow-through (22 Oct 2026, her word: "the tail is supposed to see every job through to completion"):
+# every card a tailed email opened, and every card handed off from those, is followed to DONE. One left
+# open and untouched 24h+ (not a partner's own decision) is re-tailed; and ANY card firm-wide that fails
+# twice or blocks as "tried and could not finish" is tailed, whoever or whatever opened it.
+TAILED_CARDS="$(awk -F'\t' '$6 ~ /^wc_/ {print $6}' "$MAILLOG" 2>/dev/null | tr ',' '\n' | sed '/^$/d' | sort -u | sed "s/.*/'&'/" | paste -sd, -)"
+[ -z "$TAILED_CARDS" ] && TAILED_CARDS="''"
 os_query() {
   (cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \
-    --command "SELECT message_id AS id, received_at AS date, from_address AS \"from\", to_address AS \"to\", subject, work_card_id FROM inbound_message WHERE ((from_address LIKE '%$PARTNER_A%' AND received_at > '$STARTED_AT') OR (from_address LIKE '%$PARTNER_B%' AND received_at > '$PARTNER_B_SINCE')) UNION ALL SELECT 'stuck:' || n.id AS id, n.sent_at AS date, 'OS STUCK notice to ' || n.sent_to AS \"from\", n.sent_to AS \"to\", 'STUCK: ' || COALESCE(c.title, n.work_card_id) AS subject, n.work_card_id FROM work_card_notice n LEFT JOIN work_card c ON c.id = n.work_card_id WHERE n.kind = 'STUCK' AND n.sent_at > '$STUCK_SINCE' AND (n.sent_to LIKE '%$PARTNER_A%' OR n.sent_to LIKE '%$PARTNER_B%') ORDER BY date" 2>>"$RUN_LOG")
+    --command "SELECT message_id AS id, received_at AS date, from_address AS \"from\", to_address AS \"to\", subject, work_card_id FROM inbound_message WHERE ((from_address LIKE '%$PARTNER_A%' AND received_at > '$STARTED_AT') OR (from_address LIKE '%$PARTNER_B%' AND received_at > '$PARTNER_B_SINCE')) UNION ALL SELECT 'stuck:' || n.id AS id, n.sent_at AS date, 'OS STUCK notice to ' || n.sent_to AS \"from\", n.sent_to AS \"to\", 'STUCK: ' || COALESCE(c.title, n.work_card_id) AS subject, n.work_card_id FROM work_card_notice n LEFT JOIN work_card c ON c.id = n.work_card_id WHERE n.kind = 'STUCK' AND n.sent_at > '$STUCK_SINCE' AND (n.sent_to LIKE '%$PARTNER_A%' OR n.sent_to LIKE '%$PARTNER_B%') UNION ALL SELECT 'friction:' || id || ':' || work_attempts || ':' || state AS id, COALESCE(blocked_at, work_last_failure_at) AS date, 'OS follow-through (friction)' AS \"from\", '' AS \"to\", 'FRICTION: ' || title AS subject, id AS work_card_id FROM work_card WHERE state NOT IN ('DONE','CANCELLED') AND ((work_attempts >= 2 AND work_last_failure_at > '$STUCK_SINCE') OR (state = 'BLOCKED' AND block_reason = 'tried_and_could_not_finish' AND blocked_at > '$STUCK_SINCE')) UNION ALL SELECT 'stall:' || c.id || ':' || substr(c.updated_at,1,13) AS id, c.updated_at AS date, 'OS follow-through (stalled)' AS \"from\", '' AS \"to\", 'STALLED 24h+: ' || c.title AS subject, c.id AS work_card_id FROM work_card c WHERE c.id IN (WITH RECURSIVE fam(id) AS (SELECT id FROM work_card WHERE id IN ($TAILED_CARDS) UNION SELECT k.id FROM work_card k JOIN fam ON k.assigned_from_card_id = fam.id) SELECT id FROM fam) AND c.state NOT IN ('DONE','CANCELLED') AND c.updated_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours') AND NOT (c.state = 'BLOCKED' AND COALESCE(c.block_reason,'') <> 'tried_and_could_not_finish') ORDER BY date" 2>>"$RUN_LOG")
 }
 OS_JSON="$(os_query)"
 if ! printf '%s' "$OS_JSON" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if isinstance(d,list) and d and d[0].get("success",True) else 1)' 2>/dev/null; then
@@ -265,7 +271,9 @@ elif [ "$PENDING_COUNT" -gt 0 ]; then
 
   cat > "$PROMPT_FILE" <<PROMPT
 You are the partner tail for the West Peek OS. A partner ($SENDER_LINE) just emailed the OS
-mailbox ($OS_MAILBOX). $PENDING_COUNT email(s):
+mailbox ($OS_MAILBOX). $PENDING_COUNT event(s). Rows whose "from" starts with "OS " are follow-through events, not emails:
+that card failed, blocked as tried-and-could-not-finish, or stalled 24h+. Root-cause it, fix at source, and
+see THAT card through to DONE (re-run it after the fix), not just diagnose it:
 $EVENT_LINES
 
 Repo: $REPO (production D1: west-peek-os-db, env production). Query it read-only with

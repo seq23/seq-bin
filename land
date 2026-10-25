@@ -295,6 +295,12 @@ case "$NAME" in
   # Its deploy-cloudflare.yml is workflow_dispatch only (staging), never fired by main.
   # Added 8 Oct 2026 when land refused aplayer-mode #47.
   aplayer-mode)         DEPLOY="scripts/deploy-api-production.sh && scripts/deploy-web-production.sh" ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
+  # Time2Read (seq23/dailystory, time-2-read.com): Supabase edge functions ship through the repo's
+  # own deploy-functions.yml ("Deploy Edge Functions") on every push to main, with its post-deploy
+  # boot smoke; land waits for that run on the merge commit. The front end is a Lovable project and
+  # ships only on a Lovable Publish, which no script can press: land says so in its SELF line.
+  # Added 25 Oct 2026 when land refused dailystory #75.
+  dailystory)           DEPLOY="" ; SELF="deploys its edge functions through its own Deploy Edge Functions workflow on push to main (the front end ships on a Lovable Publish)" ; DEPLOY_WF="deploy-functions.yml" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

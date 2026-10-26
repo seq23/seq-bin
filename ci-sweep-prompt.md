@@ -218,6 +218,22 @@ files an issue on it naming what you wrote, and continues with the rest. One par
 never ends the run. Only a repo you were given as red can be parked, and a park with no
 reason is ignored.
 
+### Name every repo you worked
+
+Before the final line, emit one line per repo you worked this round (opened, pushed or
+reviewed a fix PR in, or investigated a red lane of), exactly this form, own line:
+
+    CI-SWEEP-WORKED: <repo>
+
+Include the repos you were briefed as red AND any repo that turned red while you were
+working (a lane you found red yourself). The wrapper's merge pass only considers PRs in
+repos it knows this run worked; a repo that turned red mid-round and is not named here
+is left out of this round's merge pass (26 Oct 2026: sprylabs-hpc-site#161 sat green and
+unmerged a whole extra round). The wrapper admits a named repo only if its main is not
+green when it checks, so naming a repo you did not work does not make someone else's PR
+yours to merge. A round that ends `fixed` with no CI-SWEEP-WORKED line is logged as
+SWEEP_ROUND_WORK_UNNAMED and costs a fleet-wide re-probe.
+
 ## Required final line
 
 Your LAST line must be exactly one of these, with nothing after it:

@@ -69,6 +69,14 @@ for a in "$@"; do [ -n "$skip" ] && { skip=""; continue; }; [ "$a" = "-p" ] && {
 echo "$args" >> "$FAKE_DIR/claude-args.log"
 case "$(cat "$FAKE_DIR/claude-mode" 2>/dev/null)" in
   sleep) echo "round started; working..."; sleep 300 ;;
+  # 26 Oct 2026: delta turned red DURING the round; the round fixed it and names it. It
+  # also (wrongly) names peer, whose main is green — another session's repo.
+  worked-delta)
+    echo "alpha fixed as alpha#7; delta went red mid-round, fixed as delta#161."
+    echo "CI-SWEEP-WORKED: alpha"
+    echo "CI-SWEEP-WORKED: seq23/delta"
+    echo "CI-SWEEP-WORKED: peer"
+    echo "CI-SWEEP-COMPLETE: fixed" ;;
   park-beta)
     echo "Both repos worked. alpha#7 is green and merged; checks all pass."
     echo "CI-SWEEP-PARKED: beta — rotate the BETA_API_KEY secret in the repo settings"
@@ -120,14 +128,32 @@ printf '#!/bin/bash\nexit 0\n' > "$BIN/security"
 # The probe replays a sequence, one entry per call; the last entry repeats.
 cat > "$TMP/probe.sh" <<'SH'
 #!/bin/bash
-n="$(cat "$FAKE_DIR/probe-n" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$FAKE_DIR/probe-n"
+n="$(cat "$FAKE_DIR/probe-n" 2>/dev/null || echo 0)"
+if [ "${CI_SWEEP_PROBE_PURPOSE:-}" = worked ]; then
+  # A probe taken between a round and its merge pass reads main AS IT IS NOW: the
+  # probe-now override when the scenario sets one, else the last state the sequence
+  # reported. It never consumes a sequence entry.
+  echo "${CI_SWEEP_ONLY_REPOS:-*}" >> "$FAKE_DIR/worked-probes.log"
+  mode="$(cat "$FAKE_DIR/probe-now" 2>/dev/null)"
+  [ -z "$mode" ] && mode="$(sed -n "${n}p" "$FAKE_DIR/probe-seq")"
+  [ -z "$mode" ] && mode="$(tail -1 "$FAKE_DIR/probe-seq")"
+  CI_SWEEP_PROBE_PURPOSE="" FAKE_PROBE_MODE="$mode" "$0" | if [ -n "${CI_SWEEP_ONLY_REPOS:-}" ]; then
+    awk -F'\t' -v only=" $CI_SWEEP_ONLY_REPOS " 'index(only, " " $2 " ")'; else cat; fi
+  exit "${PIPESTATUS[0]}"
+fi
+if [ -n "${FAKE_PROBE_MODE:-}" ]; then mode="$FAKE_PROBE_MODE"; else
+echo $((n + 1)) > "$FAKE_DIR/probe-n"
 mode="$(sed -n "$((n + 1))p" "$FAKE_DIR/probe-seq")"; [ -z "$mode" ] && mode="$(tail -1 "$FAKE_DIR/probe-seq")"
+fi
 G() { printf 'GREEN\t%s\tbuild\t%s|build|success|-\tok\n' "$1" "$1"; }
 R() { printf 'RED\t%s\tbuild\t%s|build|failure|%s\tfailed\n' "$1" "$1" "$2"; }
 # RI <repo> <sig> <run id>: a red lane as the real probe reports it, naming its run.
 RI() { printf 'RED\t%s\tbuild\t%s|build|failure|%s\trun #%s concluded failure\n' "$1" "$1" "$2" "$3"; }
 case "$mode" in
   green)   G alpha; G beta; exit 0 ;;
+  late-d)  R alpha test; G beta; G delta; G peer; exit 1 ;;
+  now-d)   R alpha test; G beta; R delta unit; G peer; exit 1 ;;
+  green-d) G alpha; G beta; G delta; G peer; exit 0 ;;
   ru-a*)   RI alpha test "${mode#ru-a}"; G beta; exit 1 ;;
   red-ab)  R alpha test; R beta lint; exit 1 ;;
   red-a2b) R alpha test2; R beta lint; exit 1 ;;
@@ -141,6 +167,7 @@ SH
 cat > "$TMP/audit.sh" <<'SH'
 #!/bin/bash
 : > "$FAKE_DIR/audit-called"
+echo "$CI_SWEEP_AUDIT_REPOS" > "$FAKE_DIR/audit-repos"
 case "$(cat "$FAKE_DIR/audit-mode")" in
   fatal)         echo "  ✗ FATAL alpha#7 (a fix) — a command's failure is being swallowed"; echo "TEMP FIXES DETECTED"; exit 1 ;;
   fatal-outside) echo "  ✗ FATAL zeta#9 (someone else's) — a command's failure is being swallowed"; echo "TEMP FIXES DETECTED"; exit 1 ;;
@@ -155,8 +182,8 @@ LOGS="$TMP/logs"; LEDGER="$LOGS/state/outcomes.tsv"; CARRY="$LOGS/state/carryove
 
 # setup <probe-seq...> — fresh fakes for one scenario
 setup() {
-  printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called" "$TMP/merge-refuse" "$TMP/no-dispatch" "$TMP/land-unverified"
-  : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/claude-args.log"; : > "$TMP/land-calls.log"
+  printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called" "$TMP/merge-refuse" "$TMP/no-dispatch" "$TMP/land-unverified" "$TMP/probe-now" "$TMP/audit-repos"
+  : > "$TMP/open-prs"; : > "$TMP/worked-probes.log"; : > "$TMP/gh-calls.log"; : > "$TMP/claude-args.log"; : > "$TMP/land-calls.log"
   echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/claude-mode"
 }
 sweep() { # sweep <run-id> [ENV=VAL ...]
@@ -544,6 +571,49 @@ echo "2026-13-45" > "$PAUSE"
 sweep run-pause-impossible
 check "an impossible date (2026-13-45) is malformed too, not a pause" [ "$(last_verdict)" = "MAIN-GREEN" ]
 rm -f "$PAUSE" "$LEDGER"
+
+# 26 Oct 2026, run 2026-10-26-111708-38730: sprylabs-hpc-site was green at the probe before
+# round 1, turned red DURING it, and round 1 fixed it as #161 (checks green) — but scope came
+# only from the probe before the round, so the merge pass never considered #161. Here delta is
+# that repo; peer is another session's repo with its own fresh PR, which must stay out.
+mid_round_setup() {
+  setup late-d green-d
+  echo now-d > "$TMP/probe-now"
+  printf 'alpha\t7\tfix/a\tFix alpha\ndelta\t161\tfix/d\tFix delta (went red mid-round)\npeer\t158\tfeat/p\tA peer session feature\n' > "$TMP/open-prs"
+  echo pass > "$TMP/checks-alpha-7"; echo pass > "$TMP/checks-delta-161"; echo pass > "$TMP/checks-peer-158"
+}
+echo "=== 21. a repo that turned red MID-ROUND and was worked is in THAT round's merge pass ==="
+mid_round_setup; echo worked-delta > "$TMP/claude-mode"
+sweep run-midred; rc=$?
+check "delta#161 is a merge candidate after round 1" grep -qE $'^delta\t161\t' "$LOGS/run-midred.d/merge-candidates-1.tsv"
+check "…and merged in round 1's merge pass, its checks read green by the sweep" grep -q '^pr merge 161 --repo seq23/delta --merge --delete-branch' "$TMP/gh-calls.log"
+check "the log says why delta was admitted" grep -q 'ADMITTED delta to scope: round 1 worked it' "$LOGS/run-midred.log"
+check "only the claimed repos outside scope were probed (delta, peer — not the fleet)" [ "$(cat "$TMP/worked-probes.log")" = "delta peer" ]
+check "round 1's audit read delta too" grep -qw delta "$TMP/audit-repos"
+absent "peer (claimed, but its main is green) is NOT admitted" grep -qE $'^peer\t' "$LOGS/run-midred.d/merge-candidates-1.tsv"
+check "…and the log says so" grep -q 'not admitting peer: its main is not red now' "$LOGS/run-midred.log"
+absent "peer#158, another session's PR, is never merged" grep -q '^pr merge 158' "$TMP/gh-calls.log"
+check "green after one round (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ] && check "…in 1 round" [ "$(rounds)" -eq 1 ]
+
+echo "=== 21b. a round that names NOTHING it worked is a NAMED STOP and a fleet re-probe, not silence ==="
+mid_round_setup   # claude-mode "fixed": the default fake emits no CI-SWEEP-WORKED line
+sweep run-unnamed
+check "the round is named SWEEP_ROUND_WORK_UNNAMED" grep -q 'NAMED STOP \[SWEEP_ROUND_WORK_UNNAMED\] round 1' "$LOGS/run-unnamed.log"
+check "…and the fallback probe read the whole fleet" grep -qx '\*' "$TMP/worked-probes.log"
+check "delta#161 still reaches round 1's merge pass through the fallback" grep -qE $'^delta\t161\t' "$LOGS/run-unnamed.d/merge-candidates-1.tsv"
+absent "peer#158 stays out (peer's main is green)" grep -qE $'^peer\t' "$LOGS/run-unnamed.d/merge-candidates-1.tsv"
+
+echo "=== negative proof: without admitting worked repos, delta#161 is left out of round 1's merge pass ==="
+sed 's/^  admit_worked_repos "\$round" "\$ROUND_LOG"$/  : admission disabled/' "$SWEEP" > "$TMP/no-worked.sh"; chmod +x "$TMP/no-worked.sh"
+if cmp -s "$SWEEP" "$TMP/no-worked.sh"; then
+  bad "SETUP BROKEN — could not disable admit_worked_repos, so the negative proof is void"
+else
+  mid_round_setup; echo worked-delta > "$TMP/claude-mode"
+  SWEEP_SAVE="$SWEEP"; SWEEP="$TMP/no-worked.sh"; sweep run-no-worked; SWEEP="$SWEEP_SAVE"
+  if ! grep -qE $'^delta\t161\t' "$LOGS/run-no-worked.d/merge-candidates-1.tsv" 2>/dev/null; then
+    ok "PROVEN   without it delta#161 is not a round-1 candidate (the 26 Oct defect), so section 21 reads it"
+  else bad "NO TEETH — delta#161 reached round 1's merge pass without admit_worked_repos"; fi
+fi
 
 echo "=== negative proof: without the pause check, a paused-today run dispatches a round ==="
 sed 's/^if \[ -f "\$PAUSE_FILE" \] && \[ -z "\${CI_SWEEP_SUPERVISED:-}" \]; then$/if false; then/' "$SWEEP" > "$TMP/no-pause.sh"; chmod +x "$TMP/no-pause.sh"

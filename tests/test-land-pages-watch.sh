@@ -10,7 +10,9 @@
 # fixtures, with `sleep` advancing the clock, and checks every outcome: all five succeeded, one
 # reported and four queued (declared list, and discovered from history alone), one failed, one
 # still running, a declared repo where nothing posts, the deadline derived from recent builds, and
-# no Cloudflare check-run anywhere. It also pins the local-guides-generator route to its five.
+# no Cloudflare check-run anywhere. It also pins the local-guides-generator route to its six
+# projects (senior-living added 25 Oct 2026, fd341ba, which left this pin at five and main red), and
+# checks the route's own "(N projects" text against the list it declares, so the two cannot drift.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LAND="$HERE/../land"
@@ -105,11 +107,30 @@ check "no cloudflare check" 2 "" ""
 newfx
 check "no checks at all" 2 "" ""
 
-# The route that broke must declare all five, so discovery can never come back empty for it.
+# The route that broke must declare all six, so discovery can never come back empty for it.
+# Exact pin: adding or removing a project is a deliberate edit here as well as in land.
+P_ROUTE="$P5 local-guides-generator-senior-living"
 got="$(NAME=local-guides-generator bash -c 'eval "$1"; echo "$PAGES_PROJECTS"' _ "$ROUTES" | tr ' ' '\n' | sed '/^$/d' | sort | paste -sd' ' -)"
-want="$(echo "$P5" | tr ' ' '\n' | sort | paste -sd' ' -)"
-n=$((n+1)); if [ "$got" = "$want" ]; then echo "  ok   local-guides-generator route declares its 5 Pages projects"
+want="$(echo "$P_ROUTE" | tr ' ' '\n' | sort | paste -sd' ' -)"
+n=$((n+1)); if [ "$got" = "$want" ]; then echo "  ok   local-guides-generator route declares its 6 Pages projects"
 else echo "  FAIL local-guides-generator route PAGES_PROJECTS='$got', want '$want' (zero discovered is never a pass)"; fails=$((fails+1)); fi
+
+# Every route that declares PAGES_PROJECTS and states "(N projects" in SELF must declare exactly N.
+# fd341ba had to edit the count, the list and this pin by hand; the count and the list now prove each other.
+counted=0
+while IFS= read -r repo; do
+  [ -n "$repo" ] || continue
+  out="$(NAME="$repo" bash -c 'eval "$1"; printf "%s\n%s\n" "${SELF:-}" "${PAGES_PROJECTS:-}"' _ "$ROUTES")"
+  self="$(printf '%s\n' "$out" | sed -n 1p)"; projects="$(printf '%s\n' "$out" | sed -n 2p)"
+  [ -n "$projects" ] || continue
+  stated="$(printf '%s\n' "$self" | sed -nE 's/.*\(([0-9]+) projects.*/\1/p')"
+  [ -n "$stated" ] || continue
+  declared="$(printf '%s\n' $projects | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+  counted=$((counted+1)); n=$((n+1))
+  if [ "$stated" = "$declared" ]; then echo "  ok   $repo route says $stated projects and declares $declared"
+  else echo "  FAIL $repo route says $stated projects but declares $declared distinct PAGES_PROJECTS"; fails=$((fails+1)); fi
+done < <(printf '%s\n' "$ROUTES" | grep -oE '^ *[a-z0-9._-]+\) ' | tr -d ' )')
+[ "$counted" -gt 0 ] || { echo "FAIL: no route states a project count alongside PAGES_PROJECTS (examined zero)"; exit 1; }
 
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero cases"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-land-pages-watch: $fails failure(s)"; exit 1; }

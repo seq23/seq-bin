@@ -252,6 +252,66 @@ sweep_prs_opened_this_run() {
       --jq "select(.state==\"OPEN\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null </dev/null
   done < "$WORK/carried-prs.tsv"
 }
+# --- repos a round worked, admitted to scope BEFORE that round's merge pass -----
+# 26 Oct 2026 (run 2026-10-26-111708-38730): sprylabs-hpc-site was green at the probe
+# before round 1, turned red DURING it, and round 1 fixed it as sprylabs-hpc-site#161
+# with every check green. Scope was built only from the probe BEFORE the round, so the
+# merge pass after round 1 never saw #161 and main stayed red a whole extra round.
+#
+# The round names every repo it worked with `CI-SWEEP-WORKED: <repo>` on its own line
+# (ci-sweep-prompt.md). A claim is not taken on its word: a repo outside scope is
+# admitted only if a probe of THAT repo, run now, shows its main is not green — a fix
+# that is not merged cannot have made it green, and a repo whose main is green is not
+# the sweep's to merge into. That keeps peer sessions' PRs (boss-os#158, west-peek-os#293
+# that same morning) out of the merge pass. A round that worked something but named
+# nothing gets the fleet-wide probe instead, and a NAMED STOP line: silence is not "no
+# repo was added", it is a broken contract the log must show.
+# Writes the repos admitted to $WORK/worked-admitted-<round>; every decision is said in the log.
+admit_worked_repos() {
+  local round="$1" log="$2" line repo claimed="" outside="" n_lines=0 sentinel out rc admitted=""
+  local out_file="$WORK/worked-probe-$round.tsv"
+  : > "$WORK/worked-admitted-$round"
+  while IFS= read -r line; do
+    n_lines=$((n_lines + 1))
+    repo="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*CI-SWEEP-WORKED:[[:space:]]*//; s/[[:space:]].*//; s#^.*/##')"
+    if ! printf '%s' "$repo" | grep -qE '^[A-Za-z0-9._-]+$'; then
+      say "  NAMED STOP [SWEEP_WORKED_UNPARSED] round $round: could not read a repo from: $line"; continue
+    fi
+    case " $claimed " in *" $repo "*) continue ;; esac
+    claimed="$claimed $repo"
+    grep -qxF "$repo" "$WORK/scope-repos" 2>/dev/null || outside="$outside $repo"
+  done < <(grep -E '^[[:space:]]*CI-SWEEP-WORKED:' "$log" 2>/dev/null)
+  sentinel="$(grep -o 'CI-SWEEP-COMPLETE:[[:space:]]*[a-z]*' "$log" 2>/dev/null | tail -1 | sed -E 's/.*:[[:space:]]*//')"
+  if [ -z "${claimed// /}" ]; then
+    case "$sentinel" in
+      green|blocked) say "round $round named no repo it worked (sentinel: $sentinel) — scope unchanged"; return 0 ;;
+    esac
+    say "NAMED STOP [SWEEP_ROUND_WORK_UNNAMED] round $round ($n_lines CI-SWEEP-WORKED line(s) readable, sentinel: ${sentinel:-none}) named no repo it worked — re-probing the whole fleet so a repo that turned red during the round is not left out of this merge pass"
+    CI_SWEEP_PROBE_PURPOSE=worked "$PROBE" > "$out_file" 2>>"$RUN_LOG"; rc=$?
+    if [ "$rc" -eq 3 ]; then
+      say "  NAMED STOP [SWEEP_WORKED_PROBE_FAILED] the fallback probe could not run (rc=3) — this merge pass sees only the repos scoped before round $round"; return 0
+    fi
+    outside="$(awk -F'\t' '$1=="RED"||$1=="SILENT"||$1=="PENDING"{print $2}' "$out_file" | sort -u | while read -r r; do grep -qxF "$r" "$WORK/scope-repos" || echo "$r"; done | tr '\n' ' ')"
+    [ -z "${outside// /}" ] && { say "  fallback probe: no repo outside scope is red — scope unchanged"; return 0; }
+  else
+    say "round $round worked:$claimed"
+    [ -z "${outside// /}" ] && return 0
+    CI_SWEEP_PROBE_PURPOSE=worked CI_SWEEP_ONLY_REPOS="${outside# }" "$PROBE" > "$out_file" 2>>"$RUN_LOG"; rc=$?
+    if [ "$rc" -eq 3 ]; then
+      say "  NAMED STOP [SWEEP_WORKED_PROBE_FAILED] could not probe [${outside# }] (rc=3) — not admitted; their PRs are left for the next round's scope"; return 0
+    fi
+  fi
+  for repo in $outside; do
+    if awk -F'\t' -v r="$repo" '($1=="RED"||$1=="SILENT"||$1=="PENDING") && $2==r{f=1} END{exit !f}' "$out_file"; then
+      echo "$repo" >> "$WORK/scope-repos"; admitted="$admitted $repo"
+      say "  ADMITTED $repo to scope: round $round worked it and its main is not green now (it was not red at the probe before the round)"
+    else
+      say "  (not admitting $repo: its main is not red now, so a PR there is not this run's to merge)"
+    fi
+  done
+  printf '%s\n' $admitted > "$WORK/worked-admitted-$round"
+  return 0
+}
 # The fix PRs that keep a run from being DONE: open, the sweep's own, not rejected.
 unfinished_prs() {
   sweep_prs_opened_this_run | sort -u | while IFS=$'\t' read -r repo num branch title; do
@@ -1292,11 +1352,17 @@ $(cat "$CARRY")"
     say "PARKED $prepo on her decision: $preason — the run continues on every other red repo"
   done < <(grep -E '^[[:space:]]*CI-SWEEP-PARKED:' "$ROUND_LOG" 2>/dev/null)
 
+  # --- repos this round worked that were not red before it -----------------------
+  # Admitted to scope now, so the audit reads them and the merge pass below sees their
+  # PRs (see admit_worked_repos).
+  admit_worked_repos "$round" "$ROUND_LOG"
+  AUDIT_REPOS="$RED_REPOS$(grep . "$WORK/worked-admitted-$round" 2>/dev/null | tr '\n' ' ')"
+
   # --- the guard on the guard, every round ---------------------------------------
   # Scoped to this round's window and the repos it was dispatched to (2026-09-21:
   # someone else's PR touched during a sleep was read as this round's weakening).
   say "--- auditing what round $round touched ---"
-  CI_SWEEP_AUDIT_SINCE="$ROUND_START_UTC" CI_SWEEP_AUDIT_REPOS="$RED_REPOS" "$AUDIT" > "$WORK/audit-$round.txt" 2>&1
+  CI_SWEEP_AUDIT_SINCE="$ROUND_START_UTC" CI_SWEEP_AUDIT_REPOS="$AUDIT_REPOS" "$AUDIT" > "$WORK/audit-$round.txt" 2>&1
   AUDIT_RC=$?
   cat "$WORK/audit-$round.txt" >> "$RUN_LOG"
   case "$AUDIT_RC" in

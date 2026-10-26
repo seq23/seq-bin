@@ -9,6 +9,10 @@
 #   window  — repo-wide list omits the cron, its own run list has a green run → GREEN, exit 0
 #   never   — repo-wide list omits it and its own run list is empty → still SILENT|NEVER_RAN, exit 1
 #   broken  — its own run list cannot be read → PENDING|RUNS_UNREADABLE, never SILENT, exit 2
+# and, with the REAL ci-sweep-triggers.py, GitHub's late cron starts (26 Oct 2026, sprylabs-hpc-site
+# Weekly Outcome Report reported SILENT under an hour after its first tick):
+#   young   — new workflow, its only tick 1h ago, no run → PENDING|CRON_NOT_DUE, exit 2
+#   overdue — new workflow, its only tick 10h ago (past CRON_GRACE), no run → SILENT|NEVER_RAN, exit 1
 # RULE 0: zero cases examined is not a pass.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -57,8 +61,8 @@ case "$1 $2" in
       *) printf '[{"workflowName":"Validate","conclusion":"success","status":"completed","createdAt":"%s","databaseId":9}]\n' "$FAKE_RECENT" ;;
     esac ;;
   "api "*)
-    case "$2" in
-      *"commits?path="*) echo '[{"commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]' ;;
+    case "$*" in
+      *"commits?path="*) printf '[{"commit":{"committer":{"date":"%s"}}}]\n' "${FAKE_FIRST_SEEN:-2026-01-01T00:00:00Z}" ;;
       *"commits?since="*) printf '[{"sha":"abc","committer":{"type":"User"},"commit":{"committer":{"date":"%s","email":"a@b.c","name":"Person"}}}]\n' "$FAKE_RECENT" ;;
       *"/commits/"*) echo 'README.md' ;;
       *) echo '[]' ;;
@@ -69,10 +73,10 @@ S
 chmod +x "$TMP/bin/"*
 
 n=0; fails=0
-case_() { # mode want_rc grep_for_line
-  local mode="$1" want="$2" pat="$3" rc
-  PATH="$TMP/bin:$PATH" FAKE_MODE="$mode" CI_SWEEP_GITHUB_DIR="$TMP/gh" CI_SWEEP_OWNER=seq23 \
-    CI_SWEEP_TRIGGERS_BIN="$TMP/bin/triggers" CI_SWEEP_GRID_LANES_BIN="$TMP/bin/grid" \
+case_() { # mode want_rc grep_for_line [triggers_bin]
+  local mode="$1" want="$2" pat="$3" trig="${4:-$TMP/bin/triggers}" rc
+  PATH="$TMP/bin:$PATH" FAKE_MODE="${FAKE_MODE_OVERRIDE:-$mode}" CI_SWEEP_GITHUB_DIR="$TMP/gh" CI_SWEEP_OWNER=seq23 \
+    CI_SWEEP_TRIGGERS_BIN="$trig" CI_SWEEP_GRID_LANES_BIN="$TMP/bin/grid" \
     "$PROBE" >"$TMP/out" 2>"$TMP/err"; rc=$?
   n=$((n+1))
   if [ "$rc" = "$want" ] && grep -qE "$pat" "$TMP/out"; then echo "  ok   $mode → $rc ($(grep -E "$pat" "$TMP/out" | cut -f1,3,4 | tr '\t' ' '))"
@@ -81,6 +85,15 @@ case_() { # mode want_rc grep_for_line
 case_ window 0 '^GREEN	r	Ingestion Sync	'
 case_ never  1 '^SILENT	r	Ingestion Sync	.*NEVER_RAN'
 case_ broken 2 '^PENDING	r	Ingestion Sync	.*RUNS_UNREADABLE'
+
+# Late cron starts, through the real trigger model. The workflow is new (first seen 2h / 12h ago)
+# so its single daily tick inside its lifetime is the only one that counts.
+REAL_TRIGGERS="$ROOT/ci-sweep-triggers.py"
+[ -x "$REAL_TRIGGERS" ] || { echo "FAIL: $REAL_TRIGGERS missing"; exit 1; }
+mmhh() { date -u -v-"$1"H +'%-M %-H' 2>/dev/null || date -u -d "$1 hours ago" +'%-M %-H'; }
+cron_for() { printf 'on:\n  schedule:\n    - cron: "%s * * *"\n' "$(mmhh "$1")" > "$TMP/gh/r/.github/workflows/ingestion.yml"; }
+cron_for 1;  FAKE_FIRST_SEEN="$(ago 2)"  FAKE_MODE_OVERRIDE=never case_ young   2 '^PENDING	r	Ingestion Sync	.*CRON_NOT_DUE' "$REAL_TRIGGERS"
+cron_for 10; FAKE_FIRST_SEEN="$(ago 12)" FAKE_MODE_OVERRIDE=never case_ overdue 1 '^SILENT	r	Ingestion Sync	.*NEVER_RAN' "$REAL_TRIGGERS"
 
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero cases"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-probe-window: $fails failure(s)"; exit 1; }

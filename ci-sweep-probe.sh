@@ -436,6 +436,13 @@ for dir in "$GITHUB_DIR"/*/; do
       lanes=$((lanes+1)); red=$((red+1)); continue
     fi
 
+    if [ -z "$latest" ] && [ "$should" = "PENDING" ]; then
+      # The trigger model saw the cron tick but it is younger than its grace period
+      # (CRON_GRACE in ci-sweep-triggers.py): GitHub starts scheduled runs hours late.
+      printf 'PENDING\t%s\t%s\t%s|%s|CRON_NOT_DUE\t%s\n' "$repo" "$flow" "$repo" "$flow" "$why"
+      lanes=$((lanes+1)); pending=$((pending+1)); continue
+    fi
+
     if [ -z "$latest" ]; then
       # A workflow that has never run on the default branch is only a finding if
       # it was SUPPOSED to run there. The first version of this check flagged

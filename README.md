@@ -99,6 +99,7 @@ reference or a deploy step ever appears in one.
 | `tests/lint-shell.sh` | Every `*.sh` parses (`bash -n`) and passes `shellcheck` at the warning gate. Hard-fails if it finds no scripts. |
 | `tests/test-audit-guard.sh` | `ci-sweep-audit.sh` catches eight distinct weakenings in added lines, clears a genuine fix, and does not flag a diff that *removes* a weakening. |
 | `tests/test-probe-convergence.sh` | `ci-sweep-probe.sh` maps lane states to the exit codes the convergence loop reads, and refuses an empty input set. |
+| `tests/test-probe-window.sh` | `ci-sweep-probe.sh`'s network path, against a fake `gh`: a lane missing from the repo-wide newest-80 run list is asked for its own newest run (GREEN, not SILENT), a lane that truly never ran is still SILENT\|NEVER_RAN, and an unreadable per-lane list is PENDING. |
 | `tests/test-land-routes.sh` | `land`'s routes block (evaluated verbatim) resolves a real route to production for every West Peek site repo the web property change lane targets (westpeek-live, join-west-peek-main, west-peek-pitch-lab, west-peek-network-os, secondaries, founder-dilution-dashboard, west-peek-os, boss-os, …), and an unknown repo still stops. Build-first routes: sheila-creator-dashboard stages and waits for `e2e`; boss-os waits for `e2e` with no staging; a route with `E2E_WF` never takes the wait-for-Deploy-run branch; the three Pages repos' self-deploy sentences name staging and the e2e gate. Hard-fails on zero repos. |
 | `tests/test-land-flow.sh` | `land` end to end against a fake `gh` and a real git origin (26 Sep 2026): a dirty checkout, a checkout on another branch and a clean main all land with her files and branch untouched (only a clean main is fast-forwarded); a scripted deploy runs from a throwaway worktree of `origin/main`; `~/bin` is fast-forwarded only around her edits or stops by name; a 401 on the head read never merges; a transient TLS error is retried (3 attempts) and lands; a persistent one exits 75 "could not verify (network)", never "not green"; a real failing check is still exit 1. `land --promote` against a repo with promote.yml waits for an in-flight promote run and then finds nothing to promote, stops by name (cancelling it) when it runs past the ceiling, skips the wait when there is no promote.yml, and after `--run-e2e` waits for the promote run the green e2e fires. A large PR on an e2e route runs the suite and lands when its promote.yml ships the green sha, `--run-e2e` forces it, a red suite is a NAMED STOP with production untouched, and an unreadable PR size is treated as large. 2 Oct 2026 (small changes ship on the fast check): a small PR deploys staging AND production from the merge sha and records the reason; a suite known red on main, or red on the exact sha, is `NAMED STOP [E2E_KNOWN_RED]` with production untouched and `--run-e2e` as the way out; an unreadable e2e history is exit 75; a large commit production has not seen makes land run the suite behind a small PR; unreadable production is large; a merged PR production already runs (or has passed) deploys nothing; `PROMOTE_VIA` repos are shipped by dispatching their own workflow with the sha and reason (red run, or a green run with no record: not LANDED); boss-os waits for `deploy.yml` after a green suite. Negative-proven by mutation, in-file: no promote wait, shipping past red, judging only the PR, the boss-os race. |
 | `tests/test-land-large.sh` | `land`'s large block (evaluated verbatim): every threshold at its edge (199/200 lines, 7/8 files, 39/40 UI lines), every path trigger (migrations, e2e specs, Playwright configs, `client/`, `app/`, `public/`, `functions/`, `routes/`, `.html`), the env overrides, and unreadable = large. Carries a negative proof (a block that never calls a change large fails the test). |
@@ -112,15 +113,15 @@ Two of these carry an executed **negative proof**: they neutralise a rule in a
 copy of the script under test and require the corresponding assertion to stop
 passing. An assertion that cannot be made to fail is not evidence.
 
-The probe's network path (`gh`, the GitHub API, lane classification) is **not**
-covered — it needs live credentials, and a test that stubbed it would be
-asserting the stub. Only the fixture path, which is the part the convergence
-loop's exit code depends on, is verified.
+The probe's network path (`gh`, the GitHub API, lane classification) is covered
+only by `tests/test-probe-window.sh`, against a fake `gh`, for the never-ran
+decision; the rest of it needs live credentials. The fixture path, which the
+convergence loop's exit code depends on, is verified by test-probe-convergence.
 
 Run the whole lane locally with:
 
 ```sh
-for t in validation-only test-rule-zero lint-shell test-audit-guard test-probe-convergence; do
+for t in validation-only test-rule-zero lint-shell test-audit-guard test-probe-convergence test-probe-window; do
   ./tests/$t.sh
 done
 ```

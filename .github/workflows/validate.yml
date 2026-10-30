@@ -92,6 +92,10 @@ jobs:
       # block: every commit production has not seen is judged by the same rule.
       - name: land must measure "large change", never guess it
         run: ./tests/test-land-large.sh
+      # 30 Oct 2026, p-n-p #162: Pages deployed code needing D1 migration 0026 and nothing applied
+      # it. Evals land's routes + d1 blocks: migrate BEFORE the merge, confirm none pending after.
+      - name: land must migrate a self-deploying repo's D1 before the merge
+        run: ./tests/test-land-d1.sh
 
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh

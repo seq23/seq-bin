@@ -37,6 +37,9 @@ SH
 chmod +x "$WORK/bin/gh"
 
 P5="local-guides-generator-uscis-medical local-guides-generator-pi local-guides-generator-dentistry local-guides-generator-trt local-guides-generator-neuro"
+# The route itself declares six since 25 Oct 2026 (fd341ba added local-guides-generator-senior-living,
+# memphisseniorcarehomes.com); the route pin below reads P6 so a seventh or a dropped one fails.
+P6="$P5 local-guides-generator-senior-living"
 cr() { printf '{"name":"%s","status":"%s","conclusion":%s,"completed_at":%s}' "$1" "$2" "$3" "${4:-null}"; }
 runs() { local IFS=,; printf '{"check_runs":[%s]}' "$*"; }
 five_done() { # $1 conclusion for pi, rest success; completed at 12:05 on a 12:00 commit
@@ -105,10 +108,10 @@ check "no cloudflare check" 2 "" ""
 newfx
 check "no checks at all" 2 "" ""
 
-# The route that broke must declare all five, so discovery can never come back empty for it.
+# The route that broke must declare all six, so discovery can never come back empty for it.
 got="$(NAME=local-guides-generator bash -c 'eval "$1"; echo "$PAGES_PROJECTS"' _ "$ROUTES" | tr ' ' '\n' | sed '/^$/d' | sort | paste -sd' ' -)"
-want="$(echo "$P5" | tr ' ' '\n' | sort | paste -sd' ' -)"
-n=$((n+1)); if [ "$got" = "$want" ]; then echo "  ok   local-guides-generator route declares its 5 Pages projects"
+want="$(echo "$P6" | tr ' ' '\n' | sort | paste -sd' ' -)"
+n=$((n+1)); if [ "$got" = "$want" ]; then echo "  ok   local-guides-generator route declares its 6 Pages projects"
 else echo "  FAIL local-guides-generator route PAGES_PROJECTS='$got', want '$want' (zero discovered is never a pass)"; fails=$((fails+1)); fi
 
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero cases"; exit 1; }

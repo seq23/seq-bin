@@ -138,7 +138,12 @@ GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
 trap 'rm -f "$GH_ERR_FILE"' EXIT
 gh_kind() { # stderr text -> network | auth | api
-  if grep -qiE 'timeout|timed out|connection (reset|refused)|no such host|dial tcp|EOF|TLS|i/o|network is unreachable|HTTP 50[0-9]|temporarily unavailable' <<<"$1"; then echo network
+  # A GitHub 5xx is "did not answer", never a refusal. 30 Oct 2026: during a GitHub incident
+  # the merge call of three green PRs (how-we-know#256, local-guides-generator#140,
+  # sprylabs-hpc-site#169) got 'GraphQL: Something went wrong while executing your query',
+  # which fell through to `api`, so land died rc=1 and the sweep read it as a refusal
+  # instead of exit 75 and landing again after a pause.
+  if grep -qiE 'timeout|timed out|connection (reset|refused)|no such host|dial tcp|EOF|TLS|i/o|network is unreachable|HTTP 5[0-9][0-9]|temporarily unavailable|Something went wrong while executing your query|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out' <<<"$1"; then echo network
   elif grep -qiE 'HTTP 401|HTTP 403|authentication|gh auth login|rate limit' <<<"$1"; then echo auth
   else echo api; fi
 }

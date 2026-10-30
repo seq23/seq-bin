@@ -25,6 +25,12 @@
 # merged, or the assertion was never reading the gate.
 
 set -uo pipefail
+# THE CLOCK IS PINNED TO MIDDAY (30 Oct 2026, seq-bin #43): scenario 8a's resume rebuilds a stop-by
+# from HH:MM on today's date, so a fixture of now + 2 h run after 22:00 wrapped past midnight and 7
+# assertions failed at 22:59 UTC with no change to either file. A real sweep runs 08:00-11:30 CT and
+# never crosses midnight; here it is always ~12:00 local. (Scenario 20 computes CT itself.)
+_utc_h=$((10#$(date -u +%H)))
+export TZ="TST$(( _utc_h - 12 ))"
 
 # ISOLATION FROM A LIVE SWEEP. The sweep's fixing agents run this file from inside a supervised run
 # and inherit CI_SWEEP_SUPERVISED / CI_SWEEP_RUN_ID / CI_SWEEP_STARTED_AT (26 Sep 2026: 51 of 83

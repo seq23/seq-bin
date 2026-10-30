@@ -71,7 +71,12 @@ case "$a" in
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
-  "pr merge "*) : > "$FAKE_DIR/merged"; exit 0 ;;
+  # merge=graphql500: GitHub's own 5xx answer to the merge mutation (30 Oct 2026), nothing merged.
+  # merge=refused: a real refusal from GitHub (not a server error), nothing merged.
+  "pr merge "*) case "$(cat "$FAKE_DIR/merge" 2>/dev/null)" in
+      graphql500) echo 'GraphQL: Something went wrong while executing your query on 2026-10-30T14:26:18Z. Please include `F1A0:283603:182C90:4E979C:6AE4A908` when reporting this issue.' >&2; exit 1 ;;
+      refused) echo 'GraphQL: Pull Request is not mergeable (mergePullRequest)' >&2; exit 1 ;;
+    esac; : > "$FAKE_DIR/merged"; exit 0 ;;
   "pr view "*"--json state "*) merged && echo MERGED || echo OPEN; exit 0 ;;
   "pr view "*mergeCommit*) echo "$MERGESHA"; exit 0 ;;
   # pr-size = "ADD DEL FILES" + paths, one per line (cases 15-17); absent = the read fails (unhandled).
@@ -603,6 +608,25 @@ large_pr; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/bos
 LAND="$BROKEN" run_land boss-os
 check "the broken land deployed from the laptop while deploy.yml was shipping the same sha (20 catches it)" eval 'npm_log | grep -q "run deploy:production"'
 MERGESHA="2222222222222222222222222222222222222222"; export MERGESHA
+
+echo "=== 8b. the merge call gets GitHub's GraphQL 5xx (30 Oct 2026): exit 75, never a refusal ==="
+fixture approvalprep; echo graphql500 > "$FAKE/merge"
+run_land approvalprep
+check "nothing merged" eval '[ ! -f "$FAKE/merged" ]'
+check "exit 75 (could not verify), not 1" [ "$RC" -eq 75 ]
+check "says could not verify (network)" has "could not verify (network)"
+echo "=== 8c. a real refusal from GitHub on the merge call stays a refusal (rc 1) ==="
+fixture approvalprep; echo refused > "$FAKE/merge"
+run_land approvalprep
+check "nothing merged" eval '[ ! -f "$FAKE/merged" ]'
+check "rc 1, not 75" [ "$RC" -eq 1 ]
+check "says merge failed" has "merge failed"
+echo "=== negative proof: without the 5xx patterns, the GraphQL 5xx reads as a refusal again ==="
+BROKEN5="$W/land-no-5xx"; sed 's/|Something went wrong while executing your query|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out//' "$LAND" > "$BROKEN5"
+check "the broken copy differs (the patterns were removed)" eval '! cmp -s "$LAND" "$BROKEN5"'
+fixture approvalprep; echo graphql500 > "$FAKE/merge"
+LAND="$BROKEN5" run_land approvalprep
+check "the broken land dies rc 1 on the 5xx (this harness catches it)" [ "$RC" -eq 1 ]
 
 echo "=== negative proof: a land that does not wait for the promote run deploys on top of it ==="
 BROKEN="$W/land-no-wait"; sed '/^  promote_wait_inflight$/d' "$LAND" > "$BROKEN"

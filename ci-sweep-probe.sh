@@ -98,6 +98,29 @@ merged_runs() {
   printf '%s' "$acc" | jq -s 'add|unique_by(.databaseId)|sort_by(.createdAt)|reverse'
 }
 
+# THE REPO-WIDE LIST IS A WINDOW, NOT THE HISTORY. `--limit 80` on a busy repo
+# reaches back only hours. Confirmed 2026-10-26: local-guides-generator's newest
+# 80 runs on main began 2026-10-25T20:46Z and p-n-p's at 18:48Z, so daily crons
+# that ran green the afternoon before (Ingestion Sync 17:02Z, Rotating Refresh
+# 17:10Z, Daily Authority Cycle 18:14Z) were absent from it and reported
+# SILENT|NEVER_RAN — unclearable lanes that blocked convergence. A workflow
+# missing from that list is therefore asked for its OWN newest run on the
+# branch, with the same three-read union as merged_runs: prints a JSON array
+# (empty only when GitHub says the lane has never run there), returns 1 when
+# every read failed, so an unreadable answer is never mistaken for "never ran".
+workflow_runs() {
+  local repo="$1" branch="$2" wfile="$3" acc="" one i
+  for i in 1 2 3; do
+    one="$(gh run list --repo "$OWNER/$repo" --workflow "$wfile" --branch "$branch" --limit 1 \
+          --json workflowName,conclusion,status,createdAt,databaseId 2>/dev/null)" || one=""
+    printf '%s' "$one" | jq -e 'type=="array"' >/dev/null 2>&1 || continue
+    acc="$acc$one"
+    [ "$i" -lt 3 ] && sleep 2
+  done
+  [ -z "$acc" ] && return 1
+  printf '%s' "$acc" | jq -s 'add|unique_by(.databaseId)|sort_by(.createdAt)|reverse'
+}
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-sweep-probe.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -336,6 +359,22 @@ for dir in "$GITHUB_DIR"/*/; do
     latest="$(printf '%s' "$runs" | jq -c --arg w "$flow" \
       '[.[]|select(.workflowName==$w)]|sort_by(.createdAt)|last // empty' 2>/dev/null)"
 
+    # Not in the repo-wide window is not "never ran": ask the lane itself (see
+    # workflow_runs). Unreadable is PENDING, never SILENT and never QUIET.
+    if [ -z "$latest" ]; then
+      wpath_n="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+      if [ -n "$wpath_n" ]; then
+        if own="$(workflow_runs "$repo" "$branch" "$(basename "$wpath_n")")"; then
+          latest="$(printf '%s' "$own" | jq -c 'sort_by(.createdAt)|last // empty' 2>/dev/null)"
+          [ -n "$latest" ] && log "  $repo/$flow: outside the newest 80 runs on $branch; its own newest is #$(printf '%s' "$latest" | jq -r '.databaseId')"
+        else
+          printf 'PENDING\t%s\t%s\t%s|%s|RUNS_UNREADABLE\tnot in the repo-wide run list and its own run list could not be read after 3 attempts; unproven, not silent\n' \
+            "$repo" "$flow" "$repo" "$flow"
+          lanes=$((lanes+1)); pending=$((pending+1)); continue
+        fi
+      fi
+    fi
+
     # A LANE THAT SHOULD HAVE RUN IN THE WINDOW AND HAS NEVER RUN AT ALL is the
     # silence defect. The SCOPE OF THIS TEST IS DELIBERATE AND WAS NARROWED BACK
     # ON PURPOSE. The first version of this rewrite also fired when a workflow
@@ -395,6 +434,13 @@ for dir in "$GITHUB_DIR"/*/; do
       printf 'SILENT\t%s\t%s\t%s|%s|NEVER_RAN\tno run on %s at all, though a commit in the window should have started it: %s\n' \
         "$repo" "$flow" "$repo" "$flow" "$branch" "$why"
       lanes=$((lanes+1)); red=$((red+1)); continue
+    fi
+
+    if [ -z "$latest" ] && [ "$should" = "PENDING" ]; then
+      # The trigger model saw the cron tick but it is younger than its grace period
+      # (CRON_GRACE in ci-sweep-triggers.py): GitHub starts scheduled runs hours late.
+      printf 'PENDING\t%s\t%s\t%s|%s|CRON_NOT_DUE\t%s\n' "$repo" "$flow" "$repo" "$flow" "$why"
+      lanes=$((lanes+1)); pending=$((pending+1)); continue
     fi
 
     if [ -z "$latest" ]; then

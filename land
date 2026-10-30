@@ -180,7 +180,7 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
 # with a DEPLOY command; a self-deploying route names it, or tests/test-land-routes.sh fails when
 # the repo carries a Cloudflare deploy workflow the route does not wait for).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
-STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""; PAGES_PROJECTS=""
+STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""; PAGES_PROJECTS=""; D1_PREMERGE=""
 case "$NAME" in
   west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
   # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
@@ -269,8 +269,12 @@ case "$NAME" in
   # No wrangler config; three Pages projects build from main on push (check-runs "Cloudflare Pages:
   # founderoperatorlibrary / memphisvendorlibrary / professionalresourcelibrary" on main).
   authority-backlink-network) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
-  # No wrangler config; Pages project p-n-p builds from Git; deploy-distribution.yml does IndexNow/GSC.
-  p-n-p)                DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (porchandparty901.com)" ;;
+  # Pages project p-n-p builds from Git; deploy-distribution.yml does IndexNow/GSC. Its wrangler.toml
+  # binds D1 `pnp-admin` (migrations/, additive only). D1_PREMERGE (30 Oct 2026, #162): Pages ships the
+  # new code the moment the merge lands and applies no migration, so the request form failed on a
+  # missing `corporate` column until 0026 was applied by hand. land now applies the PR's migrations
+  # BEFORE the merge and confirms none are pending after it (the d1 block).
+  p-n-p)                DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (porchandparty901.com)" ; D1_PREMERGE="pnp-admin" ;;
   # wrangler.toml pages_build_output_dir = "public"; Pages project justbeingmercedes (Direct Upload).
   # .github/workflows/deploy.yml runs `wrangler pages deploy` on push to main with the vault's
   # cloudflare-claude-deploy token (repo secret CLOUDFLARE_API_TOKEN); first green run 36191953200.
@@ -555,6 +559,45 @@ pr_size() { # $1 pr number
   PR_PATHS="$(tail -n +2 <<<"$stats")"
 }
 pr_large_reason() { large_reason "$PR_ADD" "$PR_DEL" "$PR_FILES" <<<"$PR_PATHS"; }
+# A SELF-DEPLOYING REPO WITH A D1 DATABASE MIGRATES BEFORE IT MERGES (D1_PREMERGE, routes block).
+# 30 Oct 2026, p-n-p #162: Cloudflare Pages deployed code reading a new `corporate` column the moment
+# the merge landed, nothing applied migration 0026, and porchandparty901.com's request form could
+# fail until someone applied it by hand. Pages has no migration step and no deploy script to put one
+# in, so land does it: migrations in that repo are ADDITIVE ONLY (the old code runs fine on the new
+# schema), so they are applied from the PR head, through the repo's own wrangler.toml, BEFORE the
+# merge — a failure is a NAMED STOP and nothing is merged. After the merge land reads the pending
+# list from main and refuses to say LANDED while any migration is unapplied (it applies them first:
+# an already-merged PR, or one that slipped past, still owes them). Never `wrangler deploy`.
+# --- d1 begin (tests/test-land-d1.sh evals this block verbatim) ---
+D1_APPLY='CI=true npx wrangler d1 migrations apply "$D1_PREMERGE" --remote'
+D1_LIST='npx wrangler d1 migrations list "$D1_PREMERGE" --remote'
+touches_migrations() { grep -qE '(^|/)migrations/'; } # PR paths on stdin -> 0 when any is a migration
+d1_none_pending() { # $1 sha -> 0 only when wrangler, from that sha's wrangler.toml, says nothing is pending
+  local out
+  out="$(deploy_at "$1" "$D1_LIST" 2>&1)" || { printf '%s\n' "$out" | tail -5; return 1; }
+  printf '%s\n' "$out" | tail -3
+  grep -q 'No migrations to apply' <<<"$out"
+}
+d1_apply_at() { # $1 sha -> 0 applied and nothing left pending | 1 (named by the caller)
+  deploy_at "$1" "$D1_APPLY" || return 1
+  d1_none_pending "$1"
+}
+d1_premerge() { # $1 PR head sha. PR_PATHS from pr_size; empty (unreadable) = migrate anyway, fail closed
+  [ -n "$D1_PREMERGE" ] || return 0
+  if [ -n "$PR_PATHS" ] && ! touches_migrations <<<"$PR_PATHS"; then
+    echo "     D1 $D1_PREMERGE: the PR changes no migration — nothing to apply before the merge"; return 0
+  fi
+  echo "     D1 $D1_PREMERGE: applying the PR's migrations from ${1:0:7} BEFORE the merge (additive; Pages deploys on merge)"
+  d1_apply_at "$1"
+}
+d1_postmerge() { # $1 merge sha -> 0 nothing pending (applying any still owed first) | 1
+  [ -n "$D1_PREMERGE" ] || return 0
+  echo "     D1 $D1_PREMERGE: confirming no migration is pending on ${1:0:7}"
+  d1_none_pending "$1" && return 0
+  echo "     D1 $D1_PREMERGE: migrations pending after the merge — applying them from ${1:0:7}"
+  d1_apply_at "$1"
+}
+# --- d1 end ---
 # A SELF-DEPLOYING REPO SHIPS PRODUCTION THROUGH ITS OWN WORKFLOW (PROMOTE_VIA, routes block): one
 # writer of production, and a gate that runs where the deploy runs. land dispatches it with the sha
 # and the reason, finds the run it started, and waits for it — bounded by 1.5x that workflow's last
@@ -733,6 +776,10 @@ case "${STATE##*/}" in
   *) die "PR #$PR merge state is ${STATE##*/} — not landing" ;;
 esac
 echo "     green, head $HEAD, $STATE"
+if [ -n "$D1_PREMERGE" ]; then
+  pr_size "$PR"
+  d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (output above), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."
+fi
 
 say "2/5  merging"
 # Pinned to the head verified above: a push after the check cannot ride in unverified.
@@ -1078,6 +1125,7 @@ if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
+  d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] #$PR IS MERGED and $NAME is deploying it, but D1 $D1_PREMERGE still has migrations pending (or could not be read) on ${MSHA_PAGES:0:7} — the live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
   [ -z "${DROPPED_PUSH:-}" ] || pages_kick || say "     the Pages build could not be triggered (above); pages_watch will report it unconfirmed"
   PW_OUT="$(pages_watch "$MSHA_PAGES" "$PAGES_PROJECTS")"; PW=$?
   [ -z "$PW_OUT" ] || printf '%s\n' "$PW_OUT"

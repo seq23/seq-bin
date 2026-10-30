@@ -99,6 +99,11 @@ jobs:
       - name: ci-sweep-probe.sh must map lane states to exit codes
         run: ./tests/test-probe-convergence.sh
 
+      # 26 Oct 2026: crons outside a busy repo's newest 80 runs read as SILENT|NEVER_RAN. A lane
+      # missing from the repo-wide list must be asked for its own newest run before it is silent.
+      - name: ci-sweep-probe.sh must not call a lane outside the run-list window NEVER_RAN
+        run: ./tests/test-probe-window.sh
+
       - name: ci-sweep-stream.py must leave a line-by-line round log with the sentinel intact
         run: ./tests/test-stream-filter.sh
 

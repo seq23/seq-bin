@@ -418,8 +418,17 @@ def _cron_field(field, lo, hi):
     return vals
 
 
-def cron_fired(expr, since, until):
-    """Did this 5-field UTC cron come round between since and until?"""
+# GitHub starts scheduled runs late, often by hours, on this fleet. Measured 26 Oct 2026:
+# local-guides-generator `Ingestion Sync` (cron '15 13 * * *') lands 16:34-17:51Z, p-n-p
+# `Daily Authority Cycle` ('0 15 * * *') about 18:00Z: a worst case of about 4h. A tick
+# younger than this has not had time to fire, so it is never a silence. sprylabs-hpc-site
+# `Weekly Outcome Report` ('41 13 * * 1') was reported SILENT under an hour after its first tick.
+CRON_GRACE = dt.timedelta(hours=6)
+
+
+def cron_last_tick(expr, since, until):
+    """The latest minute in [since, until] at which this 5-field UTC cron came round, or None."""
+    last = None
     fields = expr.split()
     if len(fields) != 5:
         raise ParseError("cron does not have five fields: %r" % expr)
@@ -447,9 +456,14 @@ def cron_fired(expr, since, until):
             else:
                 day_ok = True
             if day_ok:
-                return True
+                last = t
         t += dt.timedelta(minutes=1)
-    return False
+    return last
+
+
+def cron_fired(expr, since, until):
+    """Did this 5-field UTC cron come round between since and until?"""
+    return cron_last_tick(expr, since, until) is not None
 
 
 # --------------------------------------------------------------------------
@@ -457,6 +471,9 @@ def cron_fired(expr, since, until):
 # --------------------------------------------------------------------------
 
 YES, NO, UNKNOWN = "YES", "NO", "UNKNOWN"
+# A cron tick came round in the window but is younger than CRON_GRACE: not yet due to have
+# fired. The probe reports the lane PENDING (never SILENT) when it has no run.
+PENDING = "PENDING"
 
 
 def normalise_on(doc):
@@ -583,9 +600,18 @@ def _verdict_inner(text, branch, changed_files, since, until, exists_since=None)
                     crons.append(e["cron"])
         if not crons:
             return UNKNOWN, "schedule block present but no cron could be read"
+        due = until - CRON_GRACE
         for c in crons:
-            if cron_fired(c, since, until):
+            if cron_fired(c, since, due):
                 return YES, "cron %r came round inside the window" % c
+        young = [(cron_last_tick(c, max(since, due), until), c) for c in crons]
+        young = [(t, c) for t, c in young if t is not None]
+        if young:
+            t, c = max(young)
+            return PENDING, ("cron %r tick at %s not yet due to have fired (GitHub starts "
+                             "scheduled runs hours late; grace %dh)"
+                             % (c, t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                CRON_GRACE.total_seconds() // 3600))
         return NO, "no cron in %r came round inside the window" % (crons,)
 
     # --- neither push nor schedule ---------------------------------------

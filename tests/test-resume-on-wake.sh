@@ -37,6 +37,13 @@ echo "from=$CI_SWEEP_RESUME_FROM ledger=$CI_SWEEP_LEDGER_ID started=$CI_SWEEP_ST
 FAKE
 chmod +x "$TMP/sweep"
 export FAKE_RAN="$TMP/ran"
+# THE CLOCK IS PINNED TO MIDDAY. The ledger keeps a stop-by as HH:MM and the script rebuilds it as
+# "$TODAY HH:MM", so a fixture stop-by of NOW + 2 h run after 22:00 wrapped past midnight and read as
+# already passed: 10 of 22 assertions failed on seq-bin #43's CI at 22:56 UTC, 30 Oct 2026, with no
+# change to either file. A real sweep starts at 08:00 with 210 min and never crosses midnight; the
+# test now runs in a zone where it is ~12:00, so every fixture time (NOW +/- 2 h) is the same day.
+_utc_h=$((10#$(date -u +%H)))
+export TZ="TST$(( _utc_h - 12 ))"
 TODAY="$(date +%Y-%m-%d)"
 NOW="$(date +%s)"
 hm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M; }

@@ -135,6 +135,66 @@ else
   echo "             red assertion is really reading the probe's decision"
 fi
 
+# --- a lane outside the newest-80 window is not a lane that never ran ----------
+# 2026-10-30: one 15-minute lane filled local-guides-generator's newest 80 runs,
+# and three daily/weekly lanes with hundreds of green runs were declared
+# SILENT/NEVER_RAN. lane_latest must fall back to the lane's own endpoint, and
+# must report an unreadable endpoint as unproven (2), never as "no run".
+echo "=== lane_latest: window overflow falls back to the workflow's own endpoint ==="
+mkdir -p "$TMP/stubbin"
+cat >"$TMP/stubbin/gh" <<'GHEOF'
+#!/bin/bash
+# Stub of `gh api .../actions/workflows/<file>/runs?...` answering post -q output.
+case "$*" in
+  *workflows/daily.yml/runs*)  echo '{"runs":[{"databaseId":213,"status":"completed","conclusion":"success","createdAt":"2026-10-30T13:19:38Z"}]}' ;;
+  *workflows/never.yml/runs*)  echo '{"runs":[]}' ;;
+  *workflows/inwindow.yml/*)   echo "STUB: in-window lane must not hit the endpoint" >&2; exit 9 ;;
+  *) exit 1 ;;
+esac
+GHEOF
+chmod +x "$TMP/stubbin/gh"
+printf '%s' '[{"workflowName":"Busy tick","status":"completed","conclusion":"success","createdAt":"2026-10-30T13:00:00Z","databaseId":1},{"workflowName":"In_window","status":"completed","conclusion":"success","createdAt":"2026-10-30T12:00:00Z","databaseId":7}]' >"$TMP/window.json"
+
+lane_case() {  # <probe> <want-exit> <want-id-or-empty> <what> <repo branch flow path>
+  local probe="$1" want="$2" wantid="$3" what="$4" args="$5" out got id
+  asserts=$((asserts + 1))
+  out="$(PATH="$TMP/stubbin:$PATH" CI_SWEEP_PROBE_LANE_RUNS="$TMP/window.json" \
+        CI_SWEEP_PROBE_LANE_LATEST="$args" "$probe" 2>"$TMP/err")"; got=$?
+  id="$(printf '%s' "$out" | jq -r '.databaseId // empty' 2>/dev/null)"
+  if [ "$got" -eq "$want" ] && [ "$id" = "$wantid" ]; then
+    echo "  o exit $got id=${id:-none}  $what"; return 0
+  fi
+  echo "  x exit $got id=${id:-none} (wanted $want id=${wantid:-none})  $what"
+  sed 's/^/        /' "$TMP/err"; return 1
+}
+lane_case "$PROBE" 0 7 "a lane in the window is answered from it, never its endpoint" \
+  "r main In_window .github/workflows/inwindow.yml" || failed=$((failed + 1))
+lane_case "$PROBE" 0 213 "a lane pushed out of the window is found at its own endpoint" \
+  "r main Daily .github/workflows/daily.yml" || failed=$((failed + 1))
+lane_case "$PROBE" 0 "" "a lane with no run anywhere really is 'no run'" \
+  "r main Never .github/workflows/never.yml" || failed=$((failed + 1))
+lane_case "$PROBE" 2 "" "an unreadable endpoint is unproven (2), never 'no run'" \
+  "r main Broken .github/workflows/broken.yml" || failed=$((failed + 1))
+
+echo "=== negative proof: without the endpoint fallback, the overflow case must fail ==="
+python3 - "$PROBE" "$TMP/no-fallback-probe.sh" <<'PYEOF'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+needle = '[ -n "$wpath" ] || return 0'
+assert needle in s, "probe no longer contains the endpoint fallback this proof removes"
+open(dst, 'w').write(s.replace(needle, 'return 0', 1))
+PYEOF
+chmod +x "$TMP/no-fallback-probe.sh"
+asserts=$((asserts + 1))
+if lane_case "$TMP/no-fallback-probe.sh" 0 213 "(crippled) overflow lane" \
+     "r main Daily .github/workflows/daily.yml" >/dev/null; then
+  echo "  x NO TEETH — the overflow lane was still found with the fallback removed"
+  failed=$((failed + 1))
+else
+  echo "  o PROVEN   removing the endpoint fallback loses the overflow lane"
+fi
+
 if [ "$asserts" -eq 0 ]; then
   echo "RULE 0 [ASSERTED_NOTHING] this suite executed zero assertions."
   exit 2

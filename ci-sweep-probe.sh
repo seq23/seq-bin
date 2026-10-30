@@ -98,6 +98,45 @@ merged_runs() {
   printf '%s' "$acc" | jq -s 'add|unique_by(.databaseId)|sort_by(.createdAt)|reverse'
 }
 
+# The repo-wide run list is a WINDOW, not a history. `merged_runs` reads the
+# newest 80 runs on the branch, and one busy lane can fill all 80: CONFIRMED
+# 2026-10-30 in local-guides-generator, where `Senior lead tick` (every 15 min)
+# held 36 of the newest 80 and the window reached back only ~10 hours. The daily
+# `Ingestion Sync` and `Rotating Refresh` and the weekly `Weekly Outcome Report`
+# — 213, 290 and 1 successful scheduled runs on main — fell outside it, read as
+# "no run at all", and were declared SILENT/NEVER_RAN: three unclearable
+# findings on healthy lanes. So a lane absent from the window is asked again at
+# its OWN workflow endpoint before "never ran" may be concluded.
+#   lane_latest <runs-json> <repo> <branch> <workflow-name> <workflow-path>
+# Prints the newest run as {databaseId,status,conclusion,createdAt}, or nothing.
+# Returns 2 if the lane is absent from the window AND its endpoint could not be
+# read: unproven, which the caller must not turn into "never ran".
+lane_latest() {
+  local runs="$1" repo="$2" branch="$3" flow="$4" wpath="$5" got="" ok=0
+  got="$(printf '%s' "$runs" | jq -c --arg w "$flow" \
+    '[.[]|select(.workflowName==$w)]|sort_by(.createdAt)|last // empty' 2>/dev/null)"
+  if [ -n "$got" ]; then printf '%s' "$got"; return 0; fi
+  [ -n "$wpath" ] || return 0
+  local one acc=""
+  for _ in 1 2 3; do
+    one="$(gh api "repos/$OWNER/$repo/actions/workflows/$(basename "$wpath")/runs?branch=$branch&per_page=1" \
+          -q '{runs:[.workflow_runs[0]|select(.)|{databaseId:.id,status,conclusion,createdAt:.created_at}]}' 2>/dev/null)" || continue
+    printf '%s' "$one" | jq -e '.runs|type=="array"' >/dev/null 2>&1 || continue
+    ok=1; acc="$acc$one"
+  done
+  [ "$ok" -eq 1 ] || return 2
+  printf '%s' "$acc" | jq -sc 'map(.runs[])|sort_by(.createdAt)|last // empty' 2>/dev/null
+}
+
+# Test seam for lane_latest: answers one lane and exits, so the window-overflow
+# case can be exercised with a stubbed `gh` and no live account.
+if [ -n "${CI_SWEEP_PROBE_LANE_LATEST:-}" ]; then
+  # shellcheck disable=SC2086
+  set -- $CI_SWEEP_PROBE_LANE_LATEST
+  lane_latest "$(cat "${CI_SWEEP_PROBE_LANE_RUNS:?}")" "$1" "$2" "$3" "$4"
+  exit $?
+fi
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-sweep-probe.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -333,8 +372,13 @@ for dir in "$GITHUB_DIR"/*/; do
   while IFS=$'\t' read -r flow should why; do
     [ -z "$flow" ] && continue
 
-    latest="$(printf '%s' "$runs" | jq -c --arg w "$flow" \
-      '[.[]|select(.workflowName==$w)]|sort_by(.createdAt)|last // empty' 2>/dev/null)"
+    wpath_l="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+    latest="$(lane_latest "$runs" "$repo" "$branch" "$flow" "$wpath_l")"
+    if [ $? -eq 2 ]; then
+      printf 'PENDING\t%s\t%s\t%s|%s|RUNS_UNREADABLE\tnot in the newest-80 window and its own endpoint could not be read; unproven, not silent\n' \
+        "$repo" "$flow" "$repo" "$flow"
+      lanes=$((lanes+1)); pending=$((pending+1)); continue
+    fi
 
     # A LANE THAT SHOULD HAVE RUN IN THE WINDOW AND HAS NEVER RUN AT ALL is the
     # silence defect. The SCOPE OF THIS TEST IS DELIBERATE AND WAS NARROWED BACK

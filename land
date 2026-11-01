@@ -312,6 +312,13 @@ case "$NAME" in
   # ships only on a Lovable Publish, which no script can press: land says so in its SELF line.
   # Added 25 Oct 2026 when land refused dailystory #75.
   dailystory)           DEPLOY="" ; SELF="deploys its edge functions through its own Deploy Edge Functions workflow on push to main (the front end ships on a Lovable Publish)" ; DEPLOY_WF="deploy-functions.yml" ;;
+  # Hey Get On My Level (seq23/heygetonmylevel; Spry Labs app, parked): a Lovable project. Its only
+  # workflows on main are check.yml (build) and the IndexNow submit; the site ships on a Lovable
+  # Publish, which no script can press. Added 1 Nov 2026 when land refused heygetonmylevel #5.
+  heygetonmylevel)      DEPLOY="" ; SELF="has no deploy on push: the site ships on a Lovable Publish (check.yml only builds)" ;;
+  # Dianne Place (seq23/dianne-place-recovery-services): Cloudflare Pages git project; its
+  # "Cloudflare Pages" check-run on main is the deploy. Added 1 Nov 2026 when land refused #3.
+  dianne-place-recovery-services) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

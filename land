@@ -319,6 +319,9 @@ case "$NAME" in
   # Dianne Place (seq23/dianne-place-recovery-services): Cloudflare Pages git project; its
   # "Cloudflare Pages" check-run on main is the deploy. Added 1 Nov 2026 when land refused #3.
   dianne-place-recovery-services) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
+  # Cynthia Brown DDS (seq23/cynthia-brown-dds-site): no hosted deploy from this repo (its build.yml only
+  # builds); its Actions lanes read main at fire time. Added 1 Nov 2026 when its schedule PR had no route.
+  cynthia-brown-dds-site) DEPLOY="" ; SELF="has no hosted deploy; its Actions lanes run from main" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

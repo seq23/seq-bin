@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.dev-housekeeping</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/sequoiataylor/bin/dev-housekeeping.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/dev-housekeeping.err</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Day</key>
+			<integer>1</integer>
+			<key>Hour</key>
+			<integer>10</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Day</key>
+			<integer>15</integer>
+			<key>Hour</key>
+			<integer>10</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

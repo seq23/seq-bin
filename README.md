@@ -24,7 +24,7 @@ edit was recoverable only if someone had thought to copy the file first.
 | `ci-sweep-prompt.md` | — | The brief the sweep runs headlessly. Carries the incident history that shaped it. |
 | `land` | (manual: `land [<pr>]`, `land --promote [<repo>] [--run-e2e]`) | Merge and deploy as ONE action. Verifies the PR's fast check itself, squash-merges, watches main's fast run to a terminal state (never the e2e run; the run watched is the workflow `deploy.yml` gates on, else the workflow that ran the PR's own checks, else the newest — 2 Oct 2026: with no `deploy.yml`, `[0]` was a 20-second recovery run and a cancelled Validate Repo read as green), then routes by repo (routes block). Self-deploying repos: confirms the Cloudflare build on the merge commit. A route with `STAGING` deploys staging from the merge sha at once (clean detached worktree, never the working tree). A route with `E2E_WF` deploys production at once when a completed run of that workflow on the exact sha concluded success; otherwise it measures the PR (the `large` block — the ONE definition of "large", which the repos point at rather than restate: ≥ 200 lines, ≥ 8 files, any migration / e2e spec / Playwright config change, or a UI-surface file with ≥ 40 lines; `LAND_LARGE_LINES`, `LAND_LARGE_FILES`, `LAND_LARGE_UI_LINES` override) and every other commit main carries past production's recorded sha (the `range` block: each judged by the same rule; production unreadable or not an ancestor = large). For a LARGE change it dispatches the e2e workflow on main itself, waits (ceiling 1.5x the last run, floor 10 min), and ships production only on green — printing why and recording the reason on the GitHub Deployment; a red run is `NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE]`, production untouched. **A SMALL change ships to production on the fast check alone** (owner, 2 Oct 2026: the e2e workflows are dispatch-only, never scheduled, and a small change no longer prints WAITING for a suite nothing would run) — printed and recorded as "small change: N lines, M files; shipped on the fast check, e2e on demand". **Known red blocks it:** the newest e2e run on main that reached a verdict (cancelled/skipped runs are passed over) must be `success`, or there must be none; otherwise `NAMED STOP [E2E_KNOWN_RED]`, staging runs the sha, production untouched, and `land <pr> --run-e2e` ships it on a green suite. A red run on the exact sha blocks likewise; an unreadable history is exit 75, never "not red". `land <pr> --run-e2e` forces the suite for any size. Landing a merged PR again never rolls production back and never deploys the sha it already runs. A self-deploying repo whose production moves through its own workflow (`PROMOTE_VIA`: secondaries, founder-dilution-dashboard → `promote.yml`; justbeingmercedes → `deploy.yml`) follows the same plan: land confirms the staging build, then dispatches that workflow with `-f sha=` and `-f reason=`, waits for the run (ceiling 1.5x, floor 6 min) and reads the GitHub Deployment back. `--promote` ships the newest e2e-green main commit that is newer than what production runs, smoke-checks it and records it; `--run-e2e` dispatches the e2e workflow on main's head first and waits (ceiling 1.5x the last run). A repo whose `origin/main` has `.github/workflows/promote.yml` (sheila-creator-dashboard) promotes itself on a green e2e: `--promote` first waits for any in-flight promote run (ceiling 1.5x its last run, floor 6 min; past it: cancelled + NAMED STOP, exit 1) and reads production only after it — so it never deploys the same sha on top of that run; repos without promote.yml skip this silently. The production record is the GitHub Deployments API (environment `production`, one per land; `gh api repos/<r>/deployments?environment=production`). Routes without `E2E_WF` are unchanged: merge → production. A route with `E2E_WF` whose repo has a `deploy.yml` (boss-os) does not wait for a Deploy run after the merge — that workflow fires on the e2e run, not on CI; a small change is deployed from the laptop, and after a green suite land waits for that `deploy.yml` run (`PROMOTE_WF`) instead of racing it. Rollout ledger for every seq23 repo: `docs/build-first-rollout-2026-09-26.md`. |
 | `shorts-arm.sh` | — | YouTube shorts arming. |
-| `schedule-inventory.sh` | — | What is scheduled on this machine. |
+| `schedule-inventory.sh` | — | Retired 1 Nov 2026: the schedule is the Boss OS Schedule page (☰ More → Schedule); this prints where and exits 3. |
 | `kdp-watch.sh` → | (symlink) | Lives in `boss-os/scripts/ops/`. Owned by Simone; chases Amazon KDP support to resolution. |
 
 ## Conventions these scripts hold to
@@ -56,27 +56,21 @@ edit was recoverable only if someone had thought to copy the file first.
 
 ## Installing the schedule
 
-Three launchd jobs are versioned here: `launchd/com.seq.ci-sweep.plist` (Monday and
-Friday 08:00, the sweep itself), `launchd/com.seq.ci-sweep-retry.plist` (Monday and
-Friday 09:00, the retry gate) and `launchd/com.seq.ci-sweep-resume.plist` (every 300 s,
-resume on wake). The first two carry two `StartCalendarInterval` entries, one per
-weekday (launchd `Weekday` 1 = Monday, 5 = Friday); the third a `StartInterval` of 300.
-After changing any of them:
+Every launchd job versioned here is in `launchd/`, with its hours written in **Central** time:
+the CI sweep (Monday and Friday 08:00), its retry (Monday and Friday 09:00), resume on wake (every
+300 s), Scooter watch (every 15 min) and its digest (Monday 07:00, retry 08:00), the Shorts check
+(daily 10:11), dev housekeeping (the 1st and 15th, 10:30) and the P&P Marketplace listings (daily
+13:40). Her Mac runs on Eastern, and launchd reads Hour in the Mac's zone, so a copied plist fires
+an hour early (it did until 1 Nov 2026). Install with:
 
 ```sh
-cp ~/bin/launchd/com.seq.ci-sweep.plist ~/Library/LaunchAgents/
-cp ~/bin/launchd/com.seq.ci-sweep-retry.plist ~/Library/LaunchAgents/
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep 2>/dev/null
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep-retry 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep-retry.plist
-cp ~/bin/launchd/com.seq.ci-sweep-resume.plist ~/Library/LaunchAgents/
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep-resume 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep-resume.plist
-launchctl list | grep ci-sweep-resume                                               # expect one line: com.seq.ci-sweep-resume
-launchctl print gui/$(id -u)/com.seq.ci-sweep | grep -A12 'event triggers'        # expect two entries: Weekday 1 and Weekday 5, each Hour 8, Minute 0
-launchctl print gui/$(id -u)/com.seq.ci-sweep-retry | grep -A12 'event triggers'  # expect two entries: Weekday 1 and Weekday 5, each Hour 9, Minute 0
+~/bin/install-launchd.sh             # every job: copy, move to the Mac's zone, lint, reload
+~/bin/install-launchd.sh com.seq.ci-sweep com.seq.ci-sweep-retry   # just these
+launchctl print gui/$(id -u)/com.seq.ci-sweep | grep -A12 'event triggers'   # on an Eastern Mac: Weekday 1 and 5, Hour 9 (= 08:00 Central)
 ```
+
+It uses boss-os `scripts/ops/plist-central.mjs`, the same mover Boss OS's own installer uses.
+`tests/test-launchd-central.sh` proves it. Boss OS's Schedule page lists every job here.
 
 Never reload it while a sweep is running (`pgrep -f ci-sweep.sh`): bash reads a
 script as it executes it.

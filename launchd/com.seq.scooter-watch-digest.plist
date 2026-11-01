@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.scooter-watch-digest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/scooter-watch-digest.sh</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/scooter-watch/digest-launchd.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/scooter-watch/digest-launchd.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>7</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+			<key>Weekday</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>8</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+			<key>Weekday</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

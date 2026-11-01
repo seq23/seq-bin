@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.scooter-watch</string>
+  <!-- Partner tail (her approval, 6 Oct 2026; was the 24 Sep Scooter watch through 15 Oct):
+       every 15 minutes, any email into os@joinwestpeek.com from scooter@ or sequoia@westpeek.ventures
+       dispatches a tail agent that follows the work cards it opened, fixes friction at the root,
+       records it, and emails her a report; mail from Scooter that skips os@ is logged for the
+       Monday digest (com.seq.scooter-watch-digest) as "went around Porter". Runs through
+       4 Jan 2027 23:59 CST; the script then writes and emails FINAL_REPORT.md and boots out both
+       jobs. RunAtLoad fires the first check immediately on install. Versioned copy:
+       ~/bin/launchd/com.seq.scooter-watch.plist. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>/Users/sequoiataylor/bin/scooter-watch.sh</string>
+  </array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <!-- Without this, launchd SIGTERMs the whole process group when each tick's script
+       exits — killing the detached tail agent it just dispatched (nohup/disown alone
+       don't move a process to a new group on macOS). A tick must be able to return
+       immediately after dispatch so the next 15-minute check is never late. -->
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/scooter-watch/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/Library/Logs/scooter-watch/launchd.err</string>
+</dict></plist>

@@ -7,9 +7,11 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 D=$(date +%Y-%m-%d); LOG=~/Library/Logs/drive-backup/$D.log; DEST=gdrive:Mac-Backup
 EXCL=(--exclude 'vault/**' --exclude '*token*' --exclude '*.env' --exclude '.env*' --exclude '*secret*'
       --exclude '*credential*' --exclude 't2r-test-accounts.txt' --exclude 'browser/**' --exclude 'kdp-profile/**'
-      --exclude 'kdp/**' --exclude 'node_modules/**' --exclude '.git/**' --exclude '.DS_Store')
+      --exclude 'kdp/**' --exclude 'node_modules/**' --exclude '.git/**' --exclude '.DS_Store'
+      --exclude '.venv*/**' --exclude 'venv/**' --exclude '__pycache__/**' --exclude 'site-packages/**' --exclude '*.pyc')
+# Rebuildable Python environments are skipped: 55k tiny files there took 4.5h on the first run (1 Nov).
 fail=0
-sync() { rclone sync "$1" "$DEST/$2" "${EXCL[@]}" --backup-dir "$DEST/_old/$D/$2" --log-file "$LOG" --log-level NOTICE || fail=1; }
+sync() { rclone sync "$1" "$DEST/$2" "${EXCL[@]}" --backup-dir "$DEST/_old/$D/$2" --transfers 8 --checkers 16 --log-file "$LOG" --log-level NOTICE || fail=1; }
 sync ~/.boss-os            boss-os
 sync ~/bin                 bin
 sync ~/8raise-tools        8raise-tools

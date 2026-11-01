@@ -63,6 +63,22 @@ while IFS= read -r f; do
 
   lintable=$((lintable + 1))
 
+  # A zsh script (e.g. drive-backup.sh) cannot be shellchecked; it is parsed by zsh -n instead.
+  # zsh missing is a failure, never a silent skip.
+  if head -1 "$f" | grep -q 'zsh'; then
+    if ! command -v zsh >/dev/null 2>&1; then
+      echo "  x ZSH MISSING, cannot parse $f"
+      failed=$((failed + 1))
+    elif zsh -n "$f" 2>"$TMP/parse-stderr"; then
+      echo "  o $f (zsh -n)"
+    else
+      echo "  x ZSH PARSE FAILED $f"
+      sed 's/^/      /' "$TMP/parse-stderr"
+      failed=$((failed + 1))
+    fi
+    continue
+  fi
+
   if bash -n "$f" 2>"$TMP/parse-stderr"; then
     :
   else

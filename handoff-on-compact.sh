@@ -5,7 +5,7 @@
 #
 # Requested 2026-09-19: "every time this chat compacts it updates the handoff file in my root
 # folder, adds a date and time stamp, and renames the handoff file to something date neutral."
-# The file is ~/HANDOFF.md (date-neutral). Newest block on top; the file keeps the last 12.
+# The file is ~/HANDOFF.md (date-neutral). Notes go in the TODAY region only, replaced each day (see below).
 #
 # RULE 0 FOR THIS SCRIPT: it never exits 0 having written nothing. If the summary cannot be
 # produced (no transcript, claude unavailable, timeout) it still writes a stamped block saying
@@ -13,7 +13,6 @@
 set -uo pipefail
 
 HANDOFF="$HOME/HANDOFF.md"
-KEEP=12
 INPUT="$(cat)"
 SESSION="$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)"
 TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)"
@@ -69,8 +68,11 @@ if [ -z "$summary" ]; then
 - **Summary could not be produced** at compaction (no readable transcript or the summariser was unavailable). Read the transcript tail instead."
 fi
 
-block="# Handoff — ${STAMP_LOCAL}
+# Demote the summariser's "## X" headings to "#### X" so a session note never looks like a
+# section of the handoff itself.
+summary="$(printf '%s\n' "$summary" | sed -E 's/^## /#### /')"
 
+block="### Session note — ${STAMP_LOCAL}
 <!-- compaction:${STAMP_ISO} trigger:${TRIGGER} session:${SESSION} -->
 - **Session**: \`${SESSION}\` · **trigger**: ${TRIGGER}${CWD:+ · **cwd**: \`${CWD}\`}
 - **Transcript**: \`${TRANSCRIPT:-unknown}\`
@@ -78,17 +80,31 @@ block="# Handoff — ${STAMP_LOCAL}
 ${summary}
 "
 
-# Newest on top; keep the last $KEEP blocks. Blocks are delimited by the '# Handoff — ' heading.
-tmp="$(mktemp)"
-{
-  printf '%s\n\n---\n\n' "$block"
-  if [ -f "$HANDOFF" ]; then
-    awk -v keep="$((KEEP-1))" '
-      /^# Handoff — / { n++ }
-      n <= keep { print }
-    ' "$HANDOFF"
-  fi
-} > "$tmp" && mv "$tmp" "$HANDOFF"
+# 20 Oct 2026 rule (hers): the handoff follows the PINNED sheet; temporary things (what's in
+# flight, what we did today) live ONLY in the "Today" section between the TODAY markers, which is
+# REPLACED each day, never stacked. Same day → this note goes on top of today's notes; a new day
+# → yesterday's notes are dropped. Everything outside the markers is never touched. No markers
+# yet → the section is appended at the END of the file, never at the top.
+BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
+import os, re
+path, block = os.environ["HANDOFF"], os.environ["BLOCK"].rstrip() + "\n"
+today, today_long = os.environ["TODAY"], os.environ["TODAY_LONG"]
+S, E = "<!-- TODAY:START -->", "<!-- TODAY:END -->"
+doc = open(path).read() if os.path.exists(path) else ""
+if S not in doc or E not in doc:
+    doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + E + "\n"
+head, rest = doc.split(S, 1)
+body, tail = rest.split(E, 1)
+m = re.search(r"<!-- day:(\d{4}-\d{2}-\d{2}) -->", body)
+notes = []
+if m and m.group(1) == today:
+    notes = [n.rstrip() + "\n" for n in re.split(r"(?m)^(?=### Session note — )", body) if n.strip().startswith("### Session note")]
+notes = [block] + notes[:5]
+out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + "\n".join(notes) + E + tail
+tmp = path + ".tmp"
+open(tmp, "w").write(out)
+os.replace(tmp, path)
+PY
 
-printf '{"systemMessage":"Handoff written to ~/HANDOFF.md (%s)"}\n' "$STAMP_LOCAL"
+printf '{"systemMessage":"Session note written to ~/HANDOFF.md (%s)"}\n' "$STAMP_LOCAL"
 exit 0

@@ -162,20 +162,20 @@ check_exception_handling() {
   local bare_pass=0 unexplained=0
   while IFS= read -r line; do
     body="${line#+}"
-    if printf '%s' "$prev" | grep -qE '^[[:space:]]*except\b.*:[[:space:]]*(#.*)?$' \
-       && printf '%s' "$body" | grep -qE '^[[:space:]]*pass[[:space:]]*$'; then
+    if grep -qE '^[[:space:]]*except\b.*:[[:space:]]*(#.*)?$' <<<"$prev" \
+       && grep -qE '^[[:space:]]*pass[[:space:]]*$' <<<"$body"; then
       # ...unless the handler line itself carries a justification, which makes it
       # a declared no-op rather than a silent one.
-      if ! printf '%s' "$prev" | grep -qE '#.*[A-Za-z]{3}'; then
+      if ! grep -qE '#.*[A-Za-z]{3}' <<<"$prev"; then
         bare_pass=1
         say "  ✗ FATAL $label — an exception handler's entire body is \`pass\`, discarding the condition"
         say "      ${prev}"
         say "      ${body}"
       fi
     fi
-    if printf '%s' "$body" | grep -qE '^[[:space:]]*except[[:space:]]+(BaseException|Exception)\b'; then
-      if ! printf '%s' "$body" | grep -qE '#[[:space:]]*(noqa|nosec)?:?[[:space:]]*[A-Za-z0-9]+.*[-–—][[:space:]]*[A-Za-z]' \
-         && ! printf '%s' "$body" | grep -qE '#.*[A-Za-z]{4}'; then
+    if grep -qE '^[[:space:]]*except[[:space:]]+(BaseException|Exception)\b' <<<"$body"; then
+      if ! grep -qE '#[[:space:]]*(noqa|nosec)?:?[[:space:]]*[A-Za-z0-9]+.*[-–—][[:space:]]*[A-Za-z]' <<<"$body" \
+         && ! grep -qE '#.*[A-Za-z]{4}' <<<"$body"; then
         unexplained=1
       fi
     fi
@@ -215,8 +215,8 @@ check_suppressions() {
     # Requiring only "some letters" is not enough, because a comma-separated code
     # list would satisfy it; requiring an explicit `-`, `:` or `#` separator is
     # what distinguishes a reason from another code.
-    if ! printf '%s' "$line" | grep -qE '(noqa|nosec)[[:space:]]*:[[:space:]]*[A-Za-z]+[0-9]*([[:space:]]*,[[:space:]]*[A-Za-z]+[0-9]*)*[[:space:]]*[-–—:#][[:space:]]*[A-Za-z]' \
-       && ! printf '%s' "$line" | grep -qE 'type:[[:space:]]*ignore\[[^]]+\][[:space:]]*[-–—:#][[:space:]]*[A-Za-z]'; then
+    if ! grep -qE '(noqa|nosec)[[:space:]]*:[[:space:]]*[A-Za-z]+[0-9]*([[:space:]]*,[[:space:]]*[A-Za-z]+[0-9]*)*[[:space:]]*[-–—:#][[:space:]]*[A-Za-z]' <<<"$line" \
+       && ! grep -qE 'type:[[:space:]]*ignore\[[^]]+\][[:space:]]*[-–—:#][[:space:]]*[A-Za-z]' <<<"$line"; then
       say "  ! NOTE $label — a suppression names a rule but gives no reason (not blocking):"
       say "      ${line}"
     fi
@@ -241,7 +241,7 @@ check_always() {
   hits="$(printf '%s\n' "$added" | grep -nE 'if:[[:space:]]*(\$\{\{[[:space:]]*)?always\(\)' || true)"
   [ -z "$hits" ] && return 0
   D_ALWAYS=1
-  if printf '%s\n' "$added" | grep -qE 'continue-on-error'; then
+  if grep -qE 'continue-on-error' <<<"$added"; then
     D_FATAL=$((D_FATAL + 1))
     say "  ✗ FATAL $label — \`if: always()\` added ALONGSIDE continue-on-error; together those do excuse a failure"
   fi
@@ -442,8 +442,8 @@ for repo in "$GITHUB_DIR"/*/; do
     else
       # A fix that changes code and adds no test is not necessarily wrong, but it
       # is the shape a temp fix takes, so it is reported rather than passed over.
-      if printf '%s\n' "$diff" | grep -qE '^[+][+][+] b/.*[.](py|ts|tsx|mjs|js)$' \
-         && ! printf '%s\n' "$diff" | grep -qiE '^[+][+][+] b/.*(test|spec|validate)'; then
+      if grep -qE '^[+][+][+] b/.*[.](py|ts|tsx|mjs|js)$' <<<"$diff" \
+         && ! grep -qiE '^[+][+][+] b/.*(test|spec|validate)' <<<"$diff"; then
         say "  ! $name#$num — code changed, no test or validator touched: $title"
       else
         say "  ✓ $name#$num — no weakening pattern: $title"

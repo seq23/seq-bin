@@ -1,1 +1,0 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/kdp-watch-prompt.md

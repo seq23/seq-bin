@@ -34,9 +34,9 @@ jobs:
       - name: Ensure shellcheck is present
         run: |
           set -euo pipefail
-          if ! command -v shellcheck >/dev/null 2>&1; then
+          if ! command -v shellcheck >/dev/null 2>&1 || ! command -v zsh >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y shellcheck
+            sudo apt-get install -y shellcheck zsh
           fi
           shellcheck --version
           bash --version | head -1

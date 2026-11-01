@@ -49,6 +49,8 @@ jobs:
 
       - name: Lint every shell script (shellcheck + bash -n)
         run: ./tests/lint-shell.sh
+      - name: launchd jobs install at Central times
+        run: ./tests/test-launchd-central.sh
 
       # Two workflows on one push to main (west-peek-os, 21 Sep 2026): land must watch the
       # gate run, never the journeys. Evals the pick_run block out of land against a fixture.

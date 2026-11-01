@@ -56,27 +56,21 @@ edit was recoverable only if someone had thought to copy the file first.
 
 ## Installing the schedule
 
-Three launchd jobs are versioned here: `launchd/com.seq.ci-sweep.plist` (Monday and
-Friday 08:00, the sweep itself), `launchd/com.seq.ci-sweep-retry.plist` (Monday and
-Friday 09:00, the retry gate) and `launchd/com.seq.ci-sweep-resume.plist` (every 300 s,
-resume on wake). The first two carry two `StartCalendarInterval` entries, one per
-weekday (launchd `Weekday` 1 = Monday, 5 = Friday); the third a `StartInterval` of 300.
-After changing any of them:
+Every launchd job versioned here is in `launchd/`, with its hours written in **Central** time:
+the CI sweep (Monday and Friday 08:00), its retry (Monday and Friday 09:00), resume on wake (every
+300 s), Scooter watch (every 15 min) and its digest (Monday 07:00, retry 08:00), the Shorts check
+(daily 10:11), dev housekeeping (the 1st and 15th, 10:30) and the P&P Marketplace listings (daily
+13:40). Her Mac runs on Eastern, and launchd reads Hour in the Mac's zone, so a copied plist fires
+an hour early (it did until 1 Nov 2026). Install with:
 
 ```sh
-cp ~/bin/launchd/com.seq.ci-sweep.plist ~/Library/LaunchAgents/
-cp ~/bin/launchd/com.seq.ci-sweep-retry.plist ~/Library/LaunchAgents/
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep 2>/dev/null
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep-retry 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep-retry.plist
-cp ~/bin/launchd/com.seq.ci-sweep-resume.plist ~/Library/LaunchAgents/
-launchctl bootout gui/$(id -u)/com.seq.ci-sweep-resume 2>/dev/null
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seq.ci-sweep-resume.plist
-launchctl list | grep ci-sweep-resume                                               # expect one line: com.seq.ci-sweep-resume
-launchctl print gui/$(id -u)/com.seq.ci-sweep | grep -A12 'event triggers'        # expect two entries: Weekday 1 and Weekday 5, each Hour 8, Minute 0
-launchctl print gui/$(id -u)/com.seq.ci-sweep-retry | grep -A12 'event triggers'  # expect two entries: Weekday 1 and Weekday 5, each Hour 9, Minute 0
+~/bin/install-launchd.sh             # every job: copy, move to the Mac's zone, lint, reload
+~/bin/install-launchd.sh com.seq.ci-sweep com.seq.ci-sweep-retry   # just these
+launchctl print gui/$(id -u)/com.seq.ci-sweep | grep -A12 'event triggers'   # on an Eastern Mac: Weekday 1 and 5, Hour 9 (= 08:00 Central)
 ```
+
+It uses boss-os `scripts/ops/plist-central.mjs`, the same mover Boss OS's own installer uses.
+`tests/test-launchd-central.sh` proves it. Boss OS's Schedule page lists every job here.
 
 Never reload it while a sweep is running (`pgrep -f ci-sweep.sh`): bash reads a
 script as it executes it.

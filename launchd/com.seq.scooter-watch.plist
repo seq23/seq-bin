@@ -4,7 +4,7 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.seq.scooter-watch</string>
   <!-- Partner tail (her approval, 6 Oct 2026; was the 24 Sep Scooter watch through 15 Oct):
-       every 15 minutes, any email into os@joinwestpeek.com from scooter@ or sequoia@westpeek.ventures
+       every 15 minutes, any email into os@joinwestpeek.com from Scooter or her (addresses in ~/.config/seq-bin/addresses.env)
        dispatches a tail agent that follows the work cards it opened, fixes friction at the root,
        records it, and emails her a report; mail from Scooter that skips os@ is logged for the
        Monday digest (com.seq.scooter-watch-digest) as "went around Porter". Runs through

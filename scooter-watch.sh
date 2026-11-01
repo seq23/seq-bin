@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Partner tail (scooter-watch) — her 90-day tail on partner mail into the West Peek OS.
-# Rewritten 6 Oct 2026 to her words that day: "when scooter cc me at sequoia@westpeek.ventures it
+# Rewritten 6 Oct 2026 to her words that day: "when scooter cc me at her westpeek.ventures mailbox (OWNER_ADDR) it
 # should be watched all the time now until i decide to stop it (like 90 days) and it should launch
 # a tail agent that tails the work and fixes any friction and records it and sends me a report".
 #
@@ -10,7 +10,7 @@
 # Runs every 15 minutes (launchd StartInterval 900; 27 Sep 2026, was 4-hourly).
 #
 # TRIGGER (the only one since 6 Oct 2026): a row in west-peek-os D1 `inbound_message` (os@joinwestpeek.com,
-# Cloudflare email routing into the Worker) whose from_address is scooter@westpeek.ventures —
+# Cloudflare email routing into the Worker) whose from_address is Scooter's mailbox (PARTNER_ADDR) —
 # cc'd to her or not. Her own os@ mail is not tailed, and her mailbox is not read (MAILBOX_SOURCE
 # is off; 6 Oct 2026: "just make the tail for any email from scooter to the os@joinwestpeek"). Every such email dispatches ONE tail agent (queued if one is already in flight,
 # picked up on the next free tick — the pre-6-Oct script marked queued mail seen and never
@@ -33,7 +33,7 @@
 #
 # REPORTS: one email per event when the agent finishes (or is killed), plus a Monday 08:00 CT
 # digest (scooter-watch-digest.sh, its own launchd job) — both from os@westpeek.ventures to
-# sequoia@westpeek.ventures through Resend via scooter-watch-report.mjs, which runs only under
+# her westpeek.ventures mailbox (OWNER_ADDR) through Resend via scooter-watch-report.mjs, which runs only under
 # the vault runner (the key is injected by name, never on a command line, never logged).
 #
 # BANNERS: one on dispatch, one when mail queues, a heartbeat at most every 4 h otherwise.
@@ -73,8 +73,13 @@ MAILLOG="$STATE_DIR/mail-log.tsv"                # date \t from \t subject \t so
 FIXLOG="$STATE_DIR/fix-log.md"
 touch "$SEEN_FILE" "$MAILLOG" "$FIXLOG"
 
-PARTNER_A="scooter@westpeek.ventures"
-PARTNER_B="sequoia@westpeek.ventures"
+# Addresses live outside git (no owner emails in a public repo).
+ADDR_FILE="$HOME/.config/seq-bin/addresses.env"
+if [ ! -r "$ADDR_FILE" ]; then echo "[watch] STOP: $ADDR_FILE missing (OWNER_ADDR, PARTNER_ADDR)"; exit 1; fi
+# shellcheck disable=SC1090
+. "$ADDR_FILE"
+PARTNER_A="$PARTNER_ADDR"
+PARTNER_B="$OWNER_ADDR"
 # 22 Oct 2026, her word ("it should be tailed"): her own mail to os@ is tailed too, from this moment only
 # (no backfill of earlier mail), so jobs she sends — e.g. The Learning Club — get the same tail as Scooter's.
 PARTNER_B_SINCE="2026-10-22T16:16:59"
@@ -195,6 +200,20 @@ NEW_OS=0
 while IFS=$'\t' read -r id date from subject card; do
   [ -z "$id" ] && continue
   if ! grep -qxF "$id" "$SEEN_FILE"; then
+    # 30 Oct 2026, her word ("tail should skip routine approved/skip replies"): her reply to a Wynn
+    # brand-reply approval email (Ref TLR-xxxxxx) is not tailed when every reply it covers ended SENT or
+    # SKIPPED. A FAILED send, or a change note (row back to DRAFTED/NOTIFIED), is still tailed.
+    ref="$(printf '%s' "$subject" | grep -oE 'TLR-[A-Z0-9]{6}' | head -1)"
+    if [ -n "$ref" ] && printf '%s' "$from" | grep -qi "$PARTNER_B"; then
+      left="$(cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \
+        --command "SELECT COUNT(*) AS n FROM tlc_brand_reply WHERE notice_ref = '$ref' AND state NOT IN ('SENT','SKIPPED')" 2>>"$RUN_LOG" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["results"][0]["n"])' 2>/dev/null)"
+      if [ "$left" = "0" ]; then
+        echo "$id" >> "$SEEN_FILE"
+        echo "[watch] routine approval reply skipped ($ref: all sent/skipped): $subject"
+        continue
+      fi
+    fi
     echo "$id" >> "$SEEN_FILE"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$date" "$from" "$subject" "os@" "$id" "$card" >> "$MAILLOG"
     NEW_OS=$((NEW_OS+1))

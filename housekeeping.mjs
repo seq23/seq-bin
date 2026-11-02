@@ -17,10 +17,10 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { post } from "./open-loops.mjs";
 
 const HOME = process.env.HOME;
 const REPO = "seq23/seq-bin";
-const URL = process.env.OPEN_LOOPS_URL || "https://boss.sequoiataylor.com/api/boss/open-loops/intake";
 const DRY = process.env.HOUSEKEEPING_DRY_RUN === "1";
 const DAY = 86_400_000;
 const NOW = Date.now();
@@ -152,20 +152,6 @@ function checkRules(state, posts, log) {
     next_step: "Review every rule in ~/.claude/CLAUDE.md as keep, tighten, merge, move or cut on one artifact page, get her approval, then apply it.",
   });
   return code;
-}
-
-// ─── Post ──────────────────────────────────────────────────────────────────────────────────────────
-async function post(body, token) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const r = await fetch(URL, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
-      const text = await r.text();
-      if (r.ok) { try { return JSON.parse(text).action ?? JSON.parse(text).data?.action ?? "ok"; } catch { return "ok"; } }
-      if (r.status < 500 || attempt >= 2) throw new Error(`HTTP ${r.status}`);
-    } catch (e) {
-      if (attempt >= 2 || /^HTTP 4/.test(e.message)) throw e;
-    }
-  }
 }
 
 async function main() {

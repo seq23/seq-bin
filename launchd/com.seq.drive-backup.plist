@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
+<!-- Daily 01:40 CT (versioned here 1 Nov 2026; it was hand-written in Eastern hours and no installer owned it). -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.drive-backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>~/bin/drive-backup.sh</string>
+	</array>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/drive-backup/launchd.out</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/drive-backup/launchd.err</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>1</integer>
+		<key>Minute</key>
+		<integer>40</integer>
+	</dict>
+</dict>
+</plist>

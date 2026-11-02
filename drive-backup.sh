@@ -54,7 +54,9 @@ sync ~/.claude/skills      claude/skills
 sync ~/.claude/skills-archive claude/skills-archive
 sync ~/.claude/memory-archive claude/memory-archive
 for f in CLAUDE.md rules-history.md; do rclone copyto ~/.claude/$f "$DEST/claude/$f" --log-file "$LOG" || fail=1; done
-rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF-$D.md" --log-file "$LOG" || fail=1
+# Only the latest handoff is kept (her call 1 Nov: no pile of dated copies).
+rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF.md" --log-file "$LOG" || fail=1
+rclone delete "$DEST/handoff" --include 'HANDOFF-*.md' --log-file "$LOG" 2>/dev/null || true
 [ -d ~/Notes ] && sync ~/Notes Notes
 # Old copies (_old/<date>) are kept 30 days, then removed so Drive does not fill up.
 cut=$(date -v-30d +%Y-%m-%d)

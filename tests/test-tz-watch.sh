@@ -28,7 +28,8 @@ esac
 exit 0
 SH
 chmod +x "$T/stubbin/launchctl"
-command -v plutil >/dev/null || { printf '#!/bin/bash\n[ "$1" = -lint ] && shift; for f; do python3 -c "import plistlib,sys; plistlib.load(open(sys.argv[1],\"rb\"))" "$f" || exit 1; done\n' > "$T/stubbin/plutil"; chmod +x "$T/stubbin/plutil"; }
+# Off macOS, a plutil on PATH is not Apple's (the Ubuntu runner has one that rejects every plist).
+[ "$(uname)" = Darwin ] || { printf '#!/bin/bash\n[ "$1" = -lint ] && shift; for f; do python3 -c "import plistlib,sys; plistlib.load(open(sys.argv[1],\"rb\"))" "$f" || exit 1; done\n' > "$T/stubbin/plutil"; chmod +x "$T/stubbin/plutil"; }
 
 # Stub Open Loops intake: one JSON line per post.
 cat > "$T/stub.mjs" <<'JS'

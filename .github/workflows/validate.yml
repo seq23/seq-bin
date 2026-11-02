@@ -99,6 +99,11 @@ jobs:
       - name: land must migrate a self-deploying repo's D1 before the merge
         run: ./tests/test-land-d1.sh
 
+      # 1 Nov 2026: the nightly housekeeping job turns unsaved work, backup stops and the monthly rules
+      # clean-up into Boss OS Open Loops rows, against a stub intake; a failed post must be a named stop.
+      - name: housekeeping.sh opens and closes the right Open Loops rows
+        run: ./tests/test-housekeeping.sh
+
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
 

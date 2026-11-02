@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
+<!-- Daily 03:30 CT: after the 01:40 CT drive backup, so its stops and held-back folders are read the same night. -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.housekeeping</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/housekeeping.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/housekeeping.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/housekeeping.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+</dict>
+</plist>

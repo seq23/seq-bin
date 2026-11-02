@@ -10,7 +10,7 @@
 //   2. Backup: needs-decision.txt from drive-backup.sh (DRIVE_BACKUP_BIG_FOLDER) → a row she decides;
 //      a DRIVE_BACKUP_TOO_SLOW / DRIVE_BACKUP_FAILED stop in today's backup log, or no log at all → a
 //      row Claude fixes.
-//   3. Rules clean-up: the 1st of the month, or ~/.claude/CLAUDE.md over 2,000 words → one row a month.
+//   3. Rules clean-up: the 1st of the month, or ~/.claude/CLAUDE.md over 2,500 words → one row a month.
 //
 // Rule 0: every outcome is a line in the log. A post that fails, or a missing token, is a NAMED STOP
 // with a non-zero exit, never a silent 0. HOUSEKEEPING_DRY_RUN=1 prints the payloads and posts nothing.
@@ -24,7 +24,7 @@ const REPO = "seq23/seq-bin";
 const DRY = process.env.HOUSEKEEPING_DRY_RUN === "1";
 const DAY = 86_400_000;
 const NOW = Date.now();
-const WORD_LIMIT = 2000;
+const WORD_LIMIT = 2500;
 const STATE_DIR = path.join(HOME, "Library/Application Support/housekeeping");
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 const BACKUP_STATE = path.join(HOME, "Library/Application Support/drive-backup");
@@ -144,7 +144,7 @@ function checkRules(state, posts, log) {
   if (!first && !long) return null; // any open row stays open until the review is done
   const code = `RULES_CLEANUP_${TODAY_CT.slice(0, 7).replace("-", "_")}`;
   if ((state.rules || []).includes(code)) { log.push(`rules: ${code} already posted this month`); return null; }
-  const reason = [first && "1st of the month", long && "over 2,000 words"].filter(Boolean).join(" and ");
+  const reason = [first && "1st of the month", long && "over 2,500 words"].filter(Boolean).join(" and ");
   posts.push({
     ...base, stop: code,
     title: `Rules clean-up due (${reason}, ${words.toLocaleString("en-US")} words)`,

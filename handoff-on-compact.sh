@@ -82,8 +82,9 @@ ${summary}
 
 # 20 Oct 2026 rule (hers): the handoff follows the PINNED sheet; temporary things (what's in
 # flight, what we did today) live ONLY in the "Today" section between the TODAY markers, which is
-# REPLACED each day, never stacked. Same day → this note goes on top of today's notes; a new day
-# → yesterday's notes are dropped. Everything outside the markers is never touched. No markers
+# REPLACED, never stacked: a new note from the same session replaces that session's earlier note
+# (1 Nov 2026: five notes stacked in one day); notes from other sessions today are kept (newest 2);
+# a new day → yesterday's notes are dropped. Everything outside the markers is never touched. No markers
 # yet → the section is appended at the END of the file, never at the top.
 BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
 import os, re
@@ -99,7 +100,10 @@ m = re.search(r"<!-- day:(\d{4}-\d{2}-\d{2}) -->", body)
 notes = []
 if m and m.group(1) == today:
     notes = [n.rstrip() + "\n" for n in re.split(r"(?m)^(?=### Session note — )", body) if n.strip().startswith("### Session note")]
-notes = [block] + notes[:5]
+sid = re.search(r"session:(\S+) -->", block)
+if sid:
+    notes = [n for n in notes if ("session:" + sid.group(1) + " -->") not in n]
+notes = [block] + notes[:2]
 out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + "\n".join(notes) + E + tail
 tmp = path + ".tmp"
 open(tmp, "w").write(out)

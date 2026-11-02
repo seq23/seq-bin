@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/mailbox-sweep.sh
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/mailbox-sweep.sh

@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/kdp-surface.sh
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/kdp-surface.sh

@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/kdp-surface-prompt.md
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/kdp-surface-prompt.md

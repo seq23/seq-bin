@@ -518,6 +518,22 @@ for dir in "$GITHUB_DIR"/*/; do
       fi
     fi
 
+    # A MANUAL run a human cancelled, older than the whole window, is not a failure.
+    # 2 Nov 2026: sprylabs-hpc-site `Spry Full Rebuild` is workflow_dispatch-only; its one
+    # run (29 Aug) was cancelled 14 s in. Once the probe read each lane's own runs it
+    # became a RED no agent can clear (re-running is forbidden; the tool must stay).
+    # Narrow on purpose: cancelled AND event=workflow_dispatch AND before $SINCE. A
+    # pushed/scheduled lane has newer runs, and a cancel inside the window stays RED.
+    if [ "$concl" = "cancelled" ] \
+       && [ "$(printf '%s' "$latest" | jq -r '.createdAt')" \< "$SINCE" ]; then
+      ev="$(gh api "repos/$OWNER/$repo/actions/runs/$rid" -q '.event' 2>/dev/null || true)"
+      if [ "$ev" = "workflow_dispatch" ]; then
+        printf 'QUIET\t%s\t%s\t%s|%s|CANCELLED_MANUAL\tnewest run #%s was a manual dispatch cancelled before %s — not a failure; the next manual run clears it\n' \
+          "$repo" "$flow" "$repo" "$flow" "$rid" "$SINCE"
+        lanes=$((lanes-1)); continue
+      fi
+    fi
+
     case "$concl" in
       success|skipped|neutral)
         printf 'GREEN\t%s\t%s\t%s|%s|%s\trun #%s\n' "$repo" "$flow" "$repo" "$flow" "$concl" "$rid"

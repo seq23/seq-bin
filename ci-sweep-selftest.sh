@@ -332,6 +332,15 @@ if gh auth status >/dev/null 2>&1; then
   else bad "spry-vc produced no lane — the probe examined nothing"; fi
 fi
 
+# 2026-11-02: a manual-only lane whose only run (29 Aug) a human cancelled must be QUIET
+# (CANCELLED_MANUAL), never RED — and a real failure in the same repo must still be RED.
+if gh auth status >/dev/null 2>&1; then
+  out="$(CI_SWEEP_ONLY_REPOS=sprylabs-hpc-site "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  if printf '%s\n' "$out" | grep -q $'^RED\tsprylabs-hpc-site\tSpry Full Rebuild\t'; then bad "a long-ago cancelled manual run is RED"
+  elif printf '%s\n' "$out" | grep -q $'^QUIET\tsprylabs-hpc-site\tSpry Full Rebuild\t.*CANCELLED_MANUAL'; then ok "a long-ago cancelled manual run is QUIET (CANCELLED_MANUAL)"; examined_fixtures=$((examined_fixtures+1))
+  else echo "  - NAMED SKIP [LANE_CHANGED] Spry Full Rebuild has run again since 2 Nov; the fixture no longer exists."; fi
+fi
+
 echo "=== 7c. Boss OS grid tasks reach the sweep as lanes ====================="
 # 7 Oct 2026: 48 Boss OS "fix this repo" tasks sat queued from 16 Sep with nothing to claim
 # them. A stale PR in the grid inbox must be a RED lane while open, GREEN once merged or

@@ -187,10 +187,30 @@ for dir in "$GITHUB_DIR"/*/; do
   branch="$(printf '%s' "$meta" | jq -r '.defaultBranchRef.name // "main"')"
 
   # --- no workflows at all: the strongest form of the silence defect ----------
-  wf="$(gh workflow list --repo "$OWNER/$repo" --json name,state,path 2>/dev/null || echo '[]')"
+  # A failed read is not "no workflows". On 2026-11-02 08:00 CT GitHub's secondary
+  # rate limit answered `gh workflow list` with HTTP 403 for every repo, `|| echo '[]'`
+  # turned each 403 into an empty list, and the probe declared 31 repos SILENT with
+  # NO_WORKFLOWS — the same defect fixed for `gh run list` on 2026-09-23, one call
+  # earlier. Retry; if GitHub still will not answer, the repo is unproven (PENDING).
+  wf=""
+  for attempt in 1 2 3; do
+    if wf="$(gh workflow list --repo "$OWNER/$repo" --json name,state,path 2>/dev/null)" \
+       && printf '%s' "$wf" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      break
+    fi
+    wf=""; sleep $(( attempt * 5 ))
+  done
+  if [ -z "$wf" ]; then
+    printf 'PENDING\t%s\t(all)\t%s|WORKFLOWS_UNREADABLE\tgh could not list workflows after 3 attempts; unproven, not silent\n' "$repo" "$repo"
+    lanes=$((lanes+1)); pending=$((pending+1)); continue
+  fi
   active="$(printf '%s' "$wf" | jq -r '[.[]|select(.state=="active")|.name]|.[]' 2>/dev/null)"
   if [ -z "$active" ]; then
-    commits="$(gh api "repos/$OWNER/$repo/commits?since=$SINCE&sha=$branch" -q 'length' 2>/dev/null || echo 0)"
+    if ! commits="$(gh api "repos/$OWNER/$repo/commits?since=$SINCE&sha=$branch" -q 'length' 2>/dev/null)" \
+       || ! [ "$commits" -ge 0 ] 2>/dev/null; then
+      printf 'PENDING\t%s\t(none)\t%s|COMMITS_UNREADABLE\tno active workflows, and gh could not count commits; unproven\n' "$repo" "$repo"
+      lanes=$((lanes+1)); pending=$((pending+1)); continue
+    fi
     if [ "$commits" -gt 0 ]; then
       # Somebody is pushing to a repo that has NO CI. This is the west-peek-os
       # shape exactly: deploy.yml deleted as collateral in a sync commit, three

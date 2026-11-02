@@ -62,8 +62,10 @@ rclone lsf --dirs-only "$DEST/_old" 2>/dev/null | tr -d / | while read -r d; do
   [[ "$d" == 20??-??-?? && "$d" < "$cut" ]] && { rclone purge "$DEST/_old/$d" --log-file "$LOG" || fail=1; }
 done
 find ~/Library/Logs/drive-backup -name '*.log' -mtime +30 -delete
-if [ -n "$slow" ]; then echo "NAMED STOP: DRIVE_BACKUP_TOO_SLOW — the run hit its $((MAXSECS/60))-minute limit at $slow; see $LOG"; exit 3; fi
-if [ ${#flagged[@]} -gt 0 ]; then printf '%s\n' "${flagged[@]}" > "$STATE/needs-decision.txt"; echo "NAMED STOP: DRIVE_BACKUP_BIG_FOLDER — skipped tonight, not uploaded: ${flagged[*]}. To back one up, add its name to $STATE/big-folders-ok.txt"; exit 4; fi
+# Each stop also goes into the dated log, where housekeeping.sh reads it at 03:30 CT and opens an Open Loops row.
+stop(){ print -r -- "$1" | tee -a "$LOG"; }
+if [ -n "$slow" ]; then stop "NAMED STOP: DRIVE_BACKUP_TOO_SLOW — the run hit its $((MAXSECS/60))-minute limit at $slow; see $LOG"; exit 3; fi
+if [ ${#flagged[@]} -gt 0 ]; then printf '%s\n' "${flagged[@]}" > "$STATE/needs-decision.txt"; stop "NAMED STOP: DRIVE_BACKUP_BIG_FOLDER — skipped tonight, not uploaded: ${flagged[*]}. To back one up, add its name to $STATE/big-folders-ok.txt"; exit 4; fi
 rm -f "$STATE/needs-decision.txt"
-if [ $fail -ne 0 ]; then echo "NAMED STOP: DRIVE_BACKUP_FAILED — see $LOG (if 'token' or 'client_id' errors: reconnect with: rclone config reconnect gdrive:)"; exit 2; fi
+if [ $fail -ne 0 ]; then stop "NAMED STOP: DRIVE_BACKUP_FAILED — see $LOG (if 'token' or 'client_id' errors: reconnect with: rclone config reconnect gdrive:)"; exit 2; fi
 echo "drive-backup OK $D"

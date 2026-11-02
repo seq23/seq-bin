@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/repo-change-prompt.md
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/repo-change-prompt.md

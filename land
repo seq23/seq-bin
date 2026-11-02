@@ -322,6 +322,13 @@ case "$NAME" in
   # Cynthia Brown DDS (seq23/cynthia-brown-dds-site): no hosted deploy from this repo (its build.yml only
   # builds); its Actions lanes read main at fire time. Added 1 Nov 2026 when its schedule PR had no route.
   cynthia-brown-dds-site) DEPLOY="" ; SELF="has no hosted deploy; its Actions lanes run from main" ;;
+  # Search loop engine (seq23/search-loop): nothing hosted; callers pin the moving v1 tag, so a
+  # release is a v1.x.y tag plus moving v1 after the merge. Added 1 Nov 2026 when land refused #6.
+  search-loop)          DEPLOY="" ; SELF="has no hosted deploy; a release is a v1.x.y tag and the moving v1 tag (callers pin @v1)" ;;
+  # KeepMyProof (seq23/keepmyproof): the native app's EAS/store builds are manual release gates; its
+  # website (site/) is the Cloudflare Pages git project "keepmyproof" (root site, `node build.mjs`,
+  # output dist), which builds and serves keepmyproof.com on push to main. Updated 1 Nov 2026.
+  keepmyproof)          DEPLOY="" ; SELF="deploys its website through Cloudflare Pages on push to main (keepmyproof.com); native EAS builds and store release remain manual" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

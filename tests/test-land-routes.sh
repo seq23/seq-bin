@@ -38,6 +38,7 @@ mercedes-creator-dashboard|npm run deploy:production
 topbarz-voting|npm run deploy:production
 creator-studios|self
 aplayer-mode|scripts/deploy-api-production.sh && scripts/deploy-web-production.sh
+keepmyproof|self
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block

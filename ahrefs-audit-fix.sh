@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/ahrefs-audit-fix.sh
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/ahrefs-audit-fix.sh

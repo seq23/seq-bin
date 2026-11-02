@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/youtube-comment-watch.sh
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/youtube-comment-watch.sh

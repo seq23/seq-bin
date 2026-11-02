@@ -1,1 +1,1 @@
-/Users/sequoiataylor/GitHub/boss-os/scripts/ops/kdp-publish.sh
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/kdp-publish.sh

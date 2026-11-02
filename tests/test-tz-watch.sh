@@ -29,7 +29,14 @@ exit 0
 SH
 chmod +x "$T/stubbin/launchctl"
 # Off macOS, a plutil on PATH is not Apple's (the Ubuntu runner has one that rejects every plist).
-[ "$(uname)" = Darwin ] || { printf '#!/bin/bash\n[ "$1" = -lint ] && shift; for f; do python3 -c "import plistlib,sys; plistlib.load(open(sys.argv[1],\"rb\"))" "$f" || exit 1; done\n' > "$T/stubbin/plutil"; chmod +x "$T/stubbin/plutil"; }
+if [ "$(uname)" != Darwin ]; then
+  cat > "$T/stubbin/plutil" <<'SH'
+#!/bin/bash
+[ "$1" = -lint ] && shift
+for f; do python3 -c 'import plistlib, sys; plistlib.load(open(sys.argv[1], "rb"))' "$f" || exit 1; done
+SH
+  chmod +x "$T/stubbin/plutil"
+fi
 
 # Stub Open Loops intake: one JSON line per post.
 cat > "$T/stub.mjs" <<'JS'
@@ -52,7 +59,7 @@ run(){ TZ_WATCH_ZONE="$1" TZ_WATCH_INSTALLERS="${2:-$INSTALL}" "$BIN/tz-watch.sh
 hour(){ tr -d '\n\t ' < "$T/agents/$1.plist" | grep -o '<key>Hour</key><integer>[0-9]*</integer>' | head -1 | grep -o '[0-9]*</integer>' | grep -o '[0-9]*'; }
 boots(){ grep -c bootstrap "$T/lctl.log" 2>/dev/null || echo 0; }
 
-run America/New_York || bad "first Eastern run exited non-zero: $(tail -3 "$T/out")"
+run America/New_York || bad "first Eastern run exited non-zero: $(tail -8 "$T/out")"
 [ "$(hour com.seq.drive-backup)" = 2 ] || bad "Eastern: 01:40 Central should be Hour 2, got $(hour com.seq.drive-backup)"
 [ "$(hour com.seq.ci-sweep)" = 9 ] || bad "Eastern: Monday 08:00 Central should be Hour 9, got $(hour com.seq.ci-sweep)"
 [ "$(cat "$T/state/seq-bin")" = "America/New_York 1" ] || bad "zone not recorded: $(cat "$T/state/seq-bin" 2>/dev/null)"

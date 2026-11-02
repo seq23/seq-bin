@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Keeps every Central-time job in step when the Mac changes zone: fires when /etc/localtime changes,
+     at login, and hourly as a safety net (a DST date a non-US zone does not share). tz-watch.sh is a
+     no-op in well under a second when nothing moved. No StartCalendarInterval: nothing to shift. -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.tz-watch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/tz-watch.sh</string>
+	</array>
+	<key>WatchPaths</key>
+	<array>
+		<string>/etc/localtime</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/tz-watch.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/tz-watch.log</string>
+</dict>
+</plist>

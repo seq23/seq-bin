@@ -526,7 +526,9 @@ for dir in "$GITHUB_DIR"/*/; do
     # pushed/scheduled lane has newer runs, and a cancel inside the window stays RED.
     if [ "$concl" = "cancelled" ] \
        && [ "$(printf '%s' "$latest" | jq -r '.createdAt')" \< "$SINCE" ]; then
-      ev="$(gh api "repos/$OWNER/$repo/actions/runs/$rid" -q '.event' 2>/dev/null || true)"
+      # An unreadable event leaves ev empty, so the run stays RED: fail closed.
+      ev=""
+      if ! ev="$(gh api "repos/$OWNER/$repo/actions/runs/$rid" -q '.event' 2>/dev/null)"; then ev=""; fi
       if [ "$ev" = "workflow_dispatch" ]; then
         printf 'QUIET\t%s\t%s\t%s|%s|CANCELLED_MANUAL\tnewest run #%s was a manual dispatch cancelled before %s — not a failure; the next manual run clears it\n' \
           "$repo" "$flow" "$repo" "$flow" "$rid" "$SINCE"

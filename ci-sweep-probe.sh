@@ -194,9 +194,11 @@ for dir in "$GITHUB_DIR"/*/; do
   # earlier. Retry; if GitHub still will not answer, the repo is unproven (PENDING).
   wf=""
   for attempt in 1 2 3; do
-    if wf="$(gh workflow list --repo "$OWNER/$repo" --json name,state,path 2>/dev/null)" \
-       && printf '%s' "$wf" | jq -e 'type=="array"' >/dev/null 2>&1; then
-      break
+    # gh exits 0 with EMPTY stdout (not '[]') for a repo that has no workflows; only
+    # a non-zero exit is a failed read.
+    if wf="$(gh workflow list --repo "$OWNER/$repo" --json name,state,path 2>/dev/null)"; then
+      [ -n "$wf" ] || wf='[]'
+      printf '%s' "$wf" | jq -e 'type=="array"' >/dev/null 2>&1 && break
     fi
     wf=""; sleep $(( attempt * 5 ))
   done

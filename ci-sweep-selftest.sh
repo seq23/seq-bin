@@ -324,6 +324,12 @@ if gh auth status >/dev/null 2>&1; then
   if printf '%s\n' "$out" | grep -q $'^SILENT\t'; then bad "a failed workflow listing was reported as SILENT"
   elif printf '%s\n' "$out" | grep -q 'WORKFLOWS_UNREADABLE'; then ok "a failed workflow listing is PENDING (WORKFLOWS_UNREADABLE), not SILENT"; examined_fixtures=$((examined_fixtures+1))
   else bad "failed workflow listing produced neither SILENT nor WORKFLOWS_UNREADABLE — the probe examined nothing"; fi
+  # ...and a repo that really has no workflows (gh: exit 0, empty stdout) is still read
+  # as no workflows (NOCI/SILENT), never as an unreadable PENDING.
+  out="$(CI_SWEEP_ONLY_REPOS=spry-vc "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  if printf '%s\n' "$out" | grep -q 'WORKFLOWS_UNREADABLE'; then bad "a repo with no workflows was reported unreadable"
+  elif printf '%s\n' "$out" | grep -qE $'^(NOCI|SILENT)\tspry-vc\t'; then ok "a repo with no workflows is still NOCI/SILENT"; examined_fixtures=$((examined_fixtures+1))
+  else bad "spry-vc produced no lane — the probe examined nothing"; fi
 fi
 
 echo "=== 7c. Boss OS grid tasks reach the sweep as lanes ====================="

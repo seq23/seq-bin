@@ -383,7 +383,8 @@ echo "=== 8. the docs cannot drift from the code ============================"
 # 10:00-22:00 window with 6 attempts, the plist ran :07/:37 inside 05:00-08:00, and no
 # `claude -p` named a model, so the sweep ran on whatever /model she last chose. Four
 # descriptions, none true. The schedule is read from the versioned plist and every
-# description must match it; the model pin is read from the invocation itself.
+# description must match it; the engine (ai-run --role worker, since 3 Nov 2026) is read
+# from the invocation itself.
 #
 # 24 Sep 2026: moved 06:00 -> 07:00 and added exactly one retry, at 08:00, when
 # the 07:00 run does not end green (her instruction). Two plists now carry the
@@ -540,20 +541,26 @@ for f in "$README" "$SWEEP" "$RETRY_SCRIPT" "$RESUME_SCRIPT"; do
   fi
 done
 
-# Every `claude -p` in the wrapper carries --model opus; zero invocations is a failure.
-inv="$(grep -nE '^[^#]*"\$CLAUDE" -p' "$SWEEP")"
+# OWNER RULING 3 Nov 2026: Codex does the fixing, Claude is only the brains. Every round runs
+# `"$AI_RUN" --role worker`; zero such invocations is a failure, and no `claude -p` may remain.
+inv="$(grep -nE '^[^#]*"\$AI_RUN" --role' "$SWEEP")"
 n_inv="$(printf '%s\n' "$inv" | grep -c .)"
 consistency=$((consistency+1))
 if [ "$n_inv" -eq 0 ]; then
-  bad "no \`\"\$CLAUDE\" -p\` invocation found in ci-sweep.sh — the model check examined nothing"
-elif printf '%s\n' "$inv" | grep -v -- '--model opus' | grep -q .; then
-  bad "a claude -p invocation lacks --model opus: $(printf '%s\n' "$inv" | grep -v -- '--model opus' | head -1)"
+  bad "no \`\"\$AI_RUN\" --role\` invocation found in ci-sweep.sh — the engine check examined nothing"
+elif printf '%s\n' "$inv" | grep -v -- '--role worker' | grep -q .; then
+  bad "a round runs ai-run in a role other than worker: $(printf '%s\n' "$inv" | grep -v -- '--role worker' | head -1)"
 else
-  ok "all $n_inv claude -p invocation(s) carry --model opus"
+  ok "all $n_inv round invocation(s) run ai-run --role worker (Codex)"
 fi
 consistency=$((consistency+1))
-if grep -q 'model: "opus"' "$PROMPT"; then ok "the prompt requires every fixing agent to be spawned with model \"opus\""
-else bad "the prompt does not require model \"opus\" for fixing agents"; fi
+claude_inv="$(grep -nE '^[^#]*(claude|\$CLAUDE[A-Z_]*"?) +(-p|--print)' "$SWEEP")"
+if [ -z "$claude_inv" ]; then ok "ci-sweep.sh never runs claude -p itself"
+else bad "ci-sweep.sh still runs claude -p: $(printf '%s' "$claude_inv" | head -1)"; fi
+consistency=$((consistency+1))
+if grep -q 'NEVER hand the work to Claude' "$PROMPT" && ! grep -q 'model: "opus"' "$PROMPT"; then
+  ok "the prompt tells Codex to work the repos itself and never hand the work to Claude"
+else bad "the prompt still briefs Claude-style opus agents, or lacks the never-Claude line"; fi
 # The removed tick/window/retry machinery must not survive as dead config or prose.
 consistency=$((consistency+1))
 stale="$(grep -nE 'CI_SWEEP_TICK([^_]|$)|WINDOW_START_H|WINDOW_END_H|GREEN_TTL|RETRY_GAP|MAX_ATTEMPTS|SLOW_GAP|GATE_ONLY|SWEEP-ATTEMPTS-EXHAUSTED|MAX_ROUNDS' \

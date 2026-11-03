@@ -31,8 +31,8 @@
 #                                                 (or the next Mon/Fri 08:00 run) applies
 #   the 240-awake-minute ceiling nearly spent  -> no-op, same
 #   otherwise                                  -> exec ci-sweep.sh as a RESUME of that run:
-#                                                 same ledger row, same stop-by, same claude
-#                                                 session, the awake time already spent
+#                                                 same ledger row, same stop-by, its merges
+#                                                 and dispatches, the awake time already spent
 #                                                 counted against the hard kill.
 # The resumed run REPLACES the interrupted row (fifth column resumed-by=<run-id>), so the
 # 09:00 gate still counts one attempt and keeps its own one-retry rule.

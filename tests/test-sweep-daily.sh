@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci-sweep.sh end to end, against fakes: THE DAILY DESIGN (23 Sep 2026).
 #
-# WHAT IS UNDER TEST — the wrapper's OWN decisions, with claude, gh, land, the
+# WHAT IS UNDER TEST — the wrapper's OWN decisions, with codex, claude, gh, land, the
 # keychain, the probe and the audit all faked:
 #   · a PARKED repo does not end the run; the other red repos are still worked;
 #   · rounds continue while they make progress (past two), and the run is STUCK
@@ -9,13 +9,14 @@
 #   · the sweep merges only PRs whose checks IT read green — `land` where land
 #     knows the repo, `gh pr merge --merge --delete-branch` otherwise — never a
 #     rejected, suspect, parked-repo or failing-check PR;
-#   · every `claude -p` carries `--model opus`;
+#   · every round is ONE `codex exec` through the real ~/bin/ai-run --role worker, and claude is
+#     never run (owner ruling 3 Nov 2026); a Codex usage limit ends the run UNFINISHED, no claude;
 #   · every run ends with one banner; issues only for parked/stuck repos and
 #     run-level faults; a green run files nothing; nothing schedules a retry;
 #   · sleep is INTERRUPTED (not HUNG) and RESUMED on wake as the same attempt, a stall is HUNG, a TEMPFIX rejects the PR
 #     without merging or closing it;
 #   · a state/pause-until date on or after today (America/Chicago) is a PAUSED row,
-#     exit 0 and NOTHING run (no lock, no probe, no gh, no claude); an expired date
+#     exit 0 and NOTHING run (no lock, no probe, no gh, no codex); an expired date
 #     is deleted and the run proceeds; a malformed one is a warning and a normal run.
 # The notifier is the real one in dry mode, so the summary and issues are proven on
 # the real text.
@@ -43,7 +44,7 @@ while IFS= read -r v; do unset "$v"; done < <(compgen -e | grep '^CI_SWEEP_')
 
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SWEEP="$ROOT/ci-sweep.sh"
-for f in "$SWEEP" "$ROOT/ci-sweep-notify.sh" "$ROOT/ci-sweep-stream.py"; do
+for f in "$SWEEP" "$ROOT/ci-sweep-notify.sh" "$ROOT/ai-run"; do
   [ -x "$f" ] || { echo "NAMED STOP [MISSING] $f is missing or not executable."; exit 3; }
 done
 command -v timeout >/dev/null 2>&1 || { echo "NAMED STOP [NO_TIMEOUT] GNU timeout is required by the sweep."; exit 3; }
@@ -52,7 +53,7 @@ TMP="$(mktemp -d)"
 # Scenario 8 backgrounds a real sweep run and only reaps it on the success
 # path (after the sentry announces itself and `wait "$SWEEP_PID"` returns).
 # When the sentry never announces itself, the `bad` branch used to fall
-# through with the sweep (and its timeout/claude children) still running —
+# through with the sweep (and its timeout/codex children) still running —
 # confirmed 2026-09-24: four such orphans survived this trap's own `rm -rf`,
 # still holding a path into the now-deleted $TMP. pkill by that unique path
 # before removing it, so no run of this file can outlive it regardless of
@@ -67,21 +68,31 @@ absent() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$what"; el
 
 # --- the fakes ---------------------------------------------------------------
 BIN="$TMP/bin"; mkdir -p "$BIN" "$TMP/github/gamma/.git" "$TMP/logs"
-cat > "$BIN/claude" <<'SH'
+# The real ai-run runs this fake codex. Every `exec` invocation's argv (minus the prompt, its last
+# argument) is logged: each must be `exec -s workspace-write` with network on.
+cat > "$BIN/codex" <<'SH'
 #!/bin/bash
-# Every invocation's argv (minus the prompt) is logged: --model opus must be on each.
-args=""; skip=""
-for a in "$@"; do [ -n "$skip" ] && { skip=""; continue; }; [ "$a" = "-p" ] && { args="$args -p <prompt>"; skip=1; continue; }; args="$args $a"; done
-echo "$args" >> "$FAKE_DIR/claude-args.log"
-case "$(cat "$FAKE_DIR/claude-mode" 2>/dev/null)" in
+[ "$1 $2" = "login status" ] && { echo "Logged in using ChatGPT"; exit 0; }
+args=("$@"); unset 'args[${#args[@]}-1]'
+echo "${args[*]}" >> "$FAKE_DIR/codex-args.log"
+# Like the real `codex exec`, echo the prompt into the output first (its templates included).
+echo "user"; printf '%s\n' "${!#}"; echo "codex"
+case "$(cat "$FAKE_DIR/codex-mode" 2>/dev/null)" in
   sleep) echo "round started; working..."; sleep 300 ;;
+  limit) echo "ERROR: You've hit your usage limit. Try again at 3:05 PM."; exit 1 ;;
+  silent) echo "I looked around." ;;
   park-beta)
     echo "Both repos worked. alpha#7 is green and merged; checks all pass."
     echo "CI-SWEEP-PARKED: beta — rotate the BETA_API_KEY secret in the repo settings"
     echo "CI-SWEEP-PARKED: zeta — not a repo this round had"
     echo "CI-SWEEP-COMPLETE: fixed" ;;
-  *) echo "Dispatched one opus agent; opened a PR; all checks green, merged."; echo "CI-SWEEP-COMPLETE: fixed" ;;
+  *) echo "Worked the red repo; opened a PR; all checks green, merged."; echo "CI-SWEEP-COMPLETE: fixed" ;;
 esac
+SH
+# Claude must never run a round. Any call is recorded and fails the run's assertions.
+cat > "$BIN/claude" <<'SH'
+#!/bin/bash
+echo "$*" >> "$FAKE_DIR/claude-calls.log"; exit 1
 SH
 cat > "$BIN/gh" <<'SH'
 #!/bin/bash
@@ -155,30 +166,32 @@ case "$(cat "$FAKE_DIR/audit-mode")" in
 esac
 SH
 chmod +x "$BIN"/* "$TMP/probe.sh" "$TMP/audit.sh" "$TMP/land"
-echo "trivial prompt" > "$TMP/prompt.md"
+# The prompt carries its sentinel and park templates INDENTED, as ci-sweep-prompt.md does; the fake
+# codex echoes it, so a loose grep would read the template as the round's own line.
+printf 'trivial prompt\n\n    CI-SWEEP-PARKED: <repo> — <the one decision>\n    CI-SWEEP-COMPLETE: fixed\n' > "$TMP/prompt.md"
 export FAKE_DIR="$TMP"
 LOGS="$TMP/logs"; LEDGER="$LOGS/state/outcomes.tsv"; CARRY="$LOGS/state/carryover-next.md"
 
 # setup <probe-seq...> — fresh fakes for one scenario
 setup() {
   printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called" "$TMP/merge-refuse" "$TMP/no-dispatch" "$TMP/land-unverified"
-  : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/claude-args.log"; : > "$TMP/land-calls.log"
-  echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/claude-mode"
+  : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/codex-args.log"; : > "$TMP/claude-calls.log"; : > "$TMP/land-calls.log"
+  echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/codex-mode"
 }
 sweep() { # sweep <run-id> [ENV=VAL ...]
   local id="$1"; shift
   env PATH="$BIN:$PATH" CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROMPT="$TMP/prompt.md" \
       CI_SWEEP_PROBE_BIN="$TMP/probe.sh" CI_SWEEP_AUDIT_BIN="$TMP/audit.sh" \
       CI_SWEEP_NOTIFY_BIN="$ROOT/ci-sweep-notify.sh" CI_SWEEP_NOTIFY_DRY=1 \
-      CI_SWEEP_STREAM_BIN="$ROOT/ci-sweep-stream.py" CI_SWEEP_CLAUDE_BIN="$BIN/claude" \
+      CI_SWEEP_AI_RUN_BIN="$ROOT/ai-run" AI_RUN_LOG="$TMP/ai-run.log" \
       CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_POLL_SECS=1 CI_SWEEP_LAND_AGAIN_SECS=0 \
       CI_SWEEP_GITHUB_DIR="$TMP/github" CI_SWEEP_RUN_ID="$id" \
       "$@" "$SWEEP" >"$TMP/$id.out" 2>&1
 }
 last_verdict() { awk -F'\t' 'END{print $3}' "$LEDGER" 2>/dev/null; }
 last_line() { tail -1 "$LOGS/$1.log"; }
-rounds() { grep -c . "$TMP/claude-args.log"; }
-every_claude_is_opus() { [ "$(rounds)" -gt 0 ] && ! grep -v -- '--model opus' "$TMP/claude-args.log" | grep -q .; }
+rounds() { grep -c . "$TMP/codex-args.log"; }
+every_round_is_codex() { [ "$(rounds)" -gt 0 ] && ! grep -v -- '^exec -s workspace-write .*network_access=true' "$TMP/codex-args.log" | grep -q . && [ ! -s "$TMP/claude-calls.log" ]; }
 no_retry_anywhere() { ! grep -qiE 'RETRY:|next attempt is|ESCALATING' "$LOGS/$1.log"; }
 
 # =============================================================================
@@ -190,7 +203,7 @@ check "the ledger records MAIN-GREEN" [ "$(last_verdict)" = "MAIN-GREEN" ]
 check "the LAST line is the verdict plus the summary: $(last_line run-green)" grep -q '^CI-SWEEP-COMPLETE: MAIN-GREEN — green (2): alpha, beta' <<<"$(last_line run-green)"
 check "a banner is sent even when green" grep -q '^\[notify:dry\] banner: "CI sweep: every main is green"' "$LOGS/run-green.log"
 absent "a green run files no issue" grep -q 'notify:dry\] issue' "$LOGS/run-green.log"
-check "no claude round was run" [ "$(rounds)" -eq 0 ]
+check "no round was run" [ "$(rounds)" -eq 0 ]
 check "no carryover is left" [ ! -f "$CARRY" ]
 check "the log names the next Mon/Fri 08:00 run, nothing more today" grep -q 'next run: 08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
 check "nothing schedules a retry" no_retry_anywhere run-green
@@ -198,7 +211,7 @@ check "nothing schedules a retry" no_retry_anywhere run-green
 # =============================================================================
 echo "=== 2. a PARKED repo does not end the run; the others are fixed and merged ==="
 setup red-ab red-a2b red-b
-echo park-beta > "$TMP/claude-mode"
+echo park-beta > "$TMP/codex-mode"
 printf 'alpha\t7\tfix/a\tFix alpha\nalpha\t9\tfix/a2\tClaims green\nbeta\t8\tfix/b\tHalf of beta\n' > "$TMP/open-prs"
 echo pass > "$TMP/checks-alpha-7"; printf 'pass\nfail\n' > "$TMP/checks-alpha-9"; echo pass > "$TMP/checks-beta-8"
 sweep run-park; rc=$?
@@ -221,8 +234,8 @@ check "summary: parked beta with the decision needed" grep -q 'parked on her dec
 check "an issue is filed on beta naming the decision" grep -q 'notify:dry\] issue -> seq23/beta' "$LOGS/run-park.log"
 check "…titled as parked" grep -q 'title: \[ci-sweep\] beta is parked on your decision' "$LOGS/run-park.log"
 absent "no issue is filed on alpha (it is fixed)" grep -q 'notify:dry\] issue -> seq23/alpha' "$LOGS/run-park.log"
-check "every claude -p ran with --model opus" every_claude_is_opus
-check "round 2 resumed round 1's session" grep -q -- '--resume' <(sed -n 2p "$TMP/claude-args.log")
+check "every round was codex exec -s workspace-write with network, and claude never ran" every_round_is_codex
+check "round 2 is a fresh run briefed that it starts fresh" grep -q 'You start fresh: this brief is the record' "$LOGS/run-park.d/carryover-2.md"
 check "the next run's carryover names the parked repo" grep -q 'beta: rotate the BETA_API_KEY' "$CARRY"
 check "nothing schedules a retry" no_retry_anywhere run-park
 absent "nothing was ever closed" grep -q '^pr close' "$TMP/gh-calls.log"
@@ -308,7 +321,7 @@ absent "…so no note went on that PR" grep -q '^pr comment 9' "$TMP/gh-calls.lo
 # =============================================================================
 echo "=== 8. SLEEP IS NOT A HANG: a heartbeat gap is INTERRUPTED and parks its PR ==="
 setup red-a1
-echo sleep > "$TMP/claude-mode"
+echo sleep > "$TMP/codex-mode"
 printf 'alpha\t11\twork/half-done\tHalf a fix\n' > "$TMP/open-prs"; echo pass > "$TMP/checks-alpha-11"
 sweep run-sleep CI_SWEEP_TICK_SECS=1 CI_SWEEP_SLEEP_GAP_SECS=3 CI_SWEEP_HARD_KILL_MIN=45 &
 SWEEP_PID=$!
@@ -335,18 +348,18 @@ fi
 echo "=== 8a. RESUME ON WAKE: the interrupted run picks up where it left off ==="
 # Owner, 12 Oct 2026: "just pick up where it left off if I close the lid and then re-open".
 # The REAL ci-sweep-resume-on-wake.sh reads scenario 8's INTERRUPTED row and execs the sweep:
-# same ledger row (one attempt for the 09:00 gate), same stop-by, same claude session.
+# same ledger row (one attempt for the 09:00 gate), same stop-by, its merges and dispatches.
 if [ "$(last_verdict)" != "MAIN-RED-INTERRUPTED" ]; then
   bad "scenario 8 left no INTERRUPTED row; the resume cannot be exercised"
 else
   setup red-a1 green
-  SLEEP_SESSION="$(cat "$LOGS/run-sleep.d/session-id" 2>/dev/null)"
   rows_before="$(grep -c . "$LEDGER")"
   # sweep() puts its extra args before $SWEEP, so the resume script runs and $SWEEP is its ignored argument.
   sweep run-resumed CI_SWEEP_BIN="$SWEEP" CI_SWEEP_TICK_SECS=1 "$ROOT/ci-sweep-resume-on-wake.sh"
   check "the resume script decided to resume run-sleep" grep -q 'RESUMING run-sleep (attempt run-sleep) after sleep' "$LOGS/resume.log"
   check "the resumed run says what it continues" grep -q 'RESUMED after sleep: continues run-sleep (ledger row run-sleep)' "$LOGS/run-resumed.log"
-  check "round 1 resumed the interrupted run's claude session ($SLEEP_SESSION)" grep -q -- "--resume $SLEEP_SESSION" <(sed -n 1p "$TMP/claude-args.log")
+  check "the resumed run carries the interrupted run's merges and dispatches" grep -q 'resumed from run-sleep: [0-9]* merge(s) and [0-9]* dispatch(es) carried' "$LOGS/run-resumed.log"
+  check "…and round 1 is briefed that it resumes run-sleep" grep -q 'RESUMED AFTER SLEEP' "$LOGS/run-resumed.d/carryover-1.md"
   check "the same stop-by time as the interrupted run" [ "$(grep -oE 'stop by [0-9:]+' "$LOGS/run-sleep.log" | tail -1)" = "$(grep -oE 'stop by [0-9:]+' "$LOGS/run-resumed.log" | tail -1)" ]
   check "the awake time already spent is carried against the hard kill" [ "$(cat "$LOGS/run-resumed.d/prior-awake-secs")" -gt 0 ]
   check "ONE attempt: the ledger has the same number of rows" [ "$(grep -c . "$LEDGER")" -eq "$rows_before" ]
@@ -359,7 +372,7 @@ fi
 # =============================================================================
 echo "=== 9. a stall with NO gap is HUNG, on awake time ==="
 setup red-a1
-echo sleep > "$TMP/claude-mode"
+echo sleep > "$TMP/codex-mode"
 sweep run-hang CI_SWEEP_TICK_SECS=1 CI_SWEEP_HARD_KILL_MIN=1; rc=$?
 check "the run ends as MAIN-RED-HUNG (rc=$rc)" [ "$rc" -eq 21 ]
 check "no sleep gap was recorded" [ ! -f "$LOGS/run-hang.d/interrupted" ]
@@ -389,9 +402,9 @@ out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEE
         CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
 check "dry run exits 0 (rc=$rc)" [ "$rc" -eq 0 ]
 check "it names the schedule and the model" grep -q 'Mon+Fri 08:00 CT.*retry at 09:00' <<<"$out"
-check "…the model" grep -q 'model: every claude -p runs --model opus' <<<"$out"
+check "…the engine" grep -q 'engine: every round runs ai-run --role worker (Codex)' <<<"$out"
 check "…and the repos round 1 would dispatch to, with their merge route" grep -q 'beta — build — merge route: gh' <<<"$out"
-check "no claude was invoked" [ "$(rounds)" -eq 0 ]
+check "no round was run" [ "$(rounds)" -eq 0 ]
 check "no lock was taken" [ ! -d "$LOGS/.lock" ]
 
 # =============================================================================
@@ -431,7 +444,7 @@ printf 'alpha\t7\tfix/a\tFix alpha\n' > "$TMP/open-prs"; echo pass > "$TMP/check
 sweep run-unv-dispatch; rc=$?
 check "the lane was named FIXED-UNVERIFIED after the merge" grep -q 'lane(s) FIXED-UNVERIFIED' "$LOGS/run-unv-dispatch.log"
 check "…and dispatched on main with gh workflow run" grep -q '^workflow run build --repo seq23/alpha --ref main' "$TMP/gh-calls.log"
-check "…not re-worked: exactly one claude round" [ "$(rounds)" -eq 1 ]
+check "…not re-worked: exactly one round" [ "$(rounds)" -eq 1 ]
 check "green only once the lane's new run is green (rc=$rc)" [ "$(last_verdict)" = "MAIN-GREEN" ]
 
 echo "=== 16. a FIXED-UNVERIFIED lane that cannot be dispatched ends MAIN-RED-UNFINISHED, never green ==="
@@ -473,7 +486,7 @@ check "nothing is carried after a green run" [ ! -f "$UPR" ]
 
 echo "=== 18. a supervisor killed from outside still writes its ledger row and ends every child ==="
 setup red-a1
-echo sleep > "$TMP/claude-mode"
+echo sleep > "$TMP/codex-mode"
 sweep run-killed CI_SWEEP_TICK_SECS=1 &
 KPID=$!
 for _ in $(seq 1 40); do [ -s "$LOGS/run-killed.d/sentry-pid" ] && grep -q 'round 1' "$LOGS/run-killed.log" 2>/dev/null && break; sleep 0.5; done
@@ -485,7 +498,7 @@ else
   check "the ledger has the run as MAIN-RED-KILLED (rc=$rc)" [ "$(awk -F'\t' '$4=="run-killed"{print $3}' "$LEDGER")" = "MAIN-RED-KILLED" ]
   check "the lock was released" [ ! -d "$LOGS/.lock" ]
   sleep 1
-  absent "no claude round survives its supervisor" pgrep -f "$BIN/claude"
+  absent "no codex round survives its supervisor" pgrep -f "$BIN/codex"
 fi
 
 echo "=== 19. a run that died without a row gets one when the next run reclaims its lock ==="
@@ -510,7 +523,7 @@ check "the ledger records PAUSED" [ "$(last_verdict)" = "PAUSED" ]
 check "…as a 4-column row for today with this run's id" grep -qE "^[0-9]+	$(date +%Y-%m-%d)	PAUSED	run-paused\$" "$LEDGER"
 check "…and it is the day's only row" [ "$(grep -c . "$LEDGER")" -eq 1 ]
 check "the log says so: $(last_line run-paused)" grep -q "CI sweep paused until $TODAY_CT by owner's instruction; nothing run" "$LOGS/run-paused.log"
-check "no claude was invoked" [ "$(rounds)" -eq 0 ]
+check "no round was run" [ "$(rounds)" -eq 0 ]
 check "the probe was never called" [ ! -f "$TMP/probe-n" ]
 check "gh was never called" [ ! -s "$TMP/gh-calls.log" ]
 check "no lock was taken" [ ! -d "$LOGS/.lock" ]
@@ -522,7 +535,7 @@ echo "2999-12-31" > "$PAUSE"
 sweep run-paused-future; rc=$?
 check "paused (rc=$rc)" [ "$rc" -eq 0 ]
 check "…PAUSED in the ledger" [ "$(last_verdict)" = "PAUSED" ]
-check "…no claude round" [ "$(rounds)" -eq 0 ]
+check "…no round" [ "$(rounds)" -eq 0 ]
 out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROBE_BIN="$TMP/probe.sh" \
         CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
 check "the dry run names the pause (rc=$rc)" grep -q '^\[dry-run\] PAUSED until 2999-12-31' <<<"$out"
@@ -559,7 +572,7 @@ else
   setup red-a1 green; echo "$TODAY_CT" > "$PAUSE"
   SWEEP_SAVE="$SWEEP"; SWEEP="$TMP/no-pause.sh"; sweep run-no-pause; SWEEP="$SWEEP_SAVE"
   if [ "$(rounds)" -ge 1 ] && [ "$(last_verdict)" != "PAUSED" ]; then
-    ok "PROVEN   without the check the paused day runs a claude round ($(rounds)) and ends $(last_verdict), so section 20 reads the check"
+    ok "PROVEN   without the check the paused day runs a round ($(rounds)) and ends $(last_verdict), so section 20 reads the check"
   else
     bad "NO TEETH — section 20's zero rounds did not depend on the pause check (rounds=$(rounds), verdict=$(last_verdict))"
   fi
@@ -583,6 +596,22 @@ else
   fi
 fi
 
+
+echo "=== 21. a Codex usage limit: the run WAITS (UNFINISHED, named), never handed to Claude ==="
+rm -f "$CARRY"; setup red-a1
+echo limit > "$TMP/codex-mode"
+sweep run-codex-limit; rc=$?
+check "the run ends MAIN-RED-UNFINISHED (rc=$rc)" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
+check "…after exactly one round (the limit stops the loop)" [ "$(rounds)" -eq 1 ]
+check "the log names CODEX_LIMIT with its reset time" grep -q 'NAMED STOP \[CODEX_LIMIT\] resets 3:05 PM' "$LOGS/run-codex-limit.log"
+check "claude was never run" [ ! -s "$TMP/claude-calls.log" ]
+check "the next run is carried the unfinished list" grep -q '^## UNFINISHED — resume from here' "$CARRY"
+rm -f "$CARRY"
+setup red-a1; echo silent > "$TMP/codex-mode"
+sweep run-codex-silent
+check "a round that printed no sentinel is incomplete, even though its echoed prompt holds the template" grep -q 'NAMED STOP \[SWEEP_ROUND_DID_NOT_COMPLETE\] round 1' "$LOGS/run-codex-silent.log"
+absent "…and the template's park line is not read as a park" grep -q 'PARKED <repo>\|ignoring CI-SWEEP-PARKED for <repo>' "$LOGS/run-codex-silent.log"
+rm -f "$CARRY"
 
 echo "=== negative proof: without the DONE check, the open green fix PR reads MAIN-GREEN ==="
 sed 's/^    OPEN_PRS="\$(unfinished_prs)"$/    OPEN_PRS=""/' "$SWEEP" > "$TMP/no-done.sh"; chmod +x "$TMP/no-done.sh"
@@ -620,5 +649,5 @@ if [ "$failed" -gt 0 ]; then
   for f in "$TMP"/*.out; do [ -s "$f" ] && { echo "--- $(basename "$f")"; tail -20 "$f"; }; done
   exit 1
 fi
-echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, pins opus, reports every morning, never retries or closes a PR, and a pause-until date stops it at zero cost until it resumes itself."
+echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, runs every round on Codex (never Claude), reports every morning, never retries or closes a PR, and a pause-until date stops it at zero cost until it resumes itself."
 exit 0

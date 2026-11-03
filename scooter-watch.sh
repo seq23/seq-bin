@@ -23,7 +23,10 @@
 # nothing is tailed. This source's window starts at the first tick of this script (state/
 # mailbox_since), not 24 Sep, so the first digest does not re-list three weeks of old threads.
 #
-# TAIL AGENT: one bounded, headless `claude -p --model opus` per event (scooter-watch-run-fix.sh,
+# TAIL AGENT: one bounded, headless Codex worker per event — `~/bin/ai-run --role worker` (owner ruling
+# 3 Nov 2026: Codex does the hands-on work, Claude only the brains). A Codex usage limit WAITS: the
+# events go back on the queue, dispatch pauses for an hour at a time, she is told once, and the work
+# is never handed to Claude (scooter-watch-run-fix.sh,
 # 2 h watchdog cap in scooter-watch-watchdog.sh). Scope = every work_card the email opened or
 # steered, whichever employee owns it (Porter, Percy, Walker, ...). A genuine partner-decision
 # wait is correct; friction (erroring, retrying without progress, re-asking for something already
@@ -270,17 +273,20 @@ PENDING="$(printf '%s\n' "$OS_ROWS" | awk -F'\t' -v tailed="$TAILED_FILE" 'BEGIN
 PENDING_COUNT="$(printf '%s' "$PENDING" | grep -c . || true)"
 
 FIXLOCK="$STATE_DIR/.fix-lock"
+CODEX_WAIT="$STATE_DIR/codex-wait"   # written by scooter-watch-run-fix.sh when Codex hit its limit
 FIX_CAP_SECONDS=7200   # 2h hard kill (watchdog) — a single event's diagnosis+fix; detached from this tick.
 
 if [ "$PENDING_COUNT" -gt 0 ] && [ -d "$FIXLOCK" ] && kill -0 "$(cat "$FIXLOCK/pid" 2>/dev/null)" 2>/dev/null; then
   RUNNING_SINCE="$(cat "$FIXLOCK/started_at" 2>/dev/null)"
   echo "[watch] $PENDING_COUNT email(s) waiting for a tail, but an agent is in flight (since $RUNNING_SINCE) — they stay queued for the next free tick"
   [ "$NEW_OS" -gt 0 ] && banner "Partner emailed the OS ($NEW_OS new)" "A tail agent is already working a prior email — this one queues" "Ping"
+elif [ "$PENDING_COUNT" -gt 0 ] && [ -f "$CODEX_WAIT" ] && [ $(( $(date +%s) - $(stat -f %m "$CODEX_WAIT" 2>/dev/null || stat -c %Y "$CODEX_WAIT") )) -lt 3600 ]; then
+  echo "[watch] $PENDING_COUNT email(s) queued: Codex is waiting — $(cat "$CODEX_WAIT"). Retried hourly; never handed to Claude."
 elif [ "$PENDING_COUNT" -gt 0 ]; then
   rm -rf "$FIXLOCK"
-  CLAUDE="${SCOOTER_WATCH_CLAUDE_BIN:-$(command -v claude || echo /opt/homebrew/bin/claude)}"
+  AI_RUN="${SCOOTER_WATCH_AI_RUN_BIN:-$HOME_DIR/bin/ai-run}"
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-  TAIL_LOG="$STATE_DIR/tail-$STAMP.jsonl"
+  TAIL_LOG="$STATE_DIR/tail-$STAMP.log"
   PROMPT_FILE="$STATE_DIR/tail-$STAMP.prompt.txt"
   REPORT_FILE="$STATE_DIR/report-$STAMP.txt"
   EVENT_LINES="$(printf '%s\n' "$PENDING" | awk -F'\t' '{printf "  - %s | from %s | message_id %s | work_card_id %s | subject: %s\n", $2, $3, $1, ($5==""?"(none recorded)":$5), $4}')"
@@ -364,8 +370,9 @@ PROMPT
   mkdir -p "$FIXLOCK"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$FIXLOCK/started_at"
   printf '%s\n' "$PENDING" | awk -F'\t' '{print $1}' >> "$TAILED_FILE"
+  printf '%s\n' "$PENDING" | awk -F'\t' '{print $1}' > "$FIXLOCK/ids"   # un-tailed again if Codex has to wait
 
-  nohup "$HOME_DIR/bin/scooter-watch-run-fix.sh" "$PROMPT_FILE" "$TAIL_LOG" "$FIXLOCK" "$CLAUDE" "$REPORT_FILE" "$SUBJECT_LINE" \
+  nohup "$HOME_DIR/bin/scooter-watch-run-fix.sh" "$PROMPT_FILE" "$TAIL_LOG" "$FIXLOCK" "$AI_RUN" "$REPORT_FILE" "$SUBJECT_LINE" \
     </dev/null >/dev/null 2>&1 &
   AGENT_PID=$!
   echo "$AGENT_PID" > "$FIXLOCK/pid"

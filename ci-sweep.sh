@@ -23,15 +23,16 @@
 #     there is nothing to do) starts this script again with CI_SWEEP_RESUME_FROM set.
 #     The resumed run keeps the SAME stop-by time (STARTED_AT is the original's), the
 #     SAME 240-awake-minute ceiling (the awake minutes already spent are subtracted),
-#     the SAME claude session (round 1 runs `--resume`, falling back to a fresh one on
-#     a dead handle exactly as later rounds do), the PRs it merged and the lanes it
-#     dispatched — and the SAME ledger row (CI_SWEEP_LEDGER_ID: the row is replaced,
+#     the PRs it merged and the lanes it dispatched — and the SAME ledger row (CI_SWEEP_LEDGER_ID: the row is replaced,
 #     with a fifth column resumed-by=<run-id>), so the 09:00 retry still sees one
 #     attempt. Only INTERRUPTED resumes: KILLED is a signal from outside, HUNG is a
 #     fault, and a run that cannot finish by stop-by stays INTERRUPTED for the retry.
-#   · Round 1 probes main across the fleet and dispatches one fixing agent per red
-#     repo, in parallel. Every `claude -p` is pinned to `--model opus`; the prompt
-#     makes every fixing agent opus too. Nothing follows whatever /model last said.
+#   · CODEX DOES THE FIXING (owner ruling, 3 Nov 2026: "after today we need to default
+#     OpenAI and Claude just be the brains"). Every round is ONE `~/bin/ai-run --role
+#     worker --cwd ~/GitHub --network` run (codex exec on her ChatGPT plan), which works
+#     the red repos one at a time. A Codex usage limit (ai-run exit 75, CODEX_LIMIT)
+#     ends the run MAIN-RED-UNFINISHED: the work waits for the reset, it is never
+#     handed to Claude. No round ever runs `claude -p`.
 #   · A repo only she can unblock (a credential, an account setting, a genuine
 #     product decision) is PARKED — for that repo only. The run keeps going on
 #     every other red repo.
@@ -39,7 +40,8 @@
 #     progress: a red lane went away, or a red lane's failure signature changed (a
 #     new root cause surfaced). The run stops when the fleet is green, after
 #     NO_PROGRESS_LIMIT consecutive rounds that moved nothing (STUCK), or at the
-#     3h30 budget. Rounds share one claude session.
+#     3h30 budget. Each round is a fresh Codex run, briefed by the carryover (the
+#     red lanes from GitHub, what merged, what is parked) — the brief is the memory.
 #   · THE SWEEP MERGES ITS OWN FIXES, after the audit, once `gh pr checks` — read
 #     here, never an agent's report — says every check passed: `land <pr>` where
 #     land knows the repo (it deploys too), otherwise `gh pr merge --merge
@@ -51,7 +53,7 @@
 #   · PAUSE (owner's instruction, 26 Sep 2026 — low on credits): write YYYY-MM-DD
 #     (the last paused day, inclusive) to ~/Library/Logs/ci-sweep/state/pause-until;
 #     the sweep logs PAUSED rows and resumes itself the day after. While paused
-#     nothing runs — no lock, no probe, no claude, no agent — and the 09:00 gate
+#     nothing runs — no lock, no probe, no Codex, no agent — and the 09:00 gate
 #     reads PAUSED as terminal, so a paused day has one row and no retry.
 #
 # WHY ONCE A DAY. The 30-minute tick, window gate, 25-minute retry, 6-attempt
@@ -81,7 +83,7 @@ set -uo pipefail
 HARD_KILL_MIN="${CI_SWEEP_HARD_KILL_MIN:-240}"
 DEADLINE_MIN="${CI_SWEEP_DEADLINE_MIN:-210}"
 
-# Per-round caps on the claude invocation, each clamped to what is left. Round 1
+# Per-round caps on each round's worker run, each clamped to what is left. Round 1
 # is larger because it does the discovery and the first dispatch.
 ROUND1_CAP_MIN="${CI_SWEEP_ROUND1_CAP_MIN:-60}"
 ROUNDN_CAP_MIN="${CI_SWEEP_ROUNDN_CAP_MIN:-40}"
@@ -110,7 +112,7 @@ TICK_SECS="${CI_SWEEP_TICK_SECS:-20}"
 PROMPT_FILE="${CI_SWEEP_PROMPT:-$HOME/bin/ci-sweep-prompt.md}"
 PROBE="${CI_SWEEP_PROBE_BIN:-$HOME/bin/ci-sweep-probe.sh}"
 AUDIT="${CI_SWEEP_AUDIT_BIN:-$HOME/bin/ci-sweep-audit.sh}"
-STREAM="${CI_SWEEP_STREAM_BIN:-$HOME/bin/ci-sweep-stream.py}"
+AI_RUN="${CI_SWEEP_AI_RUN_BIN:-$HOME/bin/ai-run}"
 LAND="${CI_SWEEP_LAND_BIN:-$HOME/bin/land}"
 LOG_DIR="${CI_SWEEP_LOG_DIR:-$HOME/Library/Logs/ci-sweep}"
 LOCK="$LOG_DIR/.lock"
@@ -180,7 +182,7 @@ record_outcome() {
 # $STATE_DIR/pause-until holds one YYYY-MM-DD, the LAST paused day, inclusive. Today
 # (America/Chicago) on or before it: one PAUSED ledger row, one log line, exit 0, and
 # nothing else — this sits before the lock, the supervisor, the probe and every
-# `claude`, so a paused day spends nothing. The day after, the file is deleted here
+# a worker, so a paused day spends nothing. The day after, the file is deleted here
 # and the run proceeds: the sweep resumes itself. A malformed date is a warning and
 # a normal run, never a pause — a bad file may not silence the sweep forever. The
 # dry run only reports what the scheduled run would do. Checked once, by the entry
@@ -749,10 +751,10 @@ probe_main() {
 # CI_SWEEP_DRY_RUN=1 ~/bin/ci-sweep.sh : reads the fleet through the real probe
 # (read-only), then prints the budget, the model, which repos round 1 would
 # dispatch to, which are parked from yesterday, and the merge route per repo. No
-# lock, no claude, no PR, no merge, no notification.
+# lock, no AI run, no PR, no merge, no notification.
 if [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
   echo "[dry-run] schedule: Mon+Fri 08:00 CT (launchd com.seq.ci-sweep), one retry at 09:00 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Mon/Fri run"
-  echo "[dry-run] model: every claude -p runs --model opus; every fixing agent is spawned with model opus"
+  echo "[dry-run] engine: every round runs ai-run --role worker (Codex); a Codex usage limit waits for the reset, never Claude"
   echo "[dry-run] budget: ${DEADLINE_MIN} min convergence, hard kill at ${HARD_KILL_MIN} awake min; round 1 cap ${ROUND1_CAP_MIN} min, later rounds ${ROUNDN_CAP_MIN} min"
   echo "[dry-run] rounds continue while a round makes progress; STUCK after ${NO_PROGRESS_LIMIT} consecutive rounds without"
   [ -x "$PROBE" ] || { echo "[dry-run] NAMED STOP [NO_PROBE] $PROBE"; exit 13; }
@@ -959,8 +961,7 @@ fi
 # =============================================================================
 
 # --- preconditions, each a named stop rather than a crash --------------------
-CLAUDE="${CI_SWEEP_CLAUDE_BIN:-$(command -v claude || echo /opt/homebrew/bin/claude)}"
-[ -x "$CLAUDE" ] || { say "NAMED STOP [NO_CLAUDE_CLI] not executable: $CLAUDE"; exit 4; }
+[ -x "$AI_RUN" ] || { say "NAMED STOP [NO_AI_RUN] not executable: $AI_RUN — every round runs through it."; exit 4; }
 [ -f "$PROMPT_FILE" ] || { say "NAMED STOP [NO_PROMPT_FILE] missing: $PROMPT_FILE"; exit 5; }
 if ! command -v gh >/dev/null 2>&1; then
   say "NAMED STOP [NO_GH_CLI] the sweep cannot read GitHub without gh."; exit 6
@@ -968,19 +969,12 @@ fi
 if ! gh auth status >/dev/null 2>&1; then
   say "NAMED STOP [GH_NOT_AUTHENTICATED] run: gh auth login"; exit 7
 fi
-# Claude's credentials live in the login keychain, which is locked at the login window.
-if ! security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1; then
-  say "NAMED STOP [CLAUDE_NOT_AUTHENTICATED] cannot read Claude credentials from the login keychain."
-  say "  Either the Mac is at the login window with the keychain locked, or the session was signed out."
-  say "  Fix: log in to macOS, then run 'claude' once and confirm it starts."
-  exit 10
-fi
 [ -x "$PROBE" ] || { say "NAMED STOP [NO_PROBE] $PROBE missing — nothing could verify main is green."; exit 13; }
 [ -x "$AUDIT" ] || { say "NAMED STOP [NO_AUDITOR] $AUDIT is missing, so nothing would verify that the fixes were real."; exit 12; }
 cd "$GITHUB_DIR" || { say "NAMED STOP [NO_GITHUB_DIR] $GITHUB_DIR"; exit 8; }
 
 say "=== CI sweep starting ($STAMP) ==="
-say "claude: $CLAUDE (--model opus)"
+say "worker: $AI_RUN --role worker (Codex; a usage limit waits for the reset, never Claude)"
 say "budget: ${DEADLINE_MIN} min (stop by $(at_time "$DEADLINE_AT" +%H:%M)); rounds while progress, STUCK after ${NO_PROGRESS_LIMIT} without"
 say "work dir: $WORK"
 
@@ -999,14 +993,13 @@ if [ -s "$UNFINISHED_PRS" ]; then
   say "resuming $(grep -c . "$WORK/carried-prs.tsv") fix PR(s) the previous run left open: $(awk -F'\t' '{printf "%s#%s ", $1, $2}' "$WORK/carried-prs.tsv")"
 fi
 # RESUME ON WAKE: what the interrupted attempt already did is this run's — its merges
-# (reported as fixed), the lanes it dispatched (not dispatched twice) and its claude
-# session (round 1 resumes it). Its open PRs arrive above, through unfinished-prs.tsv.
+# (reported as fixed) and the lanes it dispatched (not dispatched twice). Its open PRs
+# arrive above, through unfinished-prs.tsv; round 1 is briefed that it is a resume.
 if [ -n "$RESUME_FROM" ]; then
   PREV_WORK="$LOG_DIR/$RESUME_FROM.d"
   cat "$PREV_WORK/merged.tsv" >> "$WORK/merged.tsv" 2>/dev/null
   cat "$PREV_WORK/dispatched.tsv" >> "$WORK/dispatched.tsv" 2>/dev/null
-  cp "$PREV_WORK/session-id" "$WORK/resumed-session-id" 2>/dev/null
-  say "resumed from $RESUME_FROM: $(grep -c . "$WORK/merged.tsv") merge(s) and $(grep -c . "$WORK/dispatched.tsv") dispatch(es) carried; claude session $(cat "$WORK/resumed-session-id" 2>/dev/null || echo 'none — round 1 starts fresh')"
+  say "resumed from $RESUME_FROM: $(grep -c . "$WORK/merged.tsv") merge(s) and $(grep -c . "$WORK/dispatched.tsv") dispatch(es) carried"
 fi
 PROGRESS_LOG="$WORK/progress.tsv"; : > "$PROGRESS_LOG"
 
@@ -1125,7 +1118,7 @@ while :; do
   round=$((round + 1))
   CARRY="$WORK/carryover-$round.md"
   if [ "$round" -eq 1 ]; then
-    CAP="$(capped "$ROUND1_CAP_MIN")"; BG=$((50 * 60000))
+    CAP="$(capped "$ROUND1_CAP_MIN")"
     : > "$CARRY"
     # Yesterday's carryover (and any OWNER DECISIONS appended to it) is round 1's
     # opening brief. Consumed here so it cannot be fed twice.
@@ -1142,7 +1135,7 @@ while :; do
       } >> "$CARRY"
     fi
   else
-    CAP="$(capped "$ROUNDN_CAP_MIN")"; BG=$((32 * 60000))
+    CAP="$(capped "$ROUNDN_CAP_MIN")"
     {
       echo "# ROUND $round — THE PREVIOUS ROUND DID NOT REACH GREEN"
       echo
@@ -1151,10 +1144,10 @@ while :; do
       echo "Rounds continue while they make progress; ${NO_PROGRESS_LIMIT} rounds in a row that change"
       echo "nothing end the run as STUCK. About $(remaining_min) minutes of budget are left."
       echo
-      echo "## Prefer the agent you already have"
-      echo "This is the SAME session, so ListAgents still shows the agents from earlier rounds."
-      echo "**SendMessage the existing agent for a repo** — one agent per repo, across rounds."
-      echo "Any new agent is spawned with model \"opus\"."
+      echo "## You start fresh: this brief is the record"
+      echo "Each round is a new run with no memory of the last. What the previous round left is"
+      echo "on GitHub: read each repo's open fix PRs and branches before you start, and continue"
+      echo "them rather than opening a second PR for the same lane."
       echo
       echo "## Red lanes to work, straight from GitHub (not from anyone's report)"
       echo '```'
@@ -1210,68 +1203,47 @@ while :; do
     } >> "$CARRY"
   fi
 
-  # Background-agent ceiling strictly inside the round cap: 50 of 60, 32 of 40. A
-  # ceiling larger than the cap means the round is always killed from outside while
-  # the agent still believes it has time. Never zero: unattended means bounded.
-  export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CI_SWEEP_BG_CEILING_MS:-$BG}"
-
   ROUND_LOG="$WORK/round-$round.log"
   ROUND_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  say "=== round $round — cap ${CAP} min, bg ceiling ${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS}ms, ${LEFT} min left in budget ==="
+  say "=== round $round — cap ${CAP} min, ${LEFT} min left in budget ==="
 
   ROUND_PROMPT="$(cat "$PROMPT_FILE")"
   [ -s "$CARRY" ] && ROUND_PROMPT="$ROUND_PROMPT
 
 $(cat "$CARRY")"
 
-  # Streamed (ci-sweep-stream.py) so a capped round still leaves a line-by-line log
-  # (2026-09-20: two capped rounds, two 0-byte logs). MODEL PINNED: --model opus on
-  # every invocation — without it the sweep silently ran on whatever /model she last
-  # chose. ci-sweep-selftest.sh fails if any `"$CLAUDE" -p` line lacks it.
-  # GNU timeout puts itself in a NEW process group, so killing the body's group
-  # never reached a round's claude (26 Sep 2026: a killed sweep would leave its
-  # round running). Its pid is its pgid; it is recorded for the supervisor to end.
-  run_round() {
-    { timeout --signal=TERM --kill-after=60 "${CAP}m" \
-        "$CLAUDE" -p "$ROUND_PROMPT" --model opus "$@" \
-        --output-format stream-json --verbose \
-        --dangerously-skip-permissions < /dev/null 2>&1 &
-      tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; rc=$?; forget_pgid "$tpid"; exit "$rc"; } | python3 "$STREAM" > "$ROUND_LOG"
-  }
-  if [ "$round" -eq 1 ] && [ ! -s "$WORK/resumed-session-id" ]; then
-    SESSION_ID="$( (uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())') | tr 'A-Z' 'a-z')"
-    echo "$SESSION_ID" > "$WORK/session-id"
-    run_round --session-id "$SESSION_ID"
-    RC=$?
-  else
-    # Round 1 of a run RESUMED after sleep continues the interrupted attempt's session
-    # through the same path (and the same dead-handle fallback) as every later round.
-    [ "$round" -eq 1 ] && cp "$WORK/resumed-session-id" "$WORK/session-id"
-    SESSION_ID="$(cat "$WORK/session-id" 2>/dev/null || true)"
-    ROUND_T0=$(date +%s)
-    run_round --resume "$SESSION_ID"
-    RC=$?
-    # A resume that dies IMMEDIATELY (no tool call, within RESUME_DEAD_SECS) is a
-    # broken handle: fall back to a fresh session, briefed by the carryover. A capped
-    # round (124/137) is never a broken handle (2026-09-20).
-    RESUME_DEAD_SECS="${CI_SWEEP_RESUME_DEAD_SECS:-90}"
-    ELAPSED=$(( $(date +%s) - ROUND_T0 ))
-    if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$RC" -ne 137 ] && [ "$ELAPSED" -le "$RESUME_DEAD_SECS" ] && ! grep -q '^\[tool\]\|^\[result' "$ROUND_LOG"; then
-      say "resume of session $SESSION_ID died after ${ELAPSED}s with no tool call (rc=$RC); retrying this round as a fresh session."
-      run_round
-      RC=$?
-    fi
-  fi
+  # ONE CODEX RUN PER ROUND, through ai-run (owner ruling 3 Nov 2026). --out writes the
+  # round log line by line as it happens, so a capped round still leaves its transcript
+  # (2026-09-20: two capped rounds once left two 0-byte logs). GNU timeout puts itself in
+  # a NEW process group, so killing the body's group never reached a round (26 Sep 2026);
+  # its pid is its pgid, recorded for the supervisor to end. ci-sweep-selftest.sh fails if
+  # a round runs anything but `"$AI_RUN" --role worker`.
+  : > "$ROUND_LOG"
+  timeout --signal=TERM --kill-after=60 "${CAP}m" \
+    "$AI_RUN" --role worker --cwd "$GITHUB_DIR" --network --out "$ROUND_LOG" -- "$ROUND_PROMPT" \
+    < /dev/null > /dev/null 2>&1 &
+  tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; RC=$?; forget_pgid "$tpid"
   cat "$ROUND_LOG" >> "$RUN_LOG"
-  say "=== round $round: claude exited rc=$RC ==="
+  say "=== round $round: worker exited rc=$RC ==="
+
+  # --- Codex could not work: the run WAITS, it is never handed to Claude -------------
+  # 75 = CODEX_LIMIT (usage limit; resets at the time ai-run names), 69 = CODEX_UNAVAILABLE.
+  if [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; then
+    STOPLINE="$(grep -o 'NAMED STOP \[CODEX_[A-Z_]*\].*' "$ROUND_LOG" | tail -1)"
+    say "${STOPLINE:-NAMED STOP [CODEX_UNAVAILABLE] ai-run exited $RC}"
+    park_open_prs "Codex stopped before this PR's fix was verified (${STOPLINE:-ai-run exit $RC})"
+    finish "MAIN-RED-UNFINISHED" "$RED_COUNT lane(s) still red in [$RED_REPOS]; round $round could not run: ${STOPLINE:-ai-run exit $RC}. The work waits for Codex (never Claude); the unfinished list is in the carryover and the next run resumes from it."
+  fi
 
   # --- Rule 0, per round: prove this round reached its end ------------------------
   [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ] && say "round $round hit its ${CAP}-minute cap and was terminated."
-  if ! grep -q "CI-SWEEP-COMPLETE:" "$ROUND_LOG"; then
+  # Line-start only: `codex exec` echoes its prompt into the log, and the prompt's templates are
+  # indented (ahrefs-audit-fix, 28 Oct 2026: a loose grep matched the echo of a run that did nothing).
+  if ! grep -qE '^CI-SWEEP-COMPLETE:' "$ROUND_LOG"; then
     say "NAMED STOP [SWEEP_ROUND_DID_NOT_COMPLETE] round $round emitted no sentinel — its silence is not evidence of anything."
     echo "round $round: NO SENTINEL" >> "$WORK/incomplete-rounds"
   else
-    say "round $round sentinel: $(grep -o 'CI-SWEEP-COMPLETE:.*' "$ROUND_LOG" | tail -1)"
+    say "round $round sentinel: $(grep -oE '^CI-SWEEP-COMPLETE:.*' "$ROUND_LOG" | tail -1)"
   fi
 
   # --- parked repos: named per repo, the run continues ---------------------------
@@ -1290,7 +1262,7 @@ $(cat "$CARRY")"
     awk -F'\t' -v r="$prepo" '$1==r{f=1} END{exit !f}' "$WORK/parked-repos.tsv" && continue
     printf '%s\t%s\n' "$prepo" "$preason" >> "$WORK/parked-repos.tsv"
     say "PARKED $prepo on her decision: $preason — the run continues on every other red repo"
-  done < <(grep -E '^[[:space:]]*CI-SWEEP-PARKED:' "$ROUND_LOG" 2>/dev/null)
+  done < <(grep -E '^CI-SWEEP-PARKED:' "$ROUND_LOG" 2>/dev/null)   # line start: not the prompt's echoed template
 
   # --- the guard on the guard, every round ---------------------------------------
   # Scoped to this round's window and the repos it was dispatched to (2026-09-21:
@@ -1302,7 +1274,7 @@ $(cat "$CARRY")"
   case "$AUDIT_RC" in
     0) say "round $round audit: no weakening patterns in anything it touched" ;;
     2) say "round $round audit: no pull request was touched in this round's window — not a clean bill of health"
-       grep -q "CI-SWEEP-COMPLETE: fixed" "$ROUND_LOG" && say "  ^ AND the round reported 'fixed'. It claims work that left no pull request behind." ;;
+       grep -qE '^CI-SWEEP-COMPLETE: fixed' "$ROUND_LOG" && say "  ^ AND the round reported 'fixed'. It claims work that left no pull request behind." ;;
     3) # SUSPECT, not FATAL (2026-09-09: an `if: always()` on a reporting step aborted
        # a whole morning). An unproven finding costs the PR it names — which the
        # merge pass leaves open for a person — not the run.

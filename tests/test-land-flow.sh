@@ -13,7 +13,7 @@
 #    timeout" refused a green PR as "not green". Pinned here: an empty head never merges; a
 #    transient error is retried and lands; a persistent one exits 75 saying "could not verify
 #    (network)", never "not green"; a real failing check is still exit 1 "not green".
-# 3. --PROMOTE RACED THE REPO'S OWN PROMOTE.YML (sheila-creator-dashboard, 26 Sep 2026): both would
+# 3. --PROMOTE RACED THE REPO'S OWN PROMOTE.YML (build-first-fixture, 26 Sep 2026): both would
 #    build + migrate + deploy the same sha. Pinned here: an in-flight promote run is waited for
 #    (bounded, cancelled + NAMED STOP past the ceiling) and production is read after it; a repo
 #    without promote.yml is untouched; --run-e2e waits for the promote run its green e2e fires.
@@ -37,6 +37,13 @@ LAND="${LAND_UNDER_TEST:-$HERE/../land}"
 [ -f "$LAND" ] || { echo "FAIL: no land at $LAND"; exit 1; }
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
+# The build-first shape (staging on every land, a named e2e workflow, promote.yml on a green e2e)
+# has no live repo since both creator dashboards retired (3 Nov 2026), so these cases run against a
+# copy of land carrying one fixture route of exactly that shape, inserted before the catch-all.
+FIXTURE_ROUTE='  build-first-fixture) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://build-first-fixture.invalid/healthz" ;;'
+awk -v r="$FIXTURE_ROUTE" '/^  \*\) die "\$NAME has no deploy route recorded/ && !done { print r; done=1 } { print }' "$LAND" > "$W/land-with-fixture"
+grep -q '^  build-first-fixture)' "$W/land-with-fixture" || { echo "FAIL: could not add the build-first fixture route"; exit 1; }
+LAND="$W/land-with-fixture"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 HEADSHA="1111111111111111111111111111111111111111"
 MERGESHA="2222222222222222222222222222222222222222"
@@ -292,13 +299,13 @@ check "a single read, no retry of a real answer" [ "$(grep -c '^pr checks' "$FAK
 check "not merged" eval '! merge_called'
 
 # --- land --promote against a repo that promotes itself (promote.yml) — 26 Sep 2026 ----------------
-# sheila-creator-dashboard's promote.yml deploys production on a green e2e. A person's `land --promote`
+# build-first-fixture's promote.yml deploys production on a green e2e. A person's `land --promote`
 # in the same minutes must WAIT for that run and read production after it, never build + migrate +
 # deploy the same sha on top of it.
 echo "=== 11. a promote.yml run is in flight: land waits for it, then finds nothing to promote ==="
-fixture sheila-creator-dashboard promote
-: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_promote sheila-creator-dashboard
+fixture build-first-fixture promote
+: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
+run_promote build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
 check "says it is waiting on run 777" has "promote run 777 in flight for ${ORIGIN_MAIN:0:7}"
 check "waited to the run's conclusion (3 reads: two pending, one success)" [ "$(grep -c '^run view 777' "$FAKE/calls")" -eq 3 ]
@@ -308,9 +315,9 @@ check "no deploy ran on top of it" [ ! -f "$FAKE/npm-ran" ]
 check "the run was not cancelled" [ ! -f "$FAKE/promote-cancelled" ]
 
 echo "=== 12. no promote.yml on origin/main: nothing to wait for, promotes as before ==="
-fixture sheila-creator-dashboard
-: > "$FAKE/promote-inflight"; mkdir "$W/sheila-creator-dashboard/node_modules"   # a stray in-flight row is irrelevant: no promote.yml
-run_promote sheila-creator-dashboard
+fixture build-first-fixture
+: > "$FAKE/promote-inflight"; mkdir "$W/build-first-fixture/node_modules"   # a stray in-flight row is irrelevant: no promote.yml
+run_promote build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
 check "silent about promote runs" eval '! has "promote run"'
 check "never listed promote.yml runs" eval '! grep -q "^run list --workflow promote.yml" "$FAKE/calls"'
@@ -318,18 +325,18 @@ check "deployed from a worktree at origin/main" grep -qx "head=$ORIGIN_MAIN" "$F
 check "PROMOTED" has "PROMOTED"
 
 echo "=== 13. the promote run never finishes: cancelled at the ceiling, NAMED STOP, nothing deployed ==="
-fixture sheila-creator-dashboard promote
-: > "$FAKE/promote-inflight"; : > "$FAKE/promote-hang"; echo 0 > "$FAKE/promote-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-LAND_WAIT_FLOOR_SECS=0 run_promote sheila-creator-dashboard
+fixture build-first-fixture promote
+: > "$FAKE/promote-inflight"; : > "$FAKE/promote-hang"; echo 0 > "$FAKE/promote-last"; mkdir "$W/build-first-fixture/node_modules"
+LAND_WAIT_FLOOR_SECS=0 run_promote build-first-fixture
 check "rc 1" [ "$RC" -eq 1 ]
 check "NAMED STOP names the run" has "NAMED STOP [PROMOTE_RUN_PAST_CEILING] promote.yml run 777"
 check "the hung run was cancelled" [ -f "$FAKE/promote-cancelled" ]
 check "nothing deployed on top of it" [ ! -f "$FAKE/npm-ran" ]
 
 echo "=== 14. --run-e2e: the green e2e fires promote.yml; land waits for THAT run, does not double-deploy ==="
-fixture sheila-creator-dashboard promote
-: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_promote sheila-creator-dashboard --run-e2e
+fixture build-first-fixture promote
+: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
+run_promote build-first-fixture --run-e2e
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
 check "waited for the in-flight e2e run 800, did not dispatch" [ "$(grep -c '^run view 800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
 check "then waited for the promote run it triggered" has "promote run 777 in flight"
@@ -342,11 +349,11 @@ check "no deploy from this side" [ ! -f "$FAKE/npm-ran" ]
 # main's head and ship production only on green; a small one ships on the fast check (cases 16+).
 # Here the merge commit IS main's head and the merge sha the fake answers is ORIGIN_MAIN.
 echo "=== 15. a large PR (300 lines): land runs the suite, waits, and the repo's promote.yml ships it ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
 printf '250 50 3\nworker/domain/sync.ts\napp/pages/Calendar.tsx\nshared/types.ts\n' > "$FAKE/pr-size"
-: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+: > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says why: 300 lines ≥ 200" has "LARGE CHANGE — 300 lines changed (+250/-50) ≥ 200"
 check "staging deployed first, from the merge sha" grep -qx "head=$ORIGIN_MAIN" "$FAKE/npm-ran"
@@ -360,10 +367,10 @@ check "never WAITING" eval '! has "WAITING"'
 # production IS deployed, from the merge sha, with the reason printed and recorded — and only when
 # the suite is not known red (16c-16e), which the old rule never had to ask.
 echo "=== 16. a small PR (12 lines, worker only), no e2e verdict on main yet: ships on the fast check ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says why it shipped: small, with the numbers" has "SMALL CHANGE — $SMALL_REASON"
 check "…and what the suite's last verdict was" has "(last e2e verdict on main: none)"
@@ -375,23 +382,23 @@ check "the production deployment is recorded at that sha" grep -q "\"ref\":\"$OR
 check "…carrying the reason" grep -qF "land #7, $SMALL_REASON" "$FAKE/deploy-record"
 check "LANDED — staging and production" has "LANDED — #7 is merged, main is green, staging and production run ${ORIGIN_MAIN:0:7}"
 check "the plan line says production, not waiting" has "${ORIGIN_MAIN:0:7}: staging production (e2e on this sha: no completed run)"
-check "…but --run-e2e forces the suite for any size" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land sheila-creator-dashboard --run-e2e; has "LARGE CHANGE — --run-e2e given" && has "LANDED" && grep -q "^run view 800" "$FAKE/calls"'
+check "…but --run-e2e forces the suite for any size" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land build-first-fixture --run-e2e; has "LARGE CHANGE — --run-e2e given" && has "LANDED" && grep -q "^run view 800" "$FAKE/calls"'
 
 echo "=== 16b. a small PR, the last e2e verdict on main is green: ships ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; printf 'success\t790\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; printf 'success\t790\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says the last verdict was success" has "(last e2e verdict on main: success)"
 check "production deployed" eval 'npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
 check "the suite was not run" suite_untouched
 
 echo "=== 16c. a small PR, but e2e is KNOWN RED on main (no green run after it): NAMED STOP, production untouched ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; printf 'failure\t791\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; printf 'failure\t791\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 1" [ "$RC" -eq 1 ]
 check "NAMED STOP names the red run and its sha" has "NAMED STOP [E2E_KNOWN_RED] e2e is known red on main: run 791 on ${ORIGIN_MAIN:0:7} ended failure and no green run is newer"
 check "…and the way out" has "Fix main, then: land 7 --run-e2e"
@@ -400,13 +407,13 @@ check "staging ran, production never" [ "$(npm_log)" = "run deploy:staging head=
 check "no production deployment was recorded" [ ! -f "$FAKE/deploy-record" ]
 check "the suite was not run behind her back" suite_untouched
 check "never 'SMALL CHANGE — … shipped'" eval '! has "SMALL CHANGE —"'
-check "the way out works: --run-e2e runs the suite and ships on green" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land sheila-creator-dashboard --run-e2e; [ "$RC" -eq 0 ] && has "LARGE CHANGE — --run-e2e given" && has "LANDED"'
+check "the way out works: --run-e2e runs the suite and ships on green" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land build-first-fixture --run-e2e; [ "$RC" -eq 0 ] && has "LARGE CHANGE — --run-e2e given" && has "LANDED"'
 
 echo "=== 16d. a small PR, the e2e history cannot be read: exit 75 'could not verify', never 'not red' ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; echo tls > "$FAKE/e2e-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; echo tls > "$FAKE/e2e-last"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "exit 75" [ "$RC" -eq 75 ]
 check "says could not verify (network), and what" has "could not verify (network)" && has "the e2e history on main could not be read"
 check "says the PR is merged and production untouched" has "#7 IS MERGED, staging runs ${ORIGIN_MAIN:0:7}; production untouched"
@@ -415,35 +422,35 @@ check "production never deployed" [ "$(npm_log)" = "run deploy:staging head=$ORI
 check "does NOT call it a known-red stop" eval '! has "E2E_KNOWN_RED"'
 
 echo "=== 16e. a small PR whose own sha has a RED e2e run, though main's last verdict is green: blocked ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; echo failure > "$FAKE/e2e-on-sha"; printf 'success\t795\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; echo failure > "$FAKE/e2e-on-sha"; printf 'success\t795\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 1" [ "$RC" -eq 1 ]
 check "NAMED STOP names this sha's red run" has "NAMED STOP [E2E_KNOWN_RED] e2e is known red on main: on ${ORIGIN_MAIN:0:7} ended failure"
 check "production never deployed" [ "$(npm_log)" = "run deploy:staging head=$ORIGIN_MAIN" ]
 
 echo "=== 16f. e2e already green on the exact sha: production at once, the size is never asked ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-echo success > "$FAKE/e2e-on-sha"; mkdir "$W/sheila-creator-dashboard/node_modules"   # no pr-size: a size read would fail
-run_land sheila-creator-dashboard
+echo success > "$FAKE/e2e-on-sha"; mkdir "$W/build-first-fixture/node_modules"   # no pr-size: a size read would fail
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "production deployed" eval 'npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
 check "no size read, no verdict read" eval '! grep -q additions "$FAKE/calls" && ! grep -q "conclusion,headSha,databaseId,status" "$FAKE/calls"'
 check "not called a small change" eval '! has "SMALL CHANGE"'
 
 echo "=== 17. a large PR whose suite goes RED: NAMED STOP, staging deployed, production untouched ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
 printf '3 0 1\nmigrations/0042_posts.sql\n' > "$FAKE/pr-size"
-: > "$FAKE/e2e-pending"; : > "$FAKE/e2e-red"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+: > "$FAKE/e2e-pending"; : > "$FAKE/e2e-red"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 1" [ "$RC" -eq 1 ]
 check "a migration is large at any size" has "LARGE CHANGE — touches the schema or the browser-test contract (migrations/0042_posts.sql)"
 check "NAMED STOP names the run and the reason" has "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 800"
 check "staging ran once, production never" [ "$(grep -c 'head=' "$FAKE/npm-ran")" -eq 1 ] && ! has "production <-"
-check "the size read that cannot be answered is large, fail closed" eval 'rm -f "$FAKE/pr-size" "$FAKE/e2e-red" "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land sheila-creator-dashboard; has "LARGE CHANGE — PR size unreadable" && has "LANDED"'
+check "the size read that cannot be answered is large, fail closed" eval 'rm -f "$FAKE/pr-size" "$FAKE/e2e-red" "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land build-first-fixture; has "LARGE CHANGE — PR size unreadable" && has "LANDED"'
 MERGESHA="2222222222222222222222222222222222222222"; export MERGESHA
 
 # --- every change production has not seen is judged, not only this PR -------------------------------
@@ -459,18 +466,18 @@ history() {
   mkdir -p "$W/$1/node_modules"
 }
 echo "=== 18. production recorded one small commit back: the range is judged, none large, ships ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; git -C "$W/pusher" rev-parse HEAD~1 > "$FAKE/prod-state"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; git -C "$W/pusher" rev-parse HEAD~1 > "$FAKE/prod-state"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says it judged what production has not seen" has "judged all 1 change(s) main carries past production $(cut -c1-7 "$FAKE/prod-state"): none is large"
 check "shipped as a small change" has "SMALL CHANGE — $SMALL_REASON" && npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"
 
 echo "=== 18b. a small PR behind a LARGE commit production has never seen: land runs the suite ==="
-history sheila-creator-dashboard
+history build-first-fixture
 small_pr; echo "$BASE" > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"
-run_land sheila-creator-dashboard
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "names the unproven commit and why it is large" has "LARGE CHANGE — main carries ${BIG:0:7} (big unproven change) past production ${BASE:0:7}, large and not yet proven: 250 lines changed (+250/-0) ≥ 200"
 check "the suite ran (run 800 adopted)" grep -q '^run view 800' "$FAKE/calls"
@@ -478,23 +485,23 @@ check "never shipped as a small change" eval '! has "SMALL CHANGE"'
 check "LANDED on the green suite" has "LANDED"
 
 echo "=== 18c. what production runs cannot be read: large, fail closed — the suite runs ==="
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; echo tls > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
-run_land sheila-creator-dashboard
+small_pr; echo tls > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
+run_land build-first-fixture
 check "says so" has "LARGE CHANGE — what production runs could not be read"
 check "the suite ran" grep -q '^run view 800' "$FAKE/calls"
 check "never shipped as a small change" eval '! has "SMALL CHANGE"'
 
 echo "=== 18d. landing a merged PR that production already runs (or has passed): nothing deployed, never backwards ==="
-history sheila-creator-dashboard
+history build-first-fixture
 small_pr; : > "$FAKE/merged"; echo "$ORIGIN_MAIN" > "$FAKE/prod-state"
-run_land sheila-creator-dashboard
+run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says production already runs it" has "production already runs ${ORIGIN_MAIN:0:7} (GitHub Deployment record). Nothing to deploy."
 check "no deploy of any kind" [ -z "$(npm_log)" ]
 MERGESHA="$FIRST"; export MERGESHA; rm -f "$FAKE/calls"
-run_land sheila-creator-dashboard
+run_land build-first-fixture
 check "an OLDER merged PR: production is ahead of it, and stays there" has "production already runs ${ORIGIN_MAIN:0:7}, which contains ${FIRST:0:7}"
 check "…no deploy, no roll back" [ -z "$(npm_log)" ] && [ ! -f "$FAKE/deploy-record" ]
 
@@ -587,18 +594,18 @@ MERGESHA="2222222222222222222222222222222222222222"; export MERGESHA
 echo "=== negative proof: a land that ships past a known-red suite ==="
 BROKEN="$W/land-past-red"; sed 's/^    success|none) printf/    success|none|failure) printf/' "$LAND" > "$BROKEN"
 check "the broken copy differs" eval '! cmp -s "$LAND" "$BROKEN"'
-fixture sheila-creator-dashboard promote
+fixture build-first-fixture promote
 MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
-small_pr; printf 'failure\t791\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/sheila-creator-dashboard/node_modules"
-LAND="$BROKEN" run_land sheila-creator-dashboard
+small_pr; printf 'failure\t791\t%s\n' "$ORIGIN_MAIN" > "$FAKE/e2e-last"; mkdir "$W/build-first-fixture/node_modules"
+LAND="$BROKEN" run_land build-first-fixture
 check "the broken land deployed production over a red suite (16c catches it)" eval 'npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
 
 echo "=== negative proof: a land that judges only the PR lets an unproven large commit ride out ==="
 BROKEN="$W/land-pr-only"; sed '/REASON="\$(unshipped_large_reason /d' "$LAND" > "$BROKEN"
 check "the broken copy differs" eval '! cmp -s "$LAND" "$BROKEN"'
-history sheila-creator-dashboard
+history build-first-fixture
 small_pr; echo "$BASE" > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"
-LAND="$BROKEN" run_land sheila-creator-dashboard
+LAND="$BROKEN" run_land build-first-fixture
 check "the broken land shipped the 250-line change as 'small', suite never run (18b catches it)" eval 'has "SMALL CHANGE" && ! grep -q "^run view 800" "$FAKE/calls" && npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
 
 echo "=== negative proof: a boss-os route that does not name deploy.yml races it ==="
@@ -633,9 +640,9 @@ check "the broken land dies rc 1 on the 5xx (this harness catches it)" [ "$RC" -
 echo "=== negative proof: a land that does not wait for the promote run deploys on top of it ==="
 BROKEN="$W/land-no-wait"; sed '/^  promote_wait_inflight$/d' "$LAND" > "$BROKEN"
 check "the broken copy differs (the wait call was removed)" eval '! cmp -s "$LAND" "$BROKEN"'
-fixture sheila-creator-dashboard promote
-: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/sheila-creator-dashboard/node_modules"
-LAND="$BROKEN" run_promote sheila-creator-dashboard
+fixture build-first-fixture promote
+: > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
+LAND="$BROKEN" run_promote build-first-fixture
 check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
 check "…without ever watching run 777" eval '! grep -q "^run view 777" "$FAKE/calls"'
 

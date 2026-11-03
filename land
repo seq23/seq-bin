@@ -229,7 +229,11 @@ case "$NAME" in
   # 26 Sep 2026: staging on every land. 2 Oct 2026: the `e2e` workflow (jobs e2e, e2e-open,
   # help-screenshots) is dispatch-only — a small change ships on the fast check, a large one on a
   # green run of it.
-  sheila-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://sheilastudio.seq-taylor.workers.dev/healthz" ;;
+  # 3 Nov 2026: RETIRED, like Mercedes below. The studio moved to seq23/creator-studios on 23 Oct
+  # 2026 and every workflow here is disabled; the old route would have deployed this repo's stale
+  # code over the live studio, so it deploys nothing now. The build-first shape it used to carry is
+  # exercised by tests/test-land-flow.sh through a fixture route of its own.
+  sheila-creator-dashboard) DEPLOY="" ; SELF="is retired (moved to seq23/creator-studios, 23 Oct 2026): nothing deploys from it; a deploy would overwrite the live studio with old code" ;;
   # Mercedes Studio (seq23/mercedes-creator-dashboard): a full-history copy of Sheila's dashboard for
   # Mercedes Asare, same shape (check.yml gate, staging on every land, promote.yml on a green nightly
   # e2e). Worker `mercedesstudio` at https://dashboard.justbeingmercedes.com. Added 26 Sep 2026.

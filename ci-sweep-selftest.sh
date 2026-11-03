@@ -314,6 +314,33 @@ else
   else bad "failed run listing produced neither SILENT nor RUNS_UNREADABLE — the probe examined nothing"; fi
 fi
 
+# 2026-11-02: the same defect one call earlier. A 403 from `gh workflow list` became '[]'
+# and the probe called 31 repos SILENT/NO_WORKFLOWS. Fail only that call: PENDING, not SILENT.
+if gh auth status >/dev/null 2>&1; then
+  FAKE="$(mktemp -d)"; REAL_GH="$(command -v gh)"
+  printf '#!/bin/bash\n[ "$1" = workflow ] && [ "$2" = list ] && exit 1\nexec "%s" "$@"\n' "$REAL_GH" > "$FAKE/gh"; chmod +x "$FAKE/gh"
+  out="$(PATH="$FAKE:$PATH" CI_SWEEP_ONLY_REPOS=local-guides-citation-velocity "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  rm -rf "$FAKE"
+  if printf '%s\n' "$out" | grep -q $'^SILENT\t'; then bad "a failed workflow listing was reported as SILENT"
+  elif printf '%s\n' "$out" | grep -q 'WORKFLOWS_UNREADABLE'; then ok "a failed workflow listing is PENDING (WORKFLOWS_UNREADABLE), not SILENT"; examined_fixtures=$((examined_fixtures+1))
+  else bad "failed workflow listing produced neither SILENT nor WORKFLOWS_UNREADABLE — the probe examined nothing"; fi
+  # ...and a repo that really has no workflows (gh: exit 0, empty stdout) is still read
+  # as no workflows (NOCI/SILENT), never as an unreadable PENDING.
+  out="$(CI_SWEEP_ONLY_REPOS=spry-vc "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  if printf '%s\n' "$out" | grep -q 'WORKFLOWS_UNREADABLE'; then bad "a repo with no workflows was reported unreadable"
+  elif printf '%s\n' "$out" | grep -qE $'^(NOCI|SILENT)\tspry-vc\t'; then ok "a repo with no workflows is still NOCI/SILENT"; examined_fixtures=$((examined_fixtures+1))
+  else bad "spry-vc produced no lane — the probe examined nothing"; fi
+fi
+
+# 2026-11-02: a manual-only lane whose only run (29 Aug) a human cancelled must be QUIET
+# (CANCELLED_MANUAL), never RED — and a real failure in the same repo must still be RED.
+if gh auth status >/dev/null 2>&1; then
+  out="$(CI_SWEEP_ONLY_REPOS=sprylabs-hpc-site "$BIN/ci-sweep-probe.sh" 2>/dev/null)"
+  if printf '%s\n' "$out" | grep -q $'^RED\tsprylabs-hpc-site\tSpry Full Rebuild\t'; then bad "a long-ago cancelled manual run is RED"
+  elif printf '%s\n' "$out" | grep -q $'^QUIET\tsprylabs-hpc-site\tSpry Full Rebuild\t.*CANCELLED_MANUAL'; then ok "a long-ago cancelled manual run is QUIET (CANCELLED_MANUAL)"; examined_fixtures=$((examined_fixtures+1))
+  else echo "  - NAMED SKIP [LANE_CHANGED] Spry Full Rebuild has run again since 2 Nov; the fixture no longer exists."; fi
+fi
+
 echo "=== 7c. Boss OS grid tasks reach the sweep as lanes ====================="
 # 7 Oct 2026: 48 Boss OS "fix this repo" tasks sat queued from 16 Sep with nothing to claim
 # them. A stale PR in the grid inbox must be a RED lane while open, GREEN once merged or

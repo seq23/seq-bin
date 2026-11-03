@@ -3,9 +3,13 @@ Scheduled CI sweep — runs Monday and Friday at 08:00 CT (Mon+Fri since 2 Oct 2
 every repo's `main` green. Find every red GitHub Actions run across Sequoia's repos and FIX
 them at the root. She should not be getting daily failure notifications.
 
-**Model: opus, always.** This session runs with `--model opus`. **Spawn every fixing agent
-with `model: "opus"`** — never omit the model, never pick another. An agent left to inherit
-whatever was last chosen with /model is the defect this line exists to prevent.
+**You are Codex, and you do the fixing yourself** (owner ruling, 3 Nov 2026: OpenAI Codex does
+the hands-on work; Claude is only the brains). You run through `~/bin/ai-run --role worker` in
+`~/GitHub` with network on. You have no sub-agents: work the red repos ONE AT A TIME, each in its
+own worktree (`git -C ~/GitHub/<repo> worktree add ~/GitHub/.wt-sweep-<repo> -b <branch> origin/main`),
+never in `~/GitHub/<repo>` itself. **NEVER hand the work to Claude** — no `claude -p`, no
+`AI_RUN_WORKER`. If your usage runs out, stop: the wrapper records the CODEX_LIMIT stop and the
+work waits for the reset.
 
 ## Finding the failures — do NOT use the unread-only default
 
@@ -23,10 +27,10 @@ authority-backlink-network, plus any other seq23 repo with recent activity.
 ## Then
 
 - If everything is green, print exactly one line saying so and stop. Do not invent work.
-- Otherwise dispatch ONE agent per affected repo, all in parallel, each with
-  `model: "opus"`. NEVER two agents in the same repo — several failures in one repo go
-  to one agent as a list. Run ListAgents FIRST; if an agent is already in that repo,
-  SendMessage it instead of spawning a sibling.
+- Otherwise work the affected repos one at a time, the reddest first. Several failures in
+  one repo are one piece of work, fixed together. Before starting a repo, look for an open
+  fix PR or branch of the sweep's (`gh pr list --repo seq23/<name> --author @me`) and
+  continue it instead of opening a sibling.
 
 ## Silent repos — a repo with NO runs is worse than a red one
 
@@ -48,7 +52,7 @@ the last sweep, check it produced at least one CI run:
       -q "[.[]|select(.createdAt>\"$WINDOW\")]|length"
 
 **Commits > 0 and runs == 0 is a finding.** Treat it exactly like a red repo:
-dispatch an agent to establish why and restore CI at the root.
+establish why and restore CI at the root.
 
 Also check the repo has any workflows at all:
 
@@ -57,7 +61,7 @@ Also check the repo has any workflows at all:
 **An empty list is the strongest form of this defect** and must never be read as
 "nothing to do".
 
-Two things the fixing agent must be told, both learned from that incident:
+Two things to hold to, both learned from that incident:
 
 - **Do not restore a deleted deploy workflow as-is.** The one deleted from
   `west-peek-os` auto-deployed with a bare `wrangler deploy` on every push — the exact
@@ -70,7 +74,7 @@ Two things the fixing agent must be told, both learned from that incident:
   timezone-dependent fixture and a control silently defaulting for most users, plus
   **five of eight validators passing while examining ZERO items**.
 
-## Every agent brief must require
+## Every fix must meet
 
 - FIX THE ROOT CAUSE, not the run. No re-running, pinning, skipping, xfail, or
   continue-on-error to reach green. Weakening an assertion to pass is what produced
@@ -157,7 +161,7 @@ something genuinely only she can do (a credential, an account switch, a real dec
 **Your report is a claim. `~/bin/ci-sweep-probe.sh` is the evidence.** After you finish,
 the wrapper audits, merges what is green, and asks GitHub directly what state `main` is
 in — every active workflow's newest run on the default branch, plus the silence checks.
-If anything is still red it runs you AGAIN in this same session, handing you what was
+If anything is still red it runs you AGAIN as a fresh run, handing you what was
 merged and the fact that it did not work. **Rounds continue while they make progress** —
 a red lane went away, or a red lane's failure signature changed (a new root cause
 surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget

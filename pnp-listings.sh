@@ -15,7 +15,11 @@ changed=0; [ "$sig" != "$(cat $STATE/site.sig 2>/dev/null)" ] && changed=1
 open -ga "Google Chrome"; sleep 20   # her Chrome must be open for Claude in Chrome
 PROMPT="Today is $today (renewal day: $renew_day; site pages changed since last run: $changed).
 $(cat ~/bin/pnp-listings-job.md)"
-cd ~ && printf "%s" "$PROMPT" | /opt/homebrew/bin/claude -p --chrome --model opus --allowedTools="mcp__claude-in-chrome__*" >> "$LOG" 2>&1
+# ai-run --role brain (Claude), a NAMED EXCEPTION to the 3 Nov 2026 ruling (Codex does the hands-on
+# work): this job drives her own Chrome through Claude in Chrome, which only Claude can reach. Same
+# flags as before: Chrome tools only, no permission bypass.
+printf "%s" "$PROMPT" | AI_RUN_CLAUDE_ARGS='--chrome --allowedTools=mcp__claude-in-chrome__*' \
+  ~/bin/ai-run --role brain --cwd ~ --out "$LOG" > /dev/null 2>&1
 last=$(grep -E "^(RESULT|STOP):" "$LOG" | tail -1)
 echo "$(date) $last" >> "$LOG"
 if [[ "$last" == RESULT:* ]]; then

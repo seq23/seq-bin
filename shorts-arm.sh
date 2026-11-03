@@ -37,14 +37,18 @@ fi
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 
-CLAUDE="$(command -v claude || echo /opt/homebrew/bin/claude)"
-[ -x "$CLAUDE" ] || { say "NAMED STOP [NO_CLAUDE_CLI] $CLAUDE"; exit 4; }
+# OWNER RULING 3 Nov 2026: Codex does the hands-on work, Claude only the brains. The arming is a
+# Codex worker (`ai-run --role worker`) in how-we-know; the email to her goes out afterwards from a
+# Claude brain run, because her Gmail is a claude.ai connector Codex cannot reach. A Codex limit
+# WAITS (a named stop; tomorrow's 10:11 run retries) and is never handed to Claude.
+AI_RUN="${SHORTS_ARM_AI_RUN_BIN:-$HOME/bin/ai-run}"
+[ -x "$AI_RUN" ] || { say "NAMED STOP [NO_AI_RUN] $AI_RUN"; exit 4; }
+REPO="$HOME/GitHub/how-we-know"
 [ -f "$PROMPT_FILE" ] || { say "NAMED STOP [NO_PROMPT_FILE] $PROMPT_FILE"; exit 5; }
 
-# Gmail here is a claude.ai connector, not a local MCP server. It was confirmed
-# reachable from a headless run on 2026-09-02, but a lapsed login would make this
-# job silently find "no reply" forever — which is indistinguishable from good news
-# and is exactly the failure this watcher exists to avoid.
+# Gmail here is a claude.ai connector, not a local MCP server — the brain run that
+# emails her needs Claude signed in. A lapsed login would make the report silently
+# never arrive, so it is checked before any work is done.
 if ! security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1; then
   say "NAMED STOP [CLAUDE_NOT_AUTHENTICATED] cannot read credentials from the login keychain."
   say "  Mac may be at the login window with the keychain locked, or the session signed out."
@@ -52,18 +56,39 @@ if ! security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2
 fi
 
 say "=== Shorts lane arming starting ==="
-cd "$HOME" || { say "NAMED STOP [NO_HOME]"; exit 8; }
+[ -d "$REPO" ] || { say "NAMED STOP [NO_REPO] $REPO"; exit 8; }
 
-"$CLAUDE" -p "$(cat "$PROMPT_FILE")" --dangerously-skip-permissions >> "$RUN_LOG" 2>&1
+WORK_PROMPT="$(cat "$PROMPT_FILE")
+
+## How this run is split (3 Nov 2026)
+You are the hands-on worker. Do NOT send the email in the Notify section — you cannot reach her
+Gmail. Write its body (under 150 words) as your final message, between a line holding only
+NOTIFY-BEGIN and a line holding only NOTIFY-END, and then the required final line. The wrapper
+has it emailed."
+"$AI_RUN" --role worker --cwd "$REPO" --network --out "$RUN_LOG" -- "$WORK_PROMPT" < /dev/null > /dev/null 2>&1
 RC=$?
-say "=== claude exited rc=$RC ==="
+say "=== worker exited rc=$RC ==="
+if [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; then
+  say "$(grep -o 'NAMED STOP \[CODEX_[A-Z_]*\].*' "$RUN_LOG" | tail -1) — nothing was armed; the next 10:11 run retries. Never handed to Claude."
+  ln -sf "$RUN_LOG" "$LOG_DIR/latest.log"
+  exit 0
+fi
 
-if ! grep -q "SHORTS-ARM-COMPLETE:" "$RUN_LOG"; then
+# Line start only: `codex exec` echoes the prompt, whose sentinel templates are indented.
+if ! grep -qE '^SHORTS-ARM-COMPLETE: (armed|deferred|failed|already-armed)' "$RUN_LOG"; then
   say "NAMED STOP [ARM_DID_NOT_COMPLETE] no sentinel in the log — the run started but never reached its end, so its silence is not evidence that the lane was not armed."
   exit 9
 fi
 
-STATE=$(grep -o 'SHORTS-ARM-COMPLETE:.*' "$RUN_LOG" | tail -1)
+STATE=$(grep -oE '^SHORTS-ARM-COMPLETE:.*' "$RUN_LOG" | tail -1)
 say "sentinel: $STATE"
+
+# The email to her: a brain run (Claude, her Gmail connector) sends exactly what the worker wrote.
+BODY="$(awk '/^NOTIFY-BEGIN$/{b=""; f=1; next} /^NOTIFY-END$/{f=0; last=b} f{b=b $0 "\n"} END{printf "%s", last}' "$RUN_LOG")"
+[ -n "$BODY" ] || BODY="The Shorts lane run ended $STATE but wrote no summary. Log: $RUN_LOG"
+"$AI_RUN" --role brain --out "$RUN_LOG" -- "Send one email with the Gmail connector to seq.taylor@gmail.com, subject \`Shorts lane\`, with exactly this body and nothing else, then print SHORTS-ARM-EMAILED on its own line:
+
+$BODY" < /dev/null > /dev/null 2>&1
+grep -q '^SHORTS-ARM-EMAILED' "$RUN_LOG" && say "emailed her the result" || say "NAMED STOP [EMAIL_NOT_SENT] the brain run did not confirm the email; the result is in $RUN_LOG"
 ln -sf "$RUN_LOG" "$LOG_DIR/latest.log"
 exit $RC

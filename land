@@ -230,7 +230,10 @@ case "$NAME" in
   # Mercedes Studio (seq23/mercedes-creator-dashboard): a full-history copy of Sheila's dashboard for
   # Mercedes Asare, same shape (check.yml gate, staging on every land, promote.yml on a green nightly
   # e2e). Worker `mercedesstudio` at https://dashboard.justbeingmercedes.com. Added 26 Sep 2026.
-  mercedes-creator-dashboard) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://dashboard.justbeingmercedes.com/healthz" ;;
+  # 3 Nov 2026: RETIRED. The studio moved to seq23/creator-studios on 23 Oct 2026 (same Worker, D1, R2)
+  # and every workflow in this repo is disabled. The old route would have run deploy:staging and
+  # deploy:production from this repo's stale code over the live studio, so it deploys nothing now.
+  mercedes-creator-dashboard) DEPLOY="" ; SELF="is retired (moved to seq23/creator-studios, 23 Oct 2026): nothing deploys from it; a deploy would overwrite the live studio with old code" ;;
   # ~/bin (seq23/seq-bin): launchd runs the WORKING COPY, so fast-forwarding it IS the deploy
   # (step 5 does it without touching any file she has changed, or stops and says why).
   # Added 21 Sep 2026 with seq-bin #4.

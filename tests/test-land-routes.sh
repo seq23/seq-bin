@@ -34,7 +34,7 @@ p-n-p|self
 justbeingmercedes|self
 local-guides-generator|self
 sheila-creator-dashboard|npm run deploy:production
-mercedes-creator-dashboard|npm run deploy:production
+mercedes-creator-dashboard|self
 topbarz-voting|npm run deploy:production
 creator-studios|self
 aplayer-mode|scripts/deploy-api-production.sh && scripts/deploy-web-production.sh
@@ -61,16 +61,16 @@ case "$got" in DIED:*) echo "  ok   unknown repo stops: ${got#DIED: }" ;; *) ech
 # so land deploys staging on every merge; production then follows the plan block (2 Oct 2026: a
 # small change ships on the fast check, a large one on a green e2e — tests/test-land-plan.sh).
 # shellcheck disable=SC2034  # NAME is read by the eval'd routes block
-# mercedes-creator-dashboard (26 Sep 2026) is the same shape: stages on every land, names e2e,
-# smokes its own custom domain (never Sheila's URL).
-for build_first in sheila-creator-dashboard mercedes-creator-dashboard; do
-  staged="$( ( NAME=$build_first; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
-  if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   $build_first stages (npm run deploy:staging) and names its e2e workflow"
-  else echo "  FAIL $build_first route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
-done
-smoke="$( ( NAME=mercedes-creator-dashboard; DEPLOY=""; SELF=""; SMOKE=""; die() { exit 1; }; eval "$BLOCK"; echo "$SMOKE" ) )"
-if [ "$smoke" = "https://dashboard.justbeingmercedes.com/healthz" ]; then echo "  ok   mercedes-creator-dashboard smokes its own domain"
-else echo "  FAIL mercedes-creator-dashboard smoke: got '$smoke'"; fails=$((fails+1)); fi
+build_first=sheila-creator-dashboard
+staged="$( ( NAME=$build_first; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$STAGING|$E2E_WF" ) )"
+if [ "$staged" = "npm run deploy:staging|e2e" ]; then echo "  ok   $build_first stages (npm run deploy:staging) and names its e2e workflow"
+else echo "  FAIL $build_first route: expected 'npm run deploy:staging|e2e', got '$staged'"; fails=$((fails+1)); fi
+# 3 Nov 2026: mercedes-creator-dashboard is retired (the studio ships from creator-studios). Its route
+# must deploy nothing at all: no production command, no staging, no e2e, no smoke of the live studio.
+# shellcheck disable=SC2034  # NAME is read by the eval'd routes block
+retired="$( ( NAME=mercedes-creator-dashboard; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY|$STAGING|$E2E_WF|$SMOKE|$PROMOTE_VIA|$DEPLOY_WF" ) )"
+if [ "$retired" = "|||||" ]; then echo "  ok   mercedes-creator-dashboard (retired) deploys nothing"
+else echo "  FAIL mercedes-creator-dashboard (retired) still deploys: '$retired'"; fails=$((fails+1)); fi
 # 26 Sep 2026: boss-os names its full e2e workflow (no staging target), so the plan block governs
 # its production and `land --promote boss-os` ships an e2e-green commit. 2 Oct 2026: it also names
 # deploy.yml as the workflow that ships on a green e2e (PROMOTE_WF), so land waits for that run
@@ -83,7 +83,7 @@ if [ "$bossed" = "|e2e|deploy.yml|" ]; then echo "  ok   boss-os names e2e (no s
 else echo "  FAIL boss-os route: expected '|e2e|deploy.yml|', got '$bossed'"; fails=$((fails+1)); fi
 # Every other route waits for promote.yml when the repo carries one (the default), and names no
 # PROMOTE_VIA unless it is listed below.
-for r in sheila-creator-dashboard mercedes-creator-dashboard west-peek-os approvalprep topbarz-voting; do
+for r in sheila-creator-dashboard west-peek-os approvalprep topbarz-voting; do
   # shellcheck disable=SC2034
   got="$( ( NAME="$r"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$PROMOTE_WF|$PROMOTE_VIA" ) )"
   if [ "$got" = "promote.yml|" ]; then echo "  ok   $r: PROMOTE_WF promote.yml, no PROMOTE_VIA"
@@ -171,6 +171,9 @@ self_route_gap() { # $1 repo name  $2 checkout -> prints the unwaited workflow(s
   # shellcheck disable=SC2034
   named="$( ( NAME="$1"; DEPLOY=""; SELF=""; DEPLOY_WF=""; die() { exit 1; }; eval "$BLOCK"; [ -z "$DEPLOY" ] || exit 0; echo "$DEPLOY_WF $PROMOTE_VIA" ) )" || return 1
   [ -n "$( ( NAME="$1"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$DEPLOY" ) )" ] && return 1
+  # A retired repo (route SELF "is retired", all its workflows disabled on GitHub) ships nothing; its
+  # stale promote.yml is not a deploy path land must wait on.
+  case "$( ( NAME="$1"; DEPLOY=""; SELF=""; die() { exit 1; }; eval "$BLOCK"; echo "$SELF" ) )" in "is retired"*) return 1 ;; esac
   for wf in $(deploys_on_main "$2"); do
     case " $named " in *" $wf "*) : ;; *) gap="$gap $wf" ;; esac
   done

@@ -31,12 +31,23 @@ path="${2%%\?*}"; [ "$3" = "--jq" ] || exit 1
 case "$path" in
   */commits) f="$FX/list.json" ;;
   */check-runs) s="${path%/check-runs}"; f="$FX/runs-${s##*/}.json" ;;
+  */commits/*) f="$FX/commit-${path##*/}.json"; [ -f "$f" ] || exit 1 ;;
+  'repos/{owner}/{repo}') echo seq23/site; exit 0 ;;
   *) exit 1 ;;
 esac
 [ -f "$f" ] || f="$FX/none.json"
 jq -r "$4" < "$f"
 SH
 chmod +x "$WORK/bin/gh"
+# fake Cloudflare: wrangler is a no-op, curl answers the Pages projects list from $FX/cf.json (absent =
+# the API is unreachable), and the OAuth token exists only when $FX/token is present.
+printf '#!/bin/bash\nexit 0\n' > "$WORK/bin/wrangler"
+cat > "$WORK/bin/curl" <<'SH'
+#!/bin/bash
+[ -f "$FX/cf.json" ] || exit 7
+cat "$FX/cf.json"
+SH
+chmod +x "$WORK/bin/wrangler" "$WORK/bin/curl"
 
 P5="local-guides-generator-uscis-medical local-guides-generator-pi local-guides-generator-dentistry local-guides-generator-trt local-guides-generator-neuro"
 cr() { printf '{"name":"%s","status":"%s","conclusion":%s,"completed_at":%s}' "$1" "$2" "$3" "${4:-null}"; }
@@ -50,7 +61,7 @@ five_done() { # $1 conclusion for pi, rest success; completed at 12:05 on a 12:0
 
 run_case() { # name want-rc want-substring pages_projects [wait-secs]
   local name="$1" want="$2" sub="$3" pp="$4" ws="${5-0}" out rc
-  out="$(env PATH="$WORK/bin:$PATH" FX="$FX" PAGES_APPEAR_SECS=0 ${ws:+PAGES_WAIT_SECS=$ws} bash -c '
+  out="$(env PATH="$WORK/bin:$PATH" FX="$FX" HOME="$FX/home" PAGES_APPEAR_SECS=0 ${ws:+PAGES_WAIT_SECS=$ws} bash -c '
     sleep() { SECONDS=$((SECONDS + 100)); }
     eval "$1"
     pages_watch deadbeef "$2"' _ "$BLOCK" "$pp")" && rc=0 || rc=$?
@@ -60,7 +71,7 @@ run_case() { # name want-rc want-substring pages_projects [wait-secs]
 }
 fails=0; n=0
 check() { n=$((n+1)); run_case "$@" || fails=$((fails+1)); }
-newfx() { FX="$(mktemp -d "$WORK/fx.XXXX")"; echo '{"check_runs":[]}' > "$FX/none.json"; echo '[]' > "$FX/list.json"; }
+newfx() { FX="$(mktemp -d "$WORK/fx.XXXX")"; echo '{"check_runs":[]}' > "$FX/none.json"; echo '[]' > "$FX/list.json"; mkdir -p "$FX/home"; }
 history5() { # main = deadbeef (merge) then parent1 committed 12:00, all five built by 12:05 (300 s)
   printf '[{"sha":"deadbeef","commit":{"committer":{"date":"2026-10-12T13:00:00Z"}}},{"sha":"parent1","commit":{"committer":{"date":"2026-10-12T12:00:00Z"}}}]' > "$FX/list.json"
   five_done > "$FX/runs-parent1.json"
@@ -106,6 +117,28 @@ newfx; runs "$(cr validate completed '"failure"')" > "$FX/runs-deadbeef.json"
 check "no cloudflare check" 2 "" ""
 newfx
 check "no checks at all" 2 "" ""
+
+# BUILD WATCH PATHS (3 Nov 2026, heygetonmylevel #12): the merge changed only a workflow file, the one
+# Pages project builds only on questions/*, so Cloudflare never started a build and land waited for
+# the "Cloudflare Pages" run it saw on an earlier commit until it STOPPED with main green.
+watchfx() { # $1 = changed files (comma list) of the merge commit; history: parent1 built "Cloudflare Pages"
+  newfx
+  printf '[{"sha":"deadbeef","commit":{"committer":{"date":"2026-11-03T14:22:50Z"}}},{"sha":"parent1","commit":{"committer":{"date":"2026-11-03T12:28:33Z"}}}]' > "$FX/list.json"
+  runs "$(cr 'Cloudflare Pages' completed '"success"' '"2026-11-03T12:28:55Z"')" > "$FX/runs-parent1.json"
+  jq -n --arg f "$1" '{files: ($f | split(",") | map({filename: .}))}' > "$FX/commit-deadbeef.json"
+  mkdir -p "$FX/home/.wrangler/config"; echo 'oauth_token = "t"' > "$FX/home/.wrangler/config/default.toml"
+  printf '%s' '{"success":true,"result_info":{"total_pages":1},"result":[{"name":"site-learn","source":{"type":"github","config":{"owner":"seq23","repo_name":"site","production_branch":"main","path_includes":["questions/*","scripts/learn-build.mjs"],"path_excludes":[]}}},{"name":"other","source":{"type":"github","config":{"owner":"seq23","repo_name":"elsewhere","production_branch":"main"}}}]}' > "$FX/cf.json"
+}
+watchfx .github/workflows/search-loop.yml
+check "workflow-only merge, watch paths unreached, nothing posted: no deploy needed" 3 "Cloudflare Pages — no deploy needed" ""
+watchfx .github/workflows/search-loop.yml; runs "$(cr 'Cloudflare Pages' completed '"failure"')" > "$FX/runs-deadbeef.json"
+check "a build that started and failed is still FAILED, watch paths or not" 1 "Cloudflare Pages — FAILED (failure)" ""
+watchfx .github/workflows/search-loop.yml,questions/how-to/index.html
+check "a merge inside the watch paths still waits for its build" 1 "Cloudflare Pages — not yet reported (queued) — TIMED OUT" ""
+watchfx .github/workflows/search-loop.yml; rm "$FX/cf.json"
+check "watch paths unreadable: fail closed, still waits" 1 "Cloudflare Pages — not yet reported (queued) — TIMED OUT" ""
+watchfx .github/workflows/search-loop.yml; rm "$FX/home/.wrangler/config/default.toml"
+check "no wrangler login: fail closed, still waits" 1 "not yet reported (queued) — TIMED OUT" ""
 
 # The route that broke must declare all six, so discovery can never come back empty for it.
 # Exact pin: adding or removing a project is a deliberate edit here as well as in land.

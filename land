@@ -200,6 +200,9 @@ case "$NAME" in
   # The loop repos run in GitHub Actions straight from main: the merge IS the
   # deploy. Every scheduled lane checks out main at fire time.
   how-we-know)          DEPLOY="" ; SELF="runs its lanes from main in GitHub Actions" ;;
+  # 3 Nov 2026 (security sweep row 5): the 901johnsons.com family site deploys through Cloudflare
+  # Pages Git integration (project 901johnsons-site) on push to main; CI is .github/workflows/ci.yml.
+  901johnsons-site)     DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (901johnsons.com)" ;;
   # Cloudflare Pages deploys every push to main; Deploy Distribution (IndexNow/GSC) fires on green.
   sprylabs-hpc-site)    DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main" ;;
   # Same shape as the hpc site (wrangler.toml pages_build_output_dir = dist); Deploy Distribution

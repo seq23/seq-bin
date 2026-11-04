@@ -111,7 +111,16 @@ REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "not in a git 
 cd "$REPO_DIR" || exit 1
 # A worktree is named after its branch dir, not the repo. Ask git for the
 # repo's own name (the common dir) so `land` from a worktree routes correctly.
+# --- name begin
 NAME="$(basename "$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')")"
+# The checkout's folder is not always the repo's name (boss-os lives at ~/.boss-os/runtime, 4 Nov
+# 2026: "runtime has no deploy route"): the origin remote's name wins when there is one.
+# Only a GitHub remote names the repo (a local or test remote is a path, not a name).
+REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
+case "$REMOTE_URL" in
+  *github.com[:/]*) REMOTE_NAME="$(printf '%s' "$REMOTE_URL" | sed -E 's#\.git$##; s#.*/##')"; [ -n "$REMOTE_NAME" ] && NAME="$REMOTE_NAME" ;;
+esac
+# --- name end
 
 # The 7403 trap. `npm run deploy:production` in west-peek-os does NOT default the
 # account id the way boss-os's script does, so in any shell that lacks it — a

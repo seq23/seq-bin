@@ -4,7 +4,7 @@
 // Publishing needs the claude.ai artifact tools, which only an interactive Claude session has (claude -p cannot, tested 5 Nov 2026).
 // So: any session that changes Open Loops runs this, then publish_files to slug bff28f87-655d-4829-9bc1-ea23e70a2fac when it prints CHANGED.
 import fs from "node:fs"; import crypto from "node:crypto"; import os from "node:os";
-const DIR = `${os.homedir()}/.boss-os/runtime/open-loops-mirror`; fs.mkdirSync(DIR, { recursive: true });
+const DIR = `${os.homedir()}/.boss-os/open-loops-mirror`; fs.mkdirSync(DIR, { recursive: true });
 const O = "https://boss.sequoiataylor.com";
 const u = await fetch(`${O}/api/boss/auth/unlock`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode: process.env.BOSS_PASSCODE }) });
 const cookie = (u.headers.get("set-cookie") ?? "").split(";")[0];

@@ -58,7 +58,7 @@ PROMPT
       printf '%s\n' "$excerpt"
       printf 'TRANSCRIPT>>>\n'
     } > "$prompt_file"
-    summary="$(timeout 150 claude -p --model haiku --no-session-persistence "$(cat "$prompt_file")" 2>/dev/null)"
+    summary="$(timeout 150 claude -p --model opus --no-session-persistence "$(cat "$prompt_file")" 2>/dev/null)"
     rm -f "$prompt_file"
   fi
 fi

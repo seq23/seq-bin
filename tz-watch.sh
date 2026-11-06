@@ -17,6 +17,8 @@
 #   boss-os      ~/.boss-os/runtime/scripts/ops/install-agent-launchd.sh (runs simone-commands and
 #                mail-tail too)
 #   how-we-know  ~/GitHub/how-we-know/bin/loop-install-launchd.sh --install (when its jobs are installed)
+#   boss-owner-zone  boss-os scripts/ops/owner-zone.mjs: tells Boss OS the Mac's zone, so the times in
+#                her emails and on Today follow her (6 Nov 2026). Not an installer: never deferred.
 #
 # A scheduled job mid-run is not killed: the seq-bin and boss-os installers wait (TZ_WATCH_DEFERRED,
 # retried hourly) for up to 6 hours, then go ahead. how-we-know defers a running night itself; its
@@ -56,10 +58,13 @@ installers() {
   for f in "$BIN"/launchd/*.plist; do l="$(basename "$f" .plist)"; [ "$l" = "$SELF" ] || labels="$labels $l"; done
   echo "seq-bin|$BIN/install-launchd.sh$labels"
   echo "boss-os|BOSS_OS_RUNTIME='$BOSS' bash '$BOSS/scripts/ops/install-agent-launchd.sh'"
+  echo "boss-owner-zone|cd '$BOSS' && npm run --silent vault:run -- node scripts/ops/owner-zone.mjs"
   if ls "$AGENTS"/com.howweknow.*.plist >/dev/null 2>&1; then
     echo "how-we-know|$HOME/GitHub/how-we-know/bin/loop-install-launchd.sh --install"
   fi
 }
+
+[ "${1:-}" = --list ] && { installers; exit 0; }
 
 # Scheduled (StartCalendarInterval) jobs running right now, outside how-we-know (which guards itself).
 running_jobs() {
@@ -90,7 +95,7 @@ while IFS='|' read -r name cmd; do
     continue
   fi
   todo=$((todo + 1))
-  if [ "$name" != how-we-know ]; then
+  if [ "$name" != how-we-know ] && [ "$name" != boss-owner-zone ]; then
     busy="$(running_jobs)"
     if [ -n "$busy" ]; then
       [ -s "$STATE/pending-since" ] || date +%s > "$STATE/pending-since"

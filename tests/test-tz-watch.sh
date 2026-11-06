@@ -89,5 +89,14 @@ grep -q '"stop":"TZ_WATCH_INSTALL_FAILED"' "$T/posts.jsonl" 2>/dev/null || bad "
 run America/Chicago "broken|true" || bad "the repaired installer exited non-zero"
 grep -q '"cleared":true' "$T/posts.jsonl" 2>/dev/null || bad "success did not close the Open Loops row"
 
+# Her zone reaches Boss OS on a change, even while jobs run (it moves no plist).
+TZ_WATCH_ZONE=America/New_York "$BIN/tz-watch.sh" --list | grep -q "^boss-owner-zone|.*scripts/ops/owner-zone.mjs" || bad "the default list does not tell Boss OS her zone"
+echo com.seq.drive-backup > "$T/busy"
+run America/New_York "boss-owner-zone|echo told > '$T/told'" || bad "the owner-zone run exited non-zero"
+[ -s "$T/told" ] || bad "the owner-zone run was deferred behind a running job"
+run America/Chicago "boss-owner-zone|echo told-again > '$T/told'" || bad "the zone-change owner-zone run exited non-zero"
+grep -q told-again "$T/told" || bad "a zone change did not tell Boss OS again"
+rm -f "$T/busy"
+
 [ $fail -eq 0 ] && echo "tz-watch: ok"
 exit $fail

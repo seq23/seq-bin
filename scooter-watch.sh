@@ -23,7 +23,7 @@
 # nothing is tailed. This source's window starts at the first tick of this script (state/
 # mailbox_since), not 24 Sep, so the first digest does not re-list three weeks of old threads.
 #
-# TAIL AGENT: one bounded, headless Codex worker per event — `~/bin/ai-run --role worker` (owner ruling
+# TAIL AGENT: one bounded, headless CLAUDE worker per event (her words 6 Nov 2026: "A partner tail is a Claude Job") — `~/bin/ai-run --role worker` with AI_RUN_WORKER=claude (owner ruling
 # 3 Nov 2026: Codex does the hands-on work, Claude only the brains). A Codex usage limit WAITS: the
 # events go back on the queue, dispatch pauses for an hour at a time, she is told once, and the work
 # is never handed to Claude (scooter-watch-run-fix.sh,
@@ -290,7 +290,7 @@ if [ "$PENDING_COUNT" -gt 0 ] && [ -d "$FIXLOCK" ] && kill -0 "$(cat "$FIXLOCK/p
   echo "[watch] $PENDING_COUNT email(s) waiting for a tail, but an agent is in flight (since $RUNNING_SINCE) — they stay queued for the next free tick"
   [ "$NEW_OS" -gt 0 ] && banner "Partner emailed the OS ($NEW_OS new)" "A tail agent is already working a prior email — this one queues" "Ping"
 elif [ "$PENDING_COUNT" -gt 0 ] && [ -f "$CODEX_WAIT" ] && [ $(( $(date +%s) - $(stat -f %m "$CODEX_WAIT" 2>/dev/null || stat -c %Y "$CODEX_WAIT") )) -lt 3600 ]; then
-  echo "[watch] $PENDING_COUNT email(s) queued: Codex is waiting — $(cat "$CODEX_WAIT"). Retried hourly; never handed to Claude."
+  echo "[watch] $PENDING_COUNT email(s) queued: Codex is waiting — $(cat "$CODEX_WAIT"). Retried hourly."
 elif [ "$PENDING_COUNT" -gt 0 ]; then
   rm -rf "$FIXLOCK"
   AI_RUN="${SCOOTER_WATCH_AI_RUN_BIN:-$HOME_DIR/bin/ai-run}"

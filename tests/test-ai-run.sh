@@ -2,7 +2,7 @@
 # ai-run, against stub `codex` and `claude` binaries on PATH.
 #
 # OWNER RULING (3 Nov 2026): Codex does the hands-on work, Claude is only the brains, and a Codex
-# usage limit means the work WAITS — it is never handed to Claude. What is under test:
+# usage limit hands the run to Claude (her yes, 6 Nov 2026, replacing the 3 Nov "waits" rule). What is under test:
 #   · --role worker runs `codex exec -s workspace-write` with stdin </dev/null and never claude;
 #     network only with --network; --cwd and the repo's .git (writable) reach codex;
 #   · a Codex usage-limit message is exit 75 and `NAMED STOP [CODEX_LIMIT] resets <time>`, with NO
@@ -88,19 +88,20 @@ check "…and holds the run's output" grep -q 'WORKER-DONE' "$TMP/out.log"
 echo "prompt from stdin" | run "$AI" --role worker --out "$TMP/out.log" >/dev/null;
 check "the prompt may come on stdin" grep -q 'prompt from stdin$' "$TMP/codex-args.log"
 
-echo "=== 3. a Codex usage limit: exit 75, CODEX_LIMIT with its reset time, no claude ==="
+echo "=== 3. a Codex usage limit HANDS THE RUN TO CLAUDE (her yes, 6 Nov 2026); never waits ==="
 reset; echo limit > "$TMP/codex-mode"
 out="$(run "$AI" --role worker --out "$TMP/out.log" -- "fix it")"; rc=$?
-check "exit 75 (rc=$rc)" [ "$rc" -eq 75 ]
-check "NAMED STOP [CODEX_LIMIT] resets <the time in the message>: $out" grep -q 'NAMED STOP \[CODEX_LIMIT\] resets Nov 7th, 2026 3:05 PM' <<<"$out"
-check "…also written into --out" grep -q 'NAMED STOP \[CODEX_LIMIT\]' "$TMP/out.log"
-check "claude was NOT called (the work waits; it is never handed to Claude)" no_claude
+absent "claude WAS called after the limit" no_claude
+check "…with the same prompt" grep -q 'fix it' "$TMP/claude-stdin"
+check "the run ends with claude's exit code, not 75 (rc=$rc)" [ "$rc" -eq 0 ]
+absent "no CODEX_LIMIT wait stop" grep -q 'NAMED STOP \[CODEX_LIMIT\]' "$TMP/out.log"
+check "the hand-off is written into --out with the reset time" grep -q 'handing this run to Claude' "$TMP/out.log"
 check "codex ran once, not retried" [ "$(codex_calls)" -eq 1 ]
-check "the usage log records exit 75 and the stop" grep -qE $'exit=75\tstop=CODEX_LIMIT$' "$AI_RUN_LOG"
+check "the usage log records the hand-off" grep -q 'stop=CODEX_LIMIT_TO_CLAUDE' "$AI_RUN_LOG"
 reset; echo limit-in > "$TMP/codex-mode"
-out="$(run "$AI" --role worker -- "x")"; rc=$?
-check "a 'try again in …' limit is 75 with the duration (rc=$rc)" grep -q 'CODEX_LIMIT\] resets in 2 days 3 hours' <<<"$out"
-check "…no claude" no_claude
+out="$(AI_RUN_NO_CLAUDE_FALLBACK=1 run "$AI" --role worker -- "x")"; rc=$?
+check "with the fallback switched off, a limit is still exit 75 with its reset (rc=$rc)" grep -q 'CODEX_LIMIT\] resets in 2 days 3 hours' <<<"$out"
+check "…and no claude" no_claude
 reset; echo printed > "$TMP/codex-mode"
 out="$(run "$AI" --role worker -- "x")"; rc=$?
 check "a run that only PRINTED a limit line and finished is exit 0, not a limit (rc=$rc)" [ "$rc" -eq 0 ]
@@ -150,12 +151,12 @@ check "ai-run ends when killed (rc=$rc)" [ "$rc" -ne 0 ]
 check "the line printed before the kill is in --out" grep -q 'first line' "$TMP/out.log"
 absent "the codex child did not survive the kill" pgrep -f "$BIN/codex exec"
 
-echo "=== 7. AI_RUN_WORKER=claude is HER manual override, and no job sets it ==="
+echo "=== 7. AI_RUN_WORKER=claude is her override; only the partner tail sets it (her words 6 Nov: \"A partner tail is a Claude Job\") ==="
 reset
 run env AI_RUN_WORKER=claude "$AI" --role worker -- "by hand" >/dev/null
 check "the override runs the worker on claude" [ "$(claude_calls)" -eq 1 ]
 check "…logged as engine=claude-override" grep -q $'engine=claude-override' "$AI_RUN_LOG"
-setters="$(cd "$ROOT" && git ls-files 2>/dev/null | grep -vxE 'ai-run|tests/test-ai-run.sh|README.md|docs/.*' | while IFS= read -r f; do [ -f "$f" ] && grep -lE 'AI_RUN_WORKER=' "$f"; done)"
+setters="$(cd "$ROOT" && git ls-files 2>/dev/null | grep -vxE 'ai-run|tests/test-ai-run.sh|README.md|docs/.*|scooter-watch-run-fix.sh' | while IFS= read -r f; do [ -f "$f" ] && grep -lE 'AI_RUN_WORKER=' "$f"; done)"
 if [ -n "$(cd "$ROOT" && git ls-files 2>/dev/null | head -1)" ]; then
   check "no tracked job sets AI_RUN_WORKER (found: ${setters:-none})" [ -z "$setters" ]
 else
@@ -166,4 +167,4 @@ echo
 [ "$asserts" -gt 0 ] || { echo "NAMED STOP [ZERO_ASSERTIONS] nothing was checked."; exit 3; }
 echo "$((asserts - failed))/$asserts passed"
 [ "$failed" -eq 0 ] || exit 1
-echo "ai-run routes hands-on work to Codex, brains to Claude, and a Codex limit waits — never Claude."
+echo "ai-run routes hands-on work to Codex, brains to Claude, and a Codex limit hands the run to Claude (6 Nov 2026)."

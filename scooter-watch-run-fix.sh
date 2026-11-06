@@ -20,7 +20,8 @@ FIXLOG="$STATE_DIR/fix-log.md"
 REPO="$HOME/GitHub/west-peek-os"
 REPORT_LOG="$STATE_DIR/report.log"
 
-AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
+# 6 Nov 2026, her words: "A partner tail is a Claude Job" — the tail runs on Claude, never Codex.
+AI_RUN_WORKER=claude AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
   "$AI_RUN" --role worker --cwd "$REPO" --network --out "$TAIL_LOG" -- "$(cat "$PROMPT_FILE")" \
   < /dev/null > /dev/null 2>&1 &
 echo $! > "$FIXLOCK/claude_pid"

@@ -191,7 +191,17 @@ if [ "$ENGINE_KIND" = codex ] && [ "$RC" -ne 0 ]; then
     grep -iE '^(\[[^]]*\])?[^[:alpha:]]*(error:)?[[:space:]]*(you.{1,3}ve hit your usage limit|.*usage_limit_reached)' | tail -1)"
   if [ -n "$LIMIT_LINE" ]; then
     RESET="$(printf '%s' "$LIMIT_LINE" | grep -oiE 'try again (at|in) [^.]+' | head -1 | sed -E 's/^[Tt]ry again (at )?//')"
-    stop 75 CODEX_LIMIT "resets ${RESET:-unknown (Codex gave no reset time: $(printf '%s' "$LIMIT_LINE" | cut -c1-160))} — the work waits for the reset; it is never handed to Claude."
+    # 6 Nov 2026, her yes: a Codex usage limit HANDS THE WORK TO CLAUDE (then the job's free routes); it never
+    # waits for the reset. AI_RUN_NO_CLAUDE_FALLBACK=1 keeps the old wait (tests, or a job that must not use Claude).
+    if [ -z "${AI_RUN_NO_CLAUDE_FALLBACK:-}" ] && [ "${AI_RUN_WORKER:-}" != claude ]; then
+      log_line "$RC" CODEX_LIMIT_TO_CLAUDE
+      echo "Codex is out of usage (resets ${RESET:-unknown}); handing this run to Claude." >> "$DEST"
+      [ -n "$OUT" ] || echo "Codex is out of usage (resets ${RESET:-unknown}); handing this run to Claude."
+      FB=(--role "$ROLE"); [ -n "$CWD" ] && FB+=(--cwd "$CWD"); [ -n "$OUT" ] && FB+=(--out "$OUT"); [ "$NETWORK" -eq 1 ] && FB+=(--network)
+      printf '%s' "$PROMPT" | AI_RUN_WORKER=claude AI_RUN_CALLER="$CALLER" "$0" "${FB[@]}"
+      exit $?
+    fi
+    stop 75 CODEX_LIMIT "resets ${RESET:-unknown (Codex gave no reset time: $(printf '%s' "$LIMIT_LINE" | cut -c1-160))} — the work waits for the reset (Claude fallback switched off for this job)."
   fi
 fi
 

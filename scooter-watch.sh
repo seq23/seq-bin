@@ -206,6 +206,15 @@ while IFS=$'\t' read -r id date from subject card; do
     # 30 Oct 2026, her word ("tail should skip routine approved/skip replies"): her reply to a Wynn
     # brand-reply approval email (Ref TLR-xxxxxx) is not tailed when every reply it covers ended SENT or
     # SKIPPED. A FAILED send, or a change note (row back to DRAFTED/NOTIFIED), is still tailed.
+    # 6 Nov 2026, her words ("cancel the tail that started on my own replies"): her REPLY to an email the OS
+    # sent her (a Wynn/OS notice carrying a ref like TLP-/TLR-/TLC-xxxxxx: approve, changes, skip) is never
+    # tailed. Jobs she sends to os@ herself (no ref, not a reply) are still tailed (22 Oct ruling).
+    if printf '%s' "$from" | grep -qi "$PARTNER_B" && printf '%s' "$subject" | grep -qiE '^(re|fwd?):' \
+       && printf '%s' "$subject" | grep -qE '\b[A-Z]{3}-[A-Z0-9]{6}\b'; then
+      echo "$id" >> "$SEEN_FILE"
+      echo "[watch] her own reply to an OS email — not tailed: $subject"
+      continue
+    fi
     ref="$(printf '%s' "$subject" | grep -oE 'TLR-[A-Z0-9]{6}' | head -1)"
     if [ -n "$ref" ] && printf '%s' "$from" | grep -qi "$PARTNER_B"; then
       left="$(cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \

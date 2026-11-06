@@ -24,9 +24,8 @@
 # mailbox_since), not 24 Sep, so the first digest does not re-list three weeks of old threads.
 #
 # TAIL AGENT: one bounded, headless CLAUDE worker per event (her words 6 Nov 2026: "A partner tail is a Claude Job") — `~/bin/ai-run --role worker` with AI_RUN_WORKER=claude (owner ruling
-# 3 Nov 2026: Codex does the hands-on work, Claude only the brains). A Codex usage limit WAITS: the
-# events go back on the queue, dispatch pauses for an hour at a time, she is told once, and the work
-# is never handed to Claude (scooter-watch-run-fix.sh,
+# 6 Nov 2026 replaces the 3 Nov Codex-only rule). If the run still cannot start, the events go back on
+# the queue and dispatch retries hourly (scooter-watch-run-fix.sh,
 # 2 h watchdog cap in scooter-watch-watchdog.sh). Scope = every work_card the email opened or
 # steered, whichever employee owns it (Porter, Percy, Walker, ...). A genuine partner-decision
 # wait is correct; friction (erroring, retrying without progress, re-asking for something already

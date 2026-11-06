@@ -48,7 +48,7 @@ cat > "$TMP/bin/gh" <<'S'
 case "$1 $2" in
   "auth status") exit 0 ;;
   "repo list") echo '[{"name":"r","isArchived":false,"defaultBranchRef":{"name":"main"}}]' ;;
-  "workflow list") echo '[{"name":"Validate","state":"active","path":".github/workflows/validate.yml"},{"name":"Ingestion Sync","state":"active","path":".github/workflows/ingestion.yml"}]' ;;
+  "workflow list") [ -n "${FAKE_WF:-}" ] && { echo "$FAKE_WF"; exit 0; }; echo '[{"name":"Validate","state":"active","path":".github/workflows/validate.yml"},{"name":"Ingestion Sync","state":"active","path":".github/workflows/ingestion.yml"}]' ;;
   "run list")
     case " $* " in
       *" --workflow ingestion.yml "*)
@@ -63,6 +63,7 @@ case "$1 $2" in
   "api "*)
     case "$*" in
       *"commits?path="*) printf '[{"commit":{"committer":{"date":"%s"}}}]\n' "${FAKE_FIRST_SEEN:-2026-01-01T00:00:00Z}" ;;
+      *"commits?since="*"-q length"*) echo 1 ;;
       *"commits?since="*) printf '[{"sha":"abc","committer":{"type":"User"},"commit":{"committer":{"date":"%s","email":"a@b.c","name":"Person"}}}]\n' "$FAKE_RECENT" ;;
       *"/commits/"*) echo 'README.md' ;;
       *) echo '[]' ;;
@@ -94,6 +95,16 @@ mmhh() { date -u -v-"$1"H +'%-M %-H' 2>/dev/null || date -u -d "$1 hours ago" +'
 cron_for() { printf 'on:\n  schedule:\n    - cron: "%s * * *"\n' "$(mmhh "$1")" > "$TMP/gh/r/.github/workflows/ingestion.yml"; }
 cron_for 1;  FAKE_FIRST_SEEN="$(ago 2)"  FAKE_MODE_OVERRIDE=never case_ young   2 '^PENDING	r	Ingestion Sync	.*CRON_NOT_DUE' "$REAL_TRIGGERS"
 cron_for 10; FAKE_FIRST_SEEN="$(ago 12)" FAKE_MODE_OVERRIDE=never case_ overdue 1 '^SILENT	r	Ingestion Sync	.*NEVER_RAN' "$REAL_TRIGGERS"
+
+# A retired repo (6 Nov 2026, mercedes-creator-dashboard): every workflow disabled by hand plus a
+# clean-up commit in the window is NOCI, never SILENT. An empty list, or a repo GitHub switched
+# off for inactivity, with a commit in the window is still a SILENT finding. (A fleet of only
+# NOCI repos is PROBED_NOTHING, exit 3, as for a dormant one: the retired repo is not a lane.)
+FAKE_WF='[{"name":"check","state":"disabled_manually","path":".github/workflows/check.yml"},{"name":"e2e","state":"disabled_manually","path":".github/workflows/e2e.yml"}]' \
+  case_ retired 3 '^NOCI	r	\(none\)	r\|ALL_WORKFLOWS_DISABLED_MANUALLY'
+FAKE_WF='[]' case_ deleted 1 '^SILENT	r	\(none\)	r\|NO_WORKFLOWS'
+FAKE_WF='[{"name":"check","state":"disabled_manually","path":".github/workflows/check.yml"},{"name":"e2e","state":"disabled_inactivity","path":".github/workflows/e2e.yml"}]' \
+  case_ inactive 1 '^SILENT	r	\(none\)	r\|NO_WORKFLOWS'
 
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero cases"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-probe-window: $fails failure(s)"; exit 1; }

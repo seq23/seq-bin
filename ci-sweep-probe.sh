@@ -207,6 +207,23 @@ for dir in "$GITHUB_DIR"/*/; do
     lanes=$((lanes+1)); pending=$((pending+1)); continue
   fi
   active="$(printf '%s' "$wf" | jq -r '[.[]|select(.state=="active")|.name]|.[]' 2>/dev/null)"
+  # --- retired on purpose: every workflow switched off by a person ------------
+  # 6 Nov 2026: mercedes-creator-dashboard moved to creator-studios on 23 Oct
+  # ("One codebase"; spry brain) and every workflow was disabled by hand so the old
+  # code can never redeploy over the live studio. A clean-up commit on 3 Nov then
+  # put a commit in the window, and the probe reported it SILENT|NO_WORKFLOWS — a
+  # lane no fix can clear without re-enabling the deploys that must stay off.
+  # Every workflow `disabled_manually` is a human decision, not silence: reported on
+  # every run (never hidden) and not blocking. An EMPTY list (west-peek-os: deploy.yml
+  # deleted) and `disabled_inactivity` (GitHub's 60-day switch-off) stay findings.
+  nwf="$(printf '%s' "$wf" | jq -r 'length' 2>/dev/null || echo 0)"
+  nmanual="$(printf '%s' "$wf" | jq -r '[.[]|select(.state=="disabled_manually")]|length' 2>/dev/null || echo 0)"
+  if [ -z "$active" ] && [ "${nwf:-0}" -gt 0 ] && [ "$nmanual" = "$nwf" ]; then
+    printf 'NOCI\t%s\t(none)\t%s|ALL_WORKFLOWS_DISABLED_MANUALLY\tall %s workflows switched off by hand (retired repo) — standing condition, not a new break\n' \
+      "$repo" "$repo" "$nwf"
+    noci=$((noci+1))
+    continue
+  fi
   if [ -z "$active" ]; then
     if ! commits="$(gh api "repos/$OWNER/$repo/commits?since=$SINCE&sha=$branch" -q 'length' 2>/dev/null)" \
        || ! [ "$commits" -ge 0 ] 2>/dev/null; then

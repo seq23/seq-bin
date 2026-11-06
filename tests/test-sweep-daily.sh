@@ -597,13 +597,20 @@ else
 fi
 
 
-echo "=== 21. a Codex usage limit: the run WAITS (UNFINISHED, named), never handed to Claude ==="
+echo "=== 21. a Codex usage limit hands the round to Claude (her yes 6 Nov 2026, ai-run 955511a) ==="
 rm -f "$CARRY"; setup red-a1
 echo limit > "$TMP/codex-mode"
 sweep run-codex-limit; rc=$?
+check "claude ran the round Codex could not" [ -s "$TMP/claude-calls.log" ]
+check "the hand-off is in the run log with the reset time" grep -q 'Codex is out of usage (resets 3:05 PM); handing this run to Claude' "$LOGS/run-codex-limit.log"
+check "a round Claude did not finish is never read as green (rc=$rc, verdict $(last_verdict))" [ "$rc" -ne 0 ] && [ "$(last_verdict)" != "MAIN-GREEN" ]
+echo "=== 21b. with the hand-off switched off, a Codex limit still WAITS (UNFINISHED, named), no Claude ==="
+rm -f "$CARRY"; setup red-a1
+echo limit > "$TMP/codex-mode"
+sweep run-codex-limit-wait AI_RUN_NO_CLAUDE_FALLBACK=1; rc=$?
 check "the run ends MAIN-RED-UNFINISHED (rc=$rc)" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
 check "…after exactly one round (the limit stops the loop)" [ "$(rounds)" -eq 1 ]
-check "the log names CODEX_LIMIT with its reset time" grep -q 'NAMED STOP \[CODEX_LIMIT\] resets 3:05 PM' "$LOGS/run-codex-limit.log"
+check "the log names CODEX_LIMIT with its reset time" grep -q 'NAMED STOP \[CODEX_LIMIT\] resets 3:05 PM' "$LOGS/run-codex-limit-wait.log"
 check "claude was never run" [ ! -s "$TMP/claude-calls.log" ]
 check "the next run is carried the unfinished list" grep -q '^## UNFINISHED — resume from here' "$CARRY"
 rm -f "$CARRY"

@@ -48,7 +48,7 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
 JS
 node "$T/stub.mjs" "$T" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$T"' EXIT
-for _ in $(seq 1 50); do [ -s "$T/port" ] && break; sleep 0.1; done
+for _ in $(seq 1 300); do [ -s "$T/port" ] && break; sleep 0.1; done  # up to 30 s: a cold CI runner once took over 5 s to start node (6 Nov 2026)
 [ -s "$T/port" ] || { echo "FAIL: stub intake did not start"; exit 1; }
 
 OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$T/port")/intake"

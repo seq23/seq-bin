@@ -558,9 +558,11 @@ wait_run_bounded() { # $1 run id  $2 ceiling seconds
 }
 # Measured from the newest SUCCESSFUL run (1 Nov 2026): a failed or cancelled run ends early, and once
 # a load-error run of 2 min set e2e's ceiling to the 10-min floor, so a healthy 12-min run was cut off.
-last_duration() { # $1 workflow -> seconds of its newest successful run on main (default 1800)
-  gh run list --workflow "$1" --branch main --status success --limit 1 --json createdAt,updatedAt \
-    -q '.[0] | ((.updatedAt | fromdateiso8601) - (.createdAt | fromdateiso8601))' 2>/dev/null | grep -E '^[0-9]+$' || echo 1800
+# The LONGEST of the last 5 successful runs (6 Nov 2026): one quick 6-min dailystory deploy set a 9-min
+# ceiling and cut off a healthy 17-min run (normal is 17-19 min) in its warm-up step.
+last_duration() { # $1 workflow -> seconds of the longest of its last 5 successful runs on main (default 1800)
+  gh run list --workflow "$1" --branch main --status success --limit 5 --json createdAt,updatedAt \
+    -q '[.[] | ((.updatedAt | fromdateiso8601) - (.createdAt | fromdateiso8601))] | max // empty' 2>/dev/null | grep -E '^[0-9]+$' || echo 1800
 }
 # Run the full e2e workflow on main's head (or adopt the run already in flight on it) and wait,
 # bounded by 1.5x its last completed duration (floor 10 min). Sets RID and CONC; never dies, so the

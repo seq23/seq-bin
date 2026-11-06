@@ -93,7 +93,7 @@ case "$a" in
   # done and production's deployment record says origin/main. promote-hang = it never finishes.
   # last_duration reads the newest SUCCESSFUL run (land, 1 Nov 2026); the stub answers that query
   # only, so a land that went back to --status completed would fall to its 1800 s default and show.
-  "run list --workflow promote.yml "*"--status success --limit 1 --json createdAt,updatedAt"*|"run list --workflow deploy.yml "*"--status success --limit 1 --json createdAt,updatedAt"*) cat "$FAKE_DIR/promote-last" 2>/dev/null || echo 100; exit 0 ;;  # last_duration
+  "run list --workflow promote.yml "*"--status success --limit 5 --json createdAt,updatedAt"*|"run list --workflow deploy.yml "*"--status success --limit 5 --json createdAt,updatedAt"*) cat "$FAKE_DIR/promote-last" 2>/dev/null || echo 100; exit 0 ;;  # last_duration
   # --- land's own dispatch of a PROMOTE_VIA workflow (cases 19+): `workflow run` leaves its
   # arguments in `dispatched`; run 778 is that run; dispatch-conc is its conclusion (default
   # success), and on success the workflow has recorded production = origin/main (prod-state)
@@ -117,7 +117,7 @@ case "$a" in
   # (absent: "none", no run ever did; "tls": the history cannot be read).
   "run list --workflow e2e "*"conclusion,headSha,databaseId,status"*) answer e2e-last none ;;
   # e2e-pending = no green e2e yet; run 800 is in flight on origin/main and goes green when read.
-  "run list --workflow e2e "*"--status success --limit 1 --json createdAt,updatedAt"*) echo 100; exit 0 ;;  # last_duration
+  "run list --workflow e2e "*"--status success --limit 5 --json createdAt,updatedAt"*) echo 100; exit 0 ;;  # last_duration
   "run list --workflow e2e "*"--status success"*) [ -f "$FAKE_DIR/e2e-pending" ] || echo "$ORIGIN_MAIN"; exit 0 ;;
   "run list --workflow e2e "*"databaseId,headSha,status"*) [ -f "$FAKE_DIR/e2e-pending" ] && echo 800; exit 0 ;;
   "run list --workflow e2e "*) exit 0 ;;

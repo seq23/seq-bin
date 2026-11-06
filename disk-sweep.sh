@@ -128,7 +128,7 @@ if [ "$low" = 1 ]; then
   if [ "$DRY" = 1 ]; then note=" · LOW (dry run: no alert sent)"
   elif [ "$(cat "$STATE/alerted-on" 2>/dev/null)" = "$TODAY" ]; then note=" · LOW (already alerted today)"
   else
-    body="Your Mac has ${free_gb} GB free after this morning's disk sweep (it removed $(gb "$freed_kb") GB). Under ${LOW_GB} GB the Mac slows and jobs start failing. Nothing for you to do yet: Kendra's 09:00 clean-up runs next; if it stays low, Claude will look for what is filling it."
+    body="Your Mac has ${free_gb} GB free after the daily disk sweep, which removed $(gb "$freed_kb") GB of leftover files. Below ${LOW_GB} GB the Mac slows down and scheduled jobs start failing. Nothing to do right now; if this email comes again tomorrow, the space is going somewhere new and Claude should look for it."
     if [ -n "${DISK_SWEEP_NOTIFY:-}" ]; then "$DISK_SWEEP_NOTIFY" "Mac disk: ${free_gb} GB free" "$body"; rc=$?
     else
       BOSS="$HOME/.boss-os/runtime"; [ -f "$BOSS/scripts/ops/notify.mjs" ] || BOSS="$GITHUB/boss-os"

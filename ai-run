@@ -11,9 +11,9 @@
 #           There is NO paid OpenAI API (that is money): a Codex logged in with an API key is refused.
 #   brain   planning, deciding, reviewing, summarising for her, company-brain writes -> `claude -p`
 #           (--model opus and --dangerously-skip-permissions, as the scheduled jobs ran it).
-# A Codex usage limit means the work WAITS for the reset: exit 75 and
-#   NAMED STOP [CODEX_LIMIT] resets <time from Codex's own message>
-# It NEVER falls back to Claude. Codex missing or not logged in with ChatGPT:
+# A Codex usage limit hands the run to Claude (her yes 6 Nov 2026); only with AI_RUN_NO_CLAUDE_FALLBACK=1
+# does it wait for the reset: exit 75 and NAMED STOP [CODEX_LIMIT] resets <time from Codex's own message>.
+# Codex missing or not logged in with ChatGPT (callers such as ci-sweep hand that to Claude themselves):
 #   NAMED STOP [CODEX_UNAVAILABLE] ...   (exit 69)
 #
 # THE INTERFACE IS SHARED. boss-os and west-peek-os call this file with exactly the flags above;

@@ -72,7 +72,10 @@ BIN="$TMP/bin"; mkdir -p "$BIN" "$TMP/github/gamma/.git" "$TMP/logs"
 # argument) is logged: each must be `exec -s workspace-write` with network on.
 cat > "$BIN/codex" <<'SH'
 #!/bin/bash
-[ "$1 $2" = "login status" ] && { echo "Logged in using ChatGPT"; exit 0; }
+if [ "$1 $2" = "login status" ]; then
+  [ "$(cat "$FAKE_DIR/codex-mode" 2>/dev/null)" = logged-out ] && { echo "Not logged in"; exit 1; }
+  echo "Logged in using ChatGPT"; exit 0
+fi
 args=("$@"); unset 'args[${#args[@]}-1]'
 echo "${args[*]}" >> "$FAKE_DIR/codex-args.log"
 # Like the real `codex exec`, echo the prompt into the output first (its templates included).
@@ -89,10 +92,16 @@ case "$(cat "$FAKE_DIR/codex-mode" 2>/dev/null)" in
   *) echo "Worked the red repo; opened a PR; all checks green, merged."; echo "CI-SWEEP-COMPLETE: fixed" ;;
 esac
 SH
-# Claude must never run a round. Any call is recorded and fails the run's assertions.
+# Claude runs a round only when Codex is out (fallback chain, 6 Nov 2026). Every call is recorded;
+# claude-mode: fail (default: exit 1, no sentinel), fixed (finishes the round), limit (Claude's own limit).
 cat > "$BIN/claude" <<'SH'
 #!/bin/bash
-echo "$*" >> "$FAKE_DIR/claude-calls.log"; exit 1
+echo "$*" >> "$FAKE_DIR/claude-calls.log"
+case "$(cat "$FAKE_DIR/claude-mode" 2>/dev/null)" in
+  fixed) cat > /dev/null; echo "Worked the red repo on Claude; PR merged, checks green."; echo "CI-SWEEP-COMPLETE: fixed"; exit 0 ;;
+  limit) cat > /dev/null; echo "Claude AI usage limit reached|1762470000"; exit 1 ;;
+  *) exit 1 ;;
+esac
 SH
 cat > "$BIN/gh" <<'SH'
 #!/bin/bash
@@ -175,8 +184,8 @@ LOGS="$TMP/logs"; LEDGER="$LOGS/state/outcomes.tsv"; CARRY="$LOGS/state/carryove
 # setup <probe-seq...> — fresh fakes for one scenario
 setup() {
   printf '%s\n' "$@" > "$TMP/probe-seq"; rm -f "$TMP/probe-n" "$TMP"/merged-* "$TMP"/checks-* "$TMP/audit-called" "$TMP/merge-refuse" "$TMP/no-dispatch" "$TMP/land-unverified"
-  : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/codex-args.log"; : > "$TMP/claude-calls.log"; : > "$TMP/land-calls.log"
-  echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/codex-mode"
+  : > "$TMP/open-prs"; : > "$TMP/gh-calls.log"; : > "$TMP/codex-args.log"; : > "$TMP/claude-calls.log"; : > "$TMP/land-calls.log"; : > "$TMP/ai-run.log"
+  echo clean > "$TMP/audit-mode"; echo fixed > "$TMP/codex-mode"; echo fail > "$TMP/claude-mode"
 }
 sweep() { # sweep <run-id> [ENV=VAL ...]
   local id="$1"; shift
@@ -604,6 +613,28 @@ sweep run-codex-limit; rc=$?
 check "claude ran the round Codex could not" [ -s "$TMP/claude-calls.log" ]
 check "the hand-off is in the run log with the reset time" grep -q 'Codex is out of usage (resets 3:05 PM); handing this run to Claude' "$LOGS/run-codex-limit.log"
 check "a round Claude did not finish is never read as green (rc=$rc, verdict $(last_verdict))" [ "$rc" -ne 0 ] && [ "$(last_verdict)" != "MAIN-GREEN" ]
+check "…and once Codex is found out, later rounds go straight to Claude (codex exec ran $(rounds) time(s))" [ "$(rounds)" -eq 1 ]
+echo "=== 21a. Codex UNAVAILABLE (logged out) hands the same brief to Claude, which finishes the run green ==="
+rm -f "$CARRY"; setup red-a1 green
+echo logged-out > "$TMP/codex-mode"; echo fixed > "$TMP/claude-mode"
+sweep run-codex-out; rc=$?
+check "claude ran the round Codex could not" [ -s "$TMP/claude-calls.log" ]
+check "…given the same brief (the prompt reached Claude on the worker role)" grep -q 'engine=claude-override' "$TMP/ai-run.log"
+check "the log names CODEX_UNAVAILABLE and the hand-off" grep -q 'handing the same brief to Claude' "$LOGS/run-codex-out.log"
+check "the run ends MAIN-GREEN, not waiting for Codex (rc=$rc, verdict $(last_verdict))" [ "$(last_verdict)" = "MAIN-GREEN" ]
+echo "=== 21b-claude. Codex out AND Claude at its limit: a NAMED STOP, UNFINISHED, carried over ==="
+rm -f "$CARRY"; setup red-a1
+echo logged-out > "$TMP/codex-mode"; echo limit > "$TMP/claude-mode"
+sweep run-both-out
+check "the run ends MAIN-RED-UNFINISHED ($(last_verdict))" [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ]
+check "…named CLAUDE_LIMIT" grep -q 'NAMED STOP \[CLAUDE_LIMIT\]' "$LOGS/run-both-out.log"
+check "…after exactly one Claude round" [ "$(grep -c . "$TMP/claude-calls.log")" -eq 1 ]
+check "the next run is carried the unfinished list" grep -q '^## UNFINISHED — resume from here' "$CARRY"
+rm -f "$CARRY"; setup red-a1
+echo logged-out > "$TMP/codex-mode"
+sweep run-no-claude AI_RUN_CLAUDE_BIN="$TMP/no-such-claude"
+check "Codex out and no Claude CLI ends UNFINISHED named CLAUDE_UNAVAILABLE ($(last_verdict))" \
+  [ "$(last_verdict)" = "MAIN-RED-UNFINISHED" ] && grep -q 'NAMED STOP \[CLAUDE_UNAVAILABLE\]' "$LOGS/run-no-claude.log"
 echo "=== 21b. with the hand-off switched off, a Codex limit still WAITS (UNFINISHED, named), no Claude ==="
 rm -f "$CARRY"; setup red-a1
 echo limit > "$TMP/codex-mode"
@@ -656,5 +687,5 @@ if [ "$failed" -gt 0 ]; then
   for f in "$TMP"/*.out; do [ -s "$f" ] && { echo "--- $(basename "$f")"; tail -20 "$f"; }; done
   exit 1
 fi
-echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, runs every round on Codex (never Claude), reports every morning, never retries or closes a PR, and a pause-until date stops it at zero cost until it resumes itself."
+echo "ci-sweep.sh parks per repo, iterates while it makes progress, merges only what it read green, runs every round on Codex (Claude only when Codex is out), reports every morning, never retries or closes a PR, and a pause-until date stops it at zero cost until it resumes itself."
 exit 0

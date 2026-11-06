@@ -151,12 +151,12 @@ check "ai-run ends when killed (rc=$rc)" [ "$rc" -ne 0 ]
 check "the line printed before the kill is in --out" grep -q 'first line' "$TMP/out.log"
 absent "the codex child did not survive the kill" pgrep -f "$BIN/codex exec"
 
-echo "=== 7. AI_RUN_WORKER=claude is her override; only the partner tail sets it (her words 6 Nov: \"A partner tail is a Claude Job\") ==="
+echo "=== 7. AI_RUN_WORKER=claude is her override; only the partner tail and the ci-sweep Codex-out hand-off set it (her yes 6 Nov 2026) ==="
 reset
 run env AI_RUN_WORKER=claude "$AI" --role worker -- "by hand" >/dev/null
 check "the override runs the worker on claude" [ "$(claude_calls)" -eq 1 ]
 check "…logged as engine=claude-override" grep -q $'engine=claude-override' "$AI_RUN_LOG"
-setters="$(cd "$ROOT" && git ls-files 2>/dev/null | grep -vxE 'ai-run|tests/test-ai-run.sh|README.md|docs/.*|scooter-watch-run-fix.sh' | while IFS= read -r f; do [ -f "$f" ] && grep -lE 'AI_RUN_WORKER=' "$f"; done)"
+setters="$(cd "$ROOT" && git ls-files 2>/dev/null | grep -vxE 'ai-run|tests/test-ai-run.sh|README.md|docs/.*|scooter-watch-run-fix.sh|ci-sweep.sh' | while IFS= read -r f; do [ -f "$f" ] && grep -lE 'AI_RUN_WORKER=' "$f"; done)"
 if [ -n "$(cd "$ROOT" && git ls-files 2>/dev/null | head -1)" ]; then
   check "no tracked job sets AI_RUN_WORKER (found: ${setters:-none})" [ -z "$setters" ]
 else

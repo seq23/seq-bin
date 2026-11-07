@@ -72,7 +72,7 @@ setup; DISK_SWEEP_LOW_GB=999999 run
 DISK_SWEEP_LOW_GB=999999 run
 [ "$(wc -l <"$T/w/sent")" -eq 1 ] || bad "a second alert was sent the same day"
 setup; NOTIFY_RC=5 DISK_SWEEP_LOW_GB=999999 run
-[ "$(cat "$T/rc")" = 9 ] && grep -q "NAMED STOP \[SEND_REFUSED\]" "$T/out" || bad "a refused alert was not NAMED STOP exit 9 (rc $(cat "$T/rc"))"
+[ "$(cat "$T/rc")" = 9 ] && grep -q "NAMED STOP \[UPDATE_REFUSED\]" "$T/out" || bad "a refused alert was not NAMED STOP exit 9 (rc $(cat "$T/rc"))"
 
 # No temp folder: named stop, never a green run.
 DISK_SWEEP_TEMP="$T/nope" bash "$S" >"$T/out" 2>&1; rc=$?

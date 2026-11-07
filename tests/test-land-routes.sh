@@ -24,7 +24,7 @@ west-peek-network-os|self
 secondaries|self
 founder-dilution-dashboard|self
 west-peek-os|npm run deploy:production
-boss-os|npm run deploy:production
+boss-os|npm run -s vault:run -- npm run deploy:production
 horse-legal-guide-velocity|self
 WPP-llm|self
 approvalprep|self

@@ -30,9 +30,11 @@
 #   · CODEX DOES THE FIXING (owner ruling, 3 Nov 2026: "after today we need to default
 #     OpenAI and Claude just be the brains"). Every round is ONE `~/bin/ai-run --role
 #     worker --cwd ~/GitHub --network` run (codex exec on her ChatGPT plan), which works
-#     the red repos one at a time. A Codex usage limit (ai-run exit 75, CODEX_LIMIT)
-#     ends the run MAIN-RED-UNFINISHED: the work waits for the reset, it is never
-#     handed to Claude. No round ever runs `claude -p`.
+#     the red repos one at a time. Codex out (usage limit, or not installed / logged
+#     in) hands the SAME brief to Claude (AI_RUN_WORKER=claude through ai-run, same
+#     cap, same budget) for that round and the rest of the run — her fallback chain,
+#     6 Nov 2026: never wait for a reset while a later step can run. Claude out too
+#     ends the run MAIN-RED-UNFINISHED with a NAMED STOP. No round runs `claude -p` itself.
 #   · A repo only she can unblock (a credential, an account setting, a genuine
 #     product decision) is PARKED — for that repo only. The run keeps going on
 #     every other red repo.
@@ -754,7 +756,7 @@ probe_main() {
 # lock, no AI run, no PR, no merge, no notification.
 if [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
   echo "[dry-run] schedule: Mon+Fri 08:00 CT (launchd com.seq.ci-sweep), one retry at 09:00 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Mon/Fri run"
-  echo "[dry-run] engine: every round runs ai-run --role worker (Codex); a Codex usage limit waits for the reset, never Claude"
+  echo "[dry-run] engine: every round runs ai-run --role worker (Codex); Codex out (limit or unavailable) hands the same brief to Claude; both out is a named stop"
   echo "[dry-run] budget: ${DEADLINE_MIN} min convergence, hard kill at ${HARD_KILL_MIN} awake min; round 1 cap ${ROUND1_CAP_MIN} min, later rounds ${ROUNDN_CAP_MIN} min"
   echo "[dry-run] rounds continue while a round makes progress; STUCK after ${NO_PROGRESS_LIMIT} consecutive rounds without"
   [ -x "$PROBE" ] || { echo "[dry-run] NAMED STOP [NO_PROBE] $PROBE"; exit 13; }
@@ -974,12 +976,12 @@ fi
 cd "$GITHUB_DIR" || { say "NAMED STOP [NO_GITHUB_DIR] $GITHUB_DIR"; exit 8; }
 
 say "=== CI sweep starting ($STAMP) ==="
-say "worker: $AI_RUN --role worker (Codex; a usage limit waits for the reset, never Claude)"
+say "worker: $AI_RUN --role worker (Codex; Codex out -> the same brief goes to Claude; both out -> named stop)"
 say "budget: ${DEADLINE_MIN} min (stop by $(at_time "$DEADLINE_AT" +%H:%M)); rounds while progress, STUCK after ${NO_PROGRESS_LIMIT} without"
 say "work dir: $WORK"
 
 # --- the convergence loop ----------------------------------------------------
-round=0
+round=0; SWEEP_ON_CLAUDE=""   # set once Codex is found out; the rest of the run goes to Claude
 no_progress=0
 prev_keys=""          # unparked red lanes (repo|workflow) at the previous probe
 prev_sigs=""          # their failure signatures
@@ -1219,20 +1221,63 @@ $(cat "$CARRY")"
   # its pid is its pgid, recorded for the supervisor to end. ci-sweep-selftest.sh fails if
   # a round runs anything but `"$AI_RUN" --role worker`.
   : > "$ROUND_LOG"
-  timeout --signal=TERM --kill-after=60 "${CAP}m" \
-    "$AI_RUN" --role worker --cwd "$GITHUB_DIR" --network --out "$ROUND_LOG" -- "$ROUND_PROMPT" \
-    < /dev/null > /dev/null 2>&1 &
-  tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; RC=$?; forget_pgid "$tpid"
-  cat "$ROUND_LOG" >> "$RUN_LOG"
-  say "=== round $round: worker exited rc=$RC ==="
+  # ENGINE for this round: Codex, unless an earlier round of this run already found Codex out.
+  ROUND_ON_CLAUDE=""; CLAUDE_FROM=0; CODEX_STOP=""; RC=0
+  if [ -z "${SWEEP_ON_CLAUDE:-}" ]; then
+    timeout --signal=TERM --kill-after=60 "${CAP}m" \
+      "$AI_RUN" --role worker --cwd "$GITHUB_DIR" --network --out "$ROUND_LOG" -- "$ROUND_PROMPT" \
+      < /dev/null > /dev/null 2>&1 &
+    tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; RC=$?; forget_pgid "$tpid"
+    CODEX_STOP="$(grep -o 'NAMED STOP \[CODEX_[A-Z_]*\].*' "$ROUND_LOG" | tail -1)"
+    # ai-run hands a Codex usage limit to Claude itself (955511a): this round already ran on Claude.
+    if grep -q '^Codex is out of usage .*handing this run to Claude' "$ROUND_LOG"; then
+      ROUND_ON_CLAUDE=1; SWEEP_ON_CLAUDE=1
+      say "Codex is out of usage; ai-run handed round $round to Claude, and the rest of this run goes to Claude."
+    fi
+  fi
 
-  # --- Codex could not work: the run WAITS, it is never handed to Claude -------------
-  # 75 = CODEX_LIMIT (usage limit; resets at the time ai-run names), 69 = CODEX_UNAVAILABLE.
-  if [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; then
+  # --- Codex could not work: the SAME brief goes to Claude (her fallback chain, 6 Nov 2026) --
+  # "Gemini free -> OpenRouter free -> Codex -> Claude -> a named stop; never waiting for a reset
+  # while a later step can run". 75 = CODEX_LIMIT (reaches here only with ai-run's own hand-off off),
+  # 69 = CODEX_UNAVAILABLE. AI_RUN_NO_CLAUDE_FALLBACK=1 switches the hand-off off here too. Claude
+  # gets the same round cap; the budget is the run's. Claude out too is the named stop below.
+  if [ -z "$ROUND_ON_CLAUDE" ] && [ -z "${AI_RUN_NO_CLAUDE_FALLBACK:-}" ] &&
+     { [ -n "${SWEEP_ON_CLAUDE:-}" ] || { { [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; } && [ -n "$CODEX_STOP" ]; }; }; then
+    if [ -z "${SWEEP_ON_CLAUDE:-}" ]; then
+      say "$CODEX_STOP"
+      say "Codex could not work round $round; handing the same brief to Claude for the rest of this run (fallback chain, her yes 6 Nov 2026)."
+      SWEEP_ON_CLAUDE=1
+    fi
+    ROUND_ON_CLAUDE=1; CLAUDE_FROM="$(wc -c < "$ROUND_LOG" | tr -d ' ')"
+    timeout --signal=TERM --kill-after=60 "${CAP}m" \
+      env AI_RUN_WORKER=claude "$AI_RUN" --role worker --cwd "$GITHUB_DIR" --network --out "$ROUND_LOG" -- "$ROUND_PROMPT" \
+      < /dev/null > /dev/null 2>&1 &
+    tpid=$!; echo "$tpid" >> "$WORK/child-pgids"; wait "$tpid"; RC=$?; forget_pgid "$tpid"
+  fi
+  cat "$ROUND_LOG" >> "$RUN_LOG"
+  say "=== round $round: worker exited rc=$RC$([ -n "$ROUND_ON_CLAUDE" ] && echo ' (on Claude)') ==="
+
+  # --- Claude out too: the last step of the chain is spent, a NAMED STOP -------------------
+  # No CLI (ai-run 69 CLAUDE_UNAVAILABLE), or Claude's own usage-limit line on a failed exit.
+  if [ -n "$ROUND_ON_CLAUDE" ]; then
+    CLAUDE_STOP="$(tail -c +"$((CLAUDE_FROM + 1))" "$ROUND_LOG" | grep -o 'NAMED STOP \[CLAUDE_[A-Z_]*\].*' | tail -1)"
+    if [ -z "$CLAUDE_STOP" ] && [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && [ "$RC" -ne 137 ]; then
+      LIM="$(tail -c +"$((CLAUDE_FROM + 1))" "$ROUND_LOG" | tail -n 40 | grep -iE '(usage limit reached|hit your (usage )?limit|out of (extra )?usage)' | grep -v '^Codex is out of usage' | tail -1)"
+      [ -n "$LIM" ] && CLAUDE_STOP="NAMED STOP [CLAUDE_LIMIT] $(printf '%s' "$LIM" | cut -c1-160)"
+    fi
+    if [ -n "$CLAUDE_STOP" ]; then
+      say "$CLAUDE_STOP"
+      park_open_prs "Codex and Claude both stopped before this PR's fix was verified ($CLAUDE_STOP)"
+      finish "MAIN-RED-UNFINISHED" "$RED_COUNT lane(s) still red in [$RED_REPOS]; round $round could not run: Codex is out (${CODEX_STOP:-usage limit}) and so is Claude ($CLAUDE_STOP). Every step of the chain is spent; the unfinished list is in the carryover and the next run resumes from it."
+    fi
+  fi
+
+  # --- Codex out with the Claude hand-off switched off (AI_RUN_NO_CLAUDE_FALLBACK=1): the run WAITS --
+  if [ -z "$ROUND_ON_CLAUDE" ] && { [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; }; then
     STOPLINE="$(grep -o 'NAMED STOP \[CODEX_[A-Z_]*\].*' "$ROUND_LOG" | tail -1)"
     say "${STOPLINE:-NAMED STOP [CODEX_UNAVAILABLE] ai-run exited $RC}"
     park_open_prs "Codex stopped before this PR's fix was verified (${STOPLINE:-ai-run exit $RC})"
-    finish "MAIN-RED-UNFINISHED" "$RED_COUNT lane(s) still red in [$RED_REPOS]; round $round could not run: ${STOPLINE:-ai-run exit $RC}. The work waits for Codex (never Claude); the unfinished list is in the carryover and the next run resumes from it."
+    finish "MAIN-RED-UNFINISHED" "$RED_COUNT lane(s) still red in [$RED_REPOS]; round $round could not run: ${STOPLINE:-ai-run exit $RC}. The Claude hand-off is switched off for this run (AI_RUN_NO_CLAUDE_FALLBACK); the unfinished list is in the carryover and the next run resumes from it."
   fi
 
   # --- Rule 0, per round: prove this round reached its end ------------------------

@@ -148,3 +148,5 @@ jobs:
           CI_SWEEP_SELFTEST_OFFLINE: "1"
           CI_SWEEP_SELFTEST_SKIP_DAILY: "1"
         run: ./ci-sweep-selftest.sh
+      - name: a named job is tailed, her own replies included
+        run: ./tests/test-scooter-watch-named.sh

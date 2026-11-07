@@ -198,6 +198,8 @@ PY
 OS_TOTAL="$(printf '%s' "$OS_ROWS" | grep -c . || true)"
 echo "[watch] source 1: OS inbound table ($OS_MAILBOX), from Scooter — $OS_TOTAL row(s) since the window started"
 
+# shellcheck source=scooter-watch-named.sh
+. "$(dirname "$0")/scooter-watch-named.sh"
 NEW_OS=0
 while IFS=$'\t' read -r id date from subject card; do
   [ -z "$id" ] && continue
@@ -208,14 +210,21 @@ while IFS=$'\t' read -r id date from subject card; do
     # 6 Nov 2026, her words ("cancel the tail that started on my own replies"): her REPLY to an email the OS
     # sent her (a Wynn/OS notice carrying a ref like TLP-/TLR-/TLC-xxxxxx: approve, changes, skip) is never
     # tailed. Jobs she sends to os@ herself (no ref, not a reply) are still tailed (22 Oct ruling).
-    if printf '%s' "$from" | grep -qi "$PARTNER_B" && printf '%s' "$subject" | grep -qiE '^(re|fwd?):' \
+    # 7 Nov 2026, her words ("put a tail on this pinecone job so u tail it goin forward"): a job she
+    # names is tailed end to end, her own replies included. Its refs (every code the thread has carried)
+    # are listed one per line in $STATE_DIR/tail-refs.txt; a subject carrying one skips both
+    # exclusions below. The file lives in state, not the repo: it names brands.
+    named="$(named_ref "$subject" "$STATE_DIR/tail-refs.txt")"
+    if [ -n "$named" ]; then
+      echo "[watch] named job ($named) — tailed, her reply included: $subject"
+    elif printf '%s' "$from" | grep -qi "$PARTNER_B" && printf '%s' "$subject" | grep -qiE '^(re|fwd?):' \
        && printf '%s' "$subject" | grep -qE '\b[A-Z]{3}-[A-Z0-9]{6}\b'; then
       echo "$id" >> "$SEEN_FILE"
       echo "[watch] her own reply to an OS email — not tailed: $subject"
       continue
     fi
     ref="$(printf '%s' "$subject" | grep -oE 'TLR-[A-Z0-9]{6}' | head -1)"
-    if [ -n "$ref" ] && printf '%s' "$from" | grep -qi "$PARTNER_B"; then
+    if [ -z "$named" ] && [ -n "$ref" ] && printf '%s' "$from" | grep -qi "$PARTNER_B"; then
       left="$(cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \
         --command "SELECT COUNT(*) AS n FROM tlc_brand_reply WHERE notice_ref = '$ref' AND state NOT IN ('SENT','SKIPPED')" 2>>"$RUN_LOG" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["results"][0]["n"])' 2>/dev/null)"

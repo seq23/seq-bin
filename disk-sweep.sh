@@ -18,7 +18,7 @@
 # Never: how-we-know renders/audio, ~/.cache/huggingface, ~/.colima, Documents, Desktop, Downloads,
 # Pictures, Photos, Movies, ~/.Trash. `allowed()` refuses any path outside the three classes above.
 #
-# Under 15 GB free after the sweep: ONE email a day through Boss OS's existing push
+# Under 15 GB free after the sweep: ONE row a day on Boss OS's Updates page (never an email, 7 Nov 2026), through
 # (`npm run notify` in boss-os, from Simone; the same path mac-cleanup uses). A refused send is
 # NAMED STOP [SEND_REFUSED], exit 9.
 #
@@ -128,18 +128,19 @@ if [ "$low" = 1 ]; then
   if [ "$DRY" = 1 ]; then note=" · LOW (dry run: no alert sent)"
   elif [ "$(cat "$STATE/alerted-on" 2>/dev/null)" = "$TODAY" ]; then note=" · LOW (already alerted today)"
   else
-    body="Your Mac has ${free_gb} GB free after the daily disk sweep, which removed $(gb "$freed_kb") GB of leftover files. Below ${LOW_GB} GB the Mac slows down and scheduled jobs start failing. Nothing to do right now; if this email comes again tomorrow, the space is going somewhere new and Claude should look for it."
+    body="Your Mac has ${free_gb} GB free after the daily disk sweep, which removed $(gb "$freed_kb") GB of leftover files. Below ${LOW_GB} GB the Mac slows down and scheduled jobs start failing. Nothing to do: if this shows again tomorrow, the space is going somewhere new and the team looks for it."
     if [ -n "${DISK_SWEEP_NOTIFY:-}" ]; then "$DISK_SWEEP_NOTIFY" "Mac disk: ${free_gb} GB free" "$body"; rc=$?
     else
       BOSS="$HOME/.boss-os/runtime"; [ -f "$BOSS/scripts/ops/notify.mjs" ] || BOSS="$GITHUB/boss-os"
-      (cd "$BOSS" && npm run -s notify -- --from Simone --subject "Mac disk: ${free_gb} GB free" --body "$body"); rc=$?
+      # On the Updates page, never an email (owner, 7 Nov 2026: the team fixes disk, she does not).
+      (cd "$BOSS" && npm run -s update:post -- --key "mac-disk:${TODAY}" --from Simone --subject "Mac disk: ${free_gb} GB free" --body "$body"); rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
       echo "OUTPUT freed $(gb "$freed_kb") GB, free ${free_gb} GB (clones $n_clones, fixtures $n_fix, worktrees $n_wt removed; ${#kept[@]} left alone)"
-      echo "NAMED STOP [SEND_REFUSED] free space is ${free_gb} GB (< ${LOW_GB}) and the alert was not sent (exit $rc). Run it by hand from boss-os: npm run notify -- --from Simone --subject 'Mac disk' --body '...'" >&2
+      echo "NAMED STOP [UPDATE_REFUSED] free space is ${free_gb} GB (< ${LOW_GB}) and the line did not reach the Updates page (exit $rc)." >&2
       exit 9
     fi
-    echo "$TODAY" >"$STATE/alerted-on"; note=" · LOW: alert sent"
+    echo "$TODAY" >"$STATE/alerted-on"; note=" · LOW: on the Updates page"
   fi
 fi
 [ "$DRY" = 1 ] && note="${note} · DRY RUN"

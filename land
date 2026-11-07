@@ -90,6 +90,10 @@ if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# The screens people operate, out of a list of changed paths (stdin, one per line): the app's client
+# code and component files. Tests, stories and content pages (.html/.md, a site's articles) are not
+# screens someone operates. Pure; prints nothing when none.
+operated_ui_files() { grep -E '(^|/)src/client/|\.(tsx|jsx|vue|svelte)$' | grep -vE '(^|/)(tests?|__tests__|e2e|playwright)/|\.(test|spec|stories)\.' || true; }
 die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
 
 MODE="land"; PR=""; TARGET=""; RUN_E2E=""
@@ -794,6 +798,19 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 # not green whatever the exit code says; only `pass` (and a genuinely `skipping` job) is.
 NOTGREEN="$(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' <<<"$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
+# CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
+# 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
+# every section, and only a click would have caught it. hostile-review step 4 said to click it; a
+# skill no code reads is a wish. So a PR that changes a screen people operate (operated_ui_files)
+# lands only with a "Clicked through: <what, 390 px, console clean>" line in its body or a comment.
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments)" \
+  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
+UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
+if [ -n "$UIFILES" ]; then
+  jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$PRMETA" | grep -qiE '^[[:space:]>*-]*Clicked through:' \
+    || die "NAMED STOP [NOT_CLICKED_THROUGH] PR #$PR changes screens people operate ($(head -3 <<<"$UIFILES" | tr '\n' ' ')) and carries no \"Clicked through:\" line. Click every changed path in a real browser at 390 px with the console open (hostile-review step 4), then: gh pr comment $PR --body 'Clicked through: <what, 390 px, console clean>' and land again."
+  say "    clicked through: $(jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$PRMETA" | grep -iE '^[[:space:]>*-]*Clicked through:' | tail -1 | cut -c1-140)"
+fi
 # An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
 HEAD="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"

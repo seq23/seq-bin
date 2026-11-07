@@ -75,6 +75,8 @@ case "$a" in
   "pr view "*"state,mergeCommit"*) merged && echo "MERGED/$MERGESHA" || echo "OPEN/"; exit 0 ;;
   "pr checks "*) answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
   "pr view "*headRefOid*) answer head "$HEADSHA" ;;
+  # pr-meta = the PR's files/body/comments JSON (case 1d); absent = one non-screen file, no body.
+  "pr view "*"files,body,comments"*) cat "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
@@ -220,6 +222,25 @@ check "rc 0" [ "$RC" -eq 0 ]
 check "nothing was merged again" eval '! merge_called'
 check "the merged PR's checks were read once, for the workflow" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
 check "…and its workflow was handed to the pick of the merge commit's run" grep -q '^run list --branch main .*Fast Check' "$FAKE/calls"
+
+echo "=== 1d. a changed screen lands only once it was clicked through (olp_m6qyb1m4wke6h9dx) ==="
+fixture approvalprep
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"},{"path":"tests/x.test.ts"}],"body":"Adds the page.","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "rc 1: stopped" [ "$RC" -eq 1 ]
+check "a named stop that names the screen" has "NAMED STOP [NOT_CLICKED_THROUGH]"
+check "…and the file" has "src/client/boss/pages/Updates.tsx"
+check "nothing was merged" eval '! merge_called'
+fixture approvalprep
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "with a Clicked through comment: rc 0" [ "$RC" -eq 0 ]
+check "…and it was merged" merge_called
+check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
+fixture approvalprep
+echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
 
 echo "=== 2. checkout on a feature branch: not switched to main ==="
 fixture approvalprep

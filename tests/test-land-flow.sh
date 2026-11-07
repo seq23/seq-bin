@@ -606,7 +606,7 @@ MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
 small_pr; mkdir "$W/boss-os/node_modules"
 run_land boss-os
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
-check "one deploy, production, at the merge sha" [ "$(npm_log)" = "run deploy:production head=$ORIGIN_MAIN" ]
+check "one deploy, production, at the merge sha, through the vault" [ "$(npm_log)" = "run -s vault:run -- npm run deploy:production head=$ORIGIN_MAIN" ]
 check "recorded with the reason" grep -qF "land #7, $SMALL_REASON" "$FAKE/deploy-record"
 check "LANDED — production (no 'staging and')" has "LANDED — #7 is merged, main is green, production run ${ORIGIN_MAIN:0:7}"
 MERGESHA="2222222222222222222222222222222222222222"; export MERGESHA

@@ -203,7 +203,7 @@ case "$NAME" in
   # 2 Oct 2026: e2e is dispatch-only; `land <pr>` ships a small change on the fast check and runs
   # the suite after a large one — and then WAITS for deploy.yml (PROMOTE_WF) instead of racing it
   # with a second `d1 migrations apply` from the laptop.
-  boss-os)              DEPLOY="npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
+  boss-os)              DEPLOY="npm run -s vault:run -- npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
   # 6 Oct 2026: Workers Builds is upload-only for west-peek-live. Production ships ONLY through
   # .github/workflows/deploy-cloudflare-worker.yml ("Deploy Cloudflare Worker"): workflow_run on a
   # green "Repository validation" of a push to main, D1 migrations, deploy, postdeploy smoke. Before

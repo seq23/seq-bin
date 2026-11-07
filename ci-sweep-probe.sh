@@ -196,7 +196,7 @@ for dir in "$GITHUB_DIR"/*/; do
   for attempt in 1 2 3; do
     # gh exits 0 with EMPTY stdout (not '[]') for a repo that has no workflows; only
     # a non-zero exit is a failed read.
-    if wf="$(gh workflow list --repo "$OWNER/$repo" --json name,state,path 2>/dev/null)"; then
+    if wf="$(gh workflow list --all --repo "$OWNER/$repo" --json name,state,path 2>/dev/null)"; then
       [ -n "$wf" ] || wf='[]'
       printf '%s' "$wf" | jq -e 'type=="array"' >/dev/null 2>&1 && break
     fi
@@ -216,6 +216,8 @@ for dir in "$GITHUB_DIR"/*/; do
   # Every workflow `disabled_manually` is a human decision, not silence: reported on
   # every run (never hidden) and not blocking. An EMPTY list (west-peek-os: deploy.yml
   # deleted) and `disabled_inactivity` (GitHub's 60-day switch-off) stay findings.
+  # `gh workflow list` hides disabled workflows unless asked with --all; without it a
+  # retired repo reads as an empty list (the first version of this fix missed that).
   nwf="$(printf '%s' "$wf" | jq -r 'length' 2>/dev/null || echo 0)"
   nmanual="$(printf '%s' "$wf" | jq -r '[.[]|select(.state=="disabled_manually")]|length' 2>/dev/null || echo 0)"
   if [ -z "$active" ] && [ "${nwf:-0}" -gt 0 ] && [ "$nmanual" = "$nwf" ]; then
@@ -343,7 +345,7 @@ for dir in "$GITHUB_DIR"/*/; do
   : > "$VERDICTS"
   while IFS= read -r flow; do
     [ -z "$flow" ] && continue
-    wpath="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n)|.path' 2>/dev/null | head -1)"
+    wpath="$(printf '%s' "$wf" | jq -r --arg n "$flow" '.[]|select(.name==$n and .state=="active")|.path' 2>/dev/null | head -1)"
     should="UNKNOWN"; why="workflow file not present in the local checkout"
     if [ -n "$wpath" ] && [ -f "$dir/$wpath" ]; then
       vline="$("$TRIGGERS" should-run --workflow "$dir/$wpath" --branch "$branch" \

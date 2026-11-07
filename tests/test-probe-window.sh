@@ -48,7 +48,9 @@ cat > "$TMP/bin/gh" <<'S'
 case "$1 $2" in
   "auth status") exit 0 ;;
   "repo list") echo '[{"name":"r","isArchived":false,"defaultBranchRef":{"name":"main"}}]' ;;
-  "workflow list") [ -n "${FAKE_WF:-}" ] && { echo "$FAKE_WF"; exit 0; }; echo '[{"name":"Validate","state":"active","path":".github/workflows/validate.yml"},{"name":"Ingestion Sync","state":"active","path":".github/workflows/ingestion.yml"}]' ;;
+  "workflow list") # like real gh: disabled workflows are listed only with --all
+    if [ -n "${FAKE_WF:-}" ]; then case " $* " in *" --all "*) echo "$FAKE_WF" ;; *) echo "$FAKE_WF" | jq -c '[.[]|select(.state=="active")]' ;; esac; exit 0; fi
+    echo '[{"name":"Validate","state":"active","path":".github/workflows/validate.yml"},{"name":"Ingestion Sync","state":"active","path":".github/workflows/ingestion.yml"}]' ;;
   "run list")
     case " $* " in
       *" --workflow ingestion.yml "*)

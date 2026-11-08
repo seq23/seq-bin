@@ -34,9 +34,10 @@ function save(name, value) {
   console.log(`saved to the vault as ${name}`);
 }
 
-const clientId = ask('WordPress.com app: Client ID (a number)', false);
+// Already in the vault (vault:run injects them) → no pop-ups.
+const clientId = process.env[`${PREFIX}CLIENT_ID`] || ask('WordPress.com app: Client ID (a number)', false);
 if (!/^\d+$/.test(clientId)) fail('the Client ID is a number; copy it from the app page.');
-const clientSecret = ask('WordPress.com app: Client Secret', true);
+const clientSecret = process.env[`${PREFIX}CLIENT_SECRET`] || ask('WordPress.com app: Client Secret', true);
 const state = crypto.randomBytes(16).toString('hex');
 
 const code = await new Promise((resolve, reject) => {

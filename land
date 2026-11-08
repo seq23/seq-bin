@@ -1114,12 +1114,12 @@ pages_cf_sources() { # -> one JSON array [{name,inc,exc}] of the Pages projects 
     n="$(curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=$page")" || return 1
     jq -e '.success == true' >/dev/null 2>&1 <<<"$n" || return 1
     total="$(jq -r '.result_info.total_pages // 1' <<<"$n")"
-    all="$(jq -c --arg s "$slug" --argjson a "$all" '$a + [.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main") | {name, inc: (.source.config.path_includes // ["*"]), exc: (.source.config.path_excludes // [])}]' <<<"$n")" || return 1
+    all="$(jq -c --arg s "$slug" --argjson a "$all" '$a + [.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main") | {name, inc: (.source.config.path_includes // ["*"]), exc: (.source.config.path_excludes // []), paused: (.source.config.production_deployments_enabled == false)}]' <<<"$n")" || return 1
     page=$((page + 1))
   done
   printf '%s\n' "$all"
 }
-pages_idle() { # $1 merge sha -> check-run names of Pages projects whose watch paths no changed file reaches (empty = none known idle)
+pages_idle() { # $1 merge sha -> check-run names of Pages projects whose watch paths no changed file reaches, or whose Git production builds are paused (empty = none known idle)
   local files nf src
   files="$(gh api "repos/{owner}/{repo}/commits/$1" --jq '.files[].filename' 2>/dev/null)" || return 0
   nf="$(printf '%s\n' "$files" | grep -c . || true)"
@@ -1128,7 +1128,7 @@ pages_idle() { # $1 merge sha -> check-run names of Pages projects whose watch p
   jq -r --arg f "$files" '
     def g2r: "^" + (gsub("(?<c>[.+?^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*")) + "$";
     ($f | split("\n") | map(select(. != ""))) as $files | length as $np
-    | .[] | select(. as $p | [$files[] | . as $x | select(any($p.inc[]; g2r as $r | $x | test($r)) and (any($p.exc[]?; g2r as $r | $x | test($r)) | not))] | length == 0)
+    | .[] | select(.paused or (. as $p | [$files[] | . as $x | select(any($p.inc[]; g2r as $r | $x | test($r)) and (any($p.exc[]?; g2r as $r | $x | test($r)) | not))] | length == 0))
     | "Cloudflare Pages: \(.name)", (if $np == 1 then "Cloudflare Pages" else empty end)' <<<"$src" 2>/dev/null
 }
 pages_watch() { # $1 merge sha, $2 PAGES_PROJECTS -> 0 every expected build succeeded | 1 failed/timed out | 2 none expected, none posted | 3 none needed (watch paths)
@@ -1152,7 +1152,7 @@ pages_watch() { # $1 merge sha, $2 PAGES_PROJECTS -> 0 every expected build succ
         total=$((total + 1))
         st="$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$3 == n {print $1 "\t" $2; exit}')"
         co="${st#*$'\t'}"; st="${st%%$'\t'*}"
-        if [ -z "$st" ] && grep -qxF -- "$name" <<<"$idle"; then idled=$((idled + 1)); line+="     $name — no deploy needed (no file changed in ${sha:0:7} is in its build watch paths)"$'\n'
+        if [ -z "$st" ] && grep -qxF -- "$name" <<<"$idle"; then idled=$((idled + 1)); line+="     $name — no deploy needed (no file changed in ${sha:0:7} is in its build watch paths, or its Git production builds are paused)"$'\n'
         elif [ -z "$st" ]; then pending=$((pending + 1)); line+="     $name — not yet reported (queued)"$'\n'
         elif [ "$st" != completed ]; then pending=$((pending + 1)); line+="     $name — $st"$'\n'
         elif [ "$co" = success ] || [ "$co" = skipped ] || [ "$co" = neutral ]; then line+="     $name — $co"$'\n'
@@ -1194,7 +1194,7 @@ pages_kick() { # -> 0 at least one build triggered | 1 none (named on stdout)
   while [ "$page" -le "$total" ]; do
     n="$(cf "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=$page")" || break
     total="$(jq -r '.result_info.total_pages // 1' <<<"$n" 2>/dev/null)"; [ -n "$total" ] || total=1
-    names+="$(jq -r --arg s "$slug" '.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main") | .name' <<<"$n" 2>/dev/null)"$'\n'
+    names+="$(jq -r --arg s "$slug" '.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main" and .source.config.production_deployments_enabled != false) | .name' <<<"$n" 2>/dev/null)"$'\n'
     page=$((page + 1))
   done
   names="$(sed '/^$/d' <<<"$names" | sort -u)"

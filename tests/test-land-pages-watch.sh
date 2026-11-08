@@ -135,6 +135,10 @@ watchfx .github/workflows/search-loop.yml; runs "$(cr 'Cloudflare Pages' complet
 check "a build that started and failed is still FAILED, watch paths or not" 1 "Cloudflare Pages — FAILED (failure)" ""
 watchfx .github/workflows/search-loop.yml,questions/how-to/index.html
 check "a merge inside the watch paths still waits for its build" 1 "Cloudflare Pages — not yet reported (queued) — TIMED OUT" ""
+# PAUSED GIT BUILDS (8 Nov 2026, authority-backlink-network): founderoperatorlibrary moved to another
+# account and its old Git-connected project had production builds switched off, so it never posts again.
+watchfx .github/workflows/search-loop.yml,questions/how-to/index.html; sed -i.bak 's/"path_excludes":\[\]}/"path_excludes":[],"production_deployments_enabled":false}/' "$FX/cf.json"
+check "a project whose Git production builds are paused is never waited for" 3 "Cloudflare Pages — no deploy needed" ""
 watchfx .github/workflows/search-loop.yml; rm "$FX/cf.json"
 check "watch paths unreadable: fail closed, still waits" 1 "Cloudflare Pages — not yet reported (queued) — TIMED OUT" ""
 watchfx .github/workflows/search-loop.yml; rm "$FX/home/.wrangler/config/default.toml"

@@ -1,6 +1,10 @@
 #!/bin/zsh
 # Nightly backup of Mac-only files to Google Drive (approved 1 Nov 2026: ~5G, no How We Know videos).
 # rclone remote "gdrive" (scope drive.file: sees only what it created). Secrets never go up.
+# Her split of 8 Nov 2026: the nightly stays SMALL and holds nothing private. Of ~/.boss-os only the working
+# folders below go up (capital, LP, people and the rest are in the encrypted twice-monthly mac-snapshot.sh
+# only); no Movies/Ask The Flowers, rendered videos, venvs, models, Desktop/Documents/Downloads or sign-ins.
+# A folder this job no longer covers is moved to Drive's trash (never _old), so the space is really freed.
 # Changed/deleted files are kept in Mac-Backup/_old/<date> for history.
 set -u
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
@@ -15,7 +19,7 @@ EXCL=(--exclude 'vault/**' --exclude '*token*' --exclude '*.env' --exclude '.env
       --exclude '/runtime/**' --exclude '/trailers/**' --exclude '/repo-change/**' --exclude '/tts/**' --exclude '.cache/**' --exclude '.next/**' --exclude '.turbo/**' --exclude 'DerivedData/**'
       --exclude 'Pods/**' --exclude '.pytest_cache/**' --exclude '.mypy_cache/**' --exclude '.parcel-cache/**')
 # /runtime is the Boss OS code checkout (~/.boss-os/runtime), already on GitHub. Skipped by her ruling 1 Nov:
-# ~/.boss-os/trailers (1.2G generated videos), ~/.boss-os/repo-change (job logs), ~/claude-work/tts (703M voice files).
+# ~/.boss-os/trailers (1.2G generated videos), ~/.boss-os/repo-change (job logs), ~/claude-work/tts (703M model + venv).
 # The rest are rebuildable caches.
 # Rebuildable Python environments are skipped, whatever the folder is called (pyvenv.cfg marks one):
 # 55k tiny files there took 4.5h on the first run (1 Nov). --delete-excluded removes anything already
@@ -43,11 +47,11 @@ sync() { : > "$SKIPF"; precheck "$1" "$2"
   [ -s "$SKIPF" ] && del=()
   rclone sync "$1" "$DEST/$2" "${ex[@]}" "${del[@]}" --backup-dir "$DEST/_old/$D/$2" --transfers 8 --checkers 16 --max-duration "${left}s" --log-file "$LOG" --log-level NOTICE
   local rc=$?; [ $rc -eq 10 ] && slow=${slow:-$2}; [ $rc -ne 0 ] && fail=1; }
-sync ~/.boss-os            boss-os
+BOSS_KEEP=(deck sourcing search-readiness asmr-voice)   # asmr-voice: the ~4 MB voice samples (its venv is skipped)
+for b in "${BOSS_KEEP[@]}"; do [ -d ~/.boss-os/$b ] && sync ~/.boss-os/$b boss-os/$b; done
 sync ~/bin                 bin
 sync ~/8raise-tools        8raise-tools
 sync ~/Misc                Misc
-sync "$HOME/Movies/Ask The Flowers" ask-the-flowers
 sync ~/claude-work         claude-work
 sync ~/codex-briefs        codex-briefs
 sync ~/.claude/skills      claude/skills
@@ -55,9 +59,25 @@ sync ~/.claude/skills-archive claude/skills-archive
 sync ~/.claude/memory-archive claude/memory-archive
 for f in CLAUDE.md rules-history.md; do rclone copyto ~/.claude/$f "$DEST/claude/$f" --log-file "$LOG" || fail=1; done
 # Only the latest handoff is kept (her call 1 Nov: no pile of dated copies).
+# Claude memory files (no chat history: only the memory/ folders under projects).
+rclone copy ~/.claude/projects "$DEST/claude/memory" --include '*/memory/**' --log-file "$LOG" || fail=1
+rclone copy ~/Library/LaunchAgents "$DEST/LaunchAgents" --include 'com.seq.*.plist' "${EXCL[@]}" --log-file "$LOG" || fail=1
 rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF.md" --log-file "$LOG" || fail=1
 rclone delete "$DEST/handoff" --include 'HANDOFF-*.md' --log-file "$LOG" 2>/dev/null || true
 [ -d ~/Notes ] && sync ~/Notes Notes
+# Anything in Drive this job no longer covers goes to Drive's trash, never _old (her call 8 Nov 2026).
+TOP_KEEP=(boss-os bin 8raise-tools Misc claude-work codex-briefs claude handoff Notes LaunchAgents _old)
+prune() {  # $1 = Drive folder; the rest = the folder names kept there
+  local dir=$1 n k keep; shift
+  rclone lsf --dirs-only "$dir" 2>/dev/null | tr -d / | while read -r n; do
+    keep=0; for k in "$@"; do [ "$n" = "$k" ] && keep=1; done
+    [ $keep -eq 0 ] && { rclone purge "$dir/$n" --drive-use-trash=true --log-file "$LOG" && echo "trashed $dir/$n" >> "$LOG" || fail=1; }
+  done; }
+prune "$DEST" "${TOP_KEEP[@]}"
+prune "$DEST/boss-os" "${BOSS_KEEP[@]}"
+rclone lsf --dirs-only "$DEST/_old" 2>/dev/null | tr -d / | while read -r d; do
+  prune "$DEST/_old/$d" "${TOP_KEEP[@]}"; prune "$DEST/_old/$d/boss-os" "${BOSS_KEEP[@]}"
+done
 # Old copies (_old/<date>) are kept 30 days, then removed so Drive does not fill up.
 cut=$(date -v-30d +%Y-%m-%d)
 rclone lsf --dirs-only "$DEST/_old" 2>/dev/null | tr -d / | while read -r d; do

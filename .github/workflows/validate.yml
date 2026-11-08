@@ -150,3 +150,16 @@ jobs:
         run: ./ci-sweep-selftest.sh
       - name: a named job is tailed, her own replies included
         run: ./tests/test-scooter-watch-named.sh
+
+  # The encrypted snapshot needs hdiutil, so its fixture run is on a macOS runner (no secrets, no network).
+  mac-snapshot:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rclone
+        run: command -v rclone >/dev/null || brew install rclone
+      - name: mac-snapshot builds, verifies, restores and never logs a secret
+        run: ./tests/test-mac-snapshot.sh
+      - name: the nightly drive-backup stays small and leaves nothing private on Drive
+        run: zsh ./tests/test-drive-backup-guards.sh

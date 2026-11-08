@@ -46,7 +46,11 @@ D=$(date +%Y-%m-%d); IMG=$T/drive/Mac-Snapshots/mac-snapshot-$D.dmg
 # 1. No passphrase in the Keychain: her one-time line, nothing built.
 touch "$T/no-pass"; run; rc=$?; rm "$T/no-pass"
 [ $rc -eq 3 ] || bad "missing passphrase exit $rc (want 3)"
-grep -q 'SNAPSHOT_PASSPHRASE_MISSING.*security add-generic-password -s mac-snapshot -a sequoia -w' "$T/stdout" || bad "no passphrase stop with her line"
+grep -q 'SNAPSHOT_PASSPHRASE_MISSING.*mac-snapshot.sh --set-passphrase' "$T/stdout" || bad "no passphrase stop with her pop-up line"
+# 1b. A BLANK passphrase item (what a bare `security … -w` saved on 8 Nov 2026) is the same stop.
+: > "$T/stdout"; printf '\n' > "$T/pass"; run; rc=$?; printf '%s\n' "$PASS" > "$T/pass"
+[ $rc -eq 3 ] || bad "blank passphrase exit $rc (want 3)"
+grep -q 'SNAPSHOT_PASSPHRASE_MISSING' "$T/stdout" || bad "blank passphrase not stopped"
 # 2. Drive not connected: her one-time line.
 RCLONE_CONFIG=$T/none.conf bash "$S" --now >> "$T/stdout" 2>&1; rc=$?
 [ $rc -eq 3 ] || bad "missing remote exit $rc (want 3)"

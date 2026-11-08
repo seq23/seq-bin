@@ -201,11 +201,11 @@ if [ "$MODE" = --own-client ]; then
   node - "$conf" <<'JS' || exit 1
 const fs = require("fs"); const f = process.argv[2]; const t = fs.readFileSync(f, "utf8");
 const sec = (n) => (t.match(new RegExp(`^\\[${n}\\]\\n([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`, "m")) || [])[1] || "";
-const val = (body, k) => (body.match(new RegExp(`^${k}\\s*=\\s*(.*)$`, "m")) || [])[1]?.trim() || "";
+const val = (body, k) => (body.match(new RegExp(`^${k}[ \\t]*=[ \\t]*(.*)$`, "m")) || [])[1]?.trim() || "";
 const g = sec("gdrive"), id = val(g, "client_id"), secret = val(g, "client_secret");
 if (!id || !secret) { console.error("NAMED STOP [NO_OWN_CLIENT] gdrive has no client_id/client_secret to copy: make one first (see ~/bin/README.md, Google OAuth client for rclone)."); process.exit(1); }
 if (!/^\[gdrive-sl\]$/m.test(t)) { console.error("NAMED STOP [SNAPSHOT_DRIVE_NOT_CONNECTED] there is no gdrive-sl remote."); process.exit(1); }
-let s = sec("gdrive-sl").replace(/^client_(id|secret)\s*=.*\n/gm, "");
+let s = sec("gdrive-sl").replace(/^client_(id|secret)[ \t]*=.*\n/gm, "");
 s = `client_id = ${id}\nclient_secret = ${secret}\n` + s;
 fs.writeFileSync(f, t.replace(sec("gdrive-sl"), s), { mode: 0o600 });
 console.log("gdrive-sl now uses your own Google OAuth client.");

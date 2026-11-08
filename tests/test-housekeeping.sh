@@ -8,7 +8,7 @@ set -u
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/housekeeping.sh"
 T=$(mktemp -d)
 export HOUSEKEEPING_RCLONE_CONFIG="$T/rclone.conf"
-printf '[gdrive]\ntype = drive\nclient_id = own.apps.googleusercontent.com\nclient_secret = s\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[gdrive-sl]\ntype = drive\nscope = drive.file\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[local]\ntype = alias\n' > "$T/rclone.conf"
+printf '[gdrive]\ntype = drive\nclient_id = own.apps.googleusercontent.com\nclient_secret = s\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[gdrive-sl]\ntype = drive\nclient_id = \nscope = drive.file\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[local]\ntype = alias\n' > "$T/rclone.conf"
 export HOME="$T" HOUSEKEEPING_NO_VAULT=1 HOUSEKEEPING_TODAY=2026-11-02 BOSS_OPEN_LOOPS_TOKEN=olt_test
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main -c commit.gpgsign=false)
 fail=0; bad(){ echo "FAIL: $1"; fail=1; }

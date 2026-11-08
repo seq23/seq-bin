@@ -329,7 +329,9 @@ case "$NAME" in
   # Worker needs is missing, so a migration that has not been applied stops the land, named.
   # Its deploy-cloudflare.yml is workflow_dispatch only (staging), never fired by main.
   # Added 8 Oct 2026 when land refused aplayer-mode #47.
-  aplayer-mode)         DEPLOY="scripts/deploy-api-production.sh && scripts/deploy-web-production.sh" ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
+  # 8 Nov 2026: wrangler has no local login, so both scripts run inside the Boss OS vault (its
+  # CLOUDFLARE_API_TOKEN), as boss-os does (#75); without it #64 stopped on "set CLOUDFLARE_API_TOKEN".
+  aplayer-mode)         DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")' ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
   # Time2Read (seq23/dailystory, time-2-read.com): Supabase edge functions ship through the repo's
   # own deploy-functions.yml ("Deploy Edge Functions") on every push to main, with its post-deploy
   # boot smoke; land waits for that run on the merge commit. The front end is a Lovable project and

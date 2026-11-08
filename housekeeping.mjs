@@ -165,7 +165,7 @@ function checkRcloneClient(posts, log) {
   if (!file || !fs.existsSync(file)) { log.push("rclone: no config found, not checked"); return; }
   const shared = [];
   for (const m of fs.readFileSync(file, "utf8").matchAll(/^\[([^\]]+)\]\n([\s\S]*?)(?=^\[|(?![\s\S]))/gm)) {
-    if (/^type\s*=\s*drive\s*$/m.test(m[2]) && !/^client_id\s*=\s*\S/m.test(m[2])) shared.push(m[1]);
+    if (/^type\s*=\s*drive\s*$/m.test(m[2]) && !/^client_id[ \t]*=[ \t]*\S/m.test(m[2])) shared.push(m[1]); // [ \t], not \s: an empty "client_id = " must not read the next line
   }
   log.push(`rclone: ${shared.length ? `on the shared Google client: ${shared.join(", ")}` : "every Drive remote has its own client"}`);
   const own = shared.length === 0;

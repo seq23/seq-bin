@@ -54,6 +54,7 @@ sync ~/8raise-tools        8raise-tools
 sync ~/Misc                Misc
 sync ~/claude-work         claude-work
 sync ~/codex-briefs        codex-briefs
+[ -d ~/Work ] && sync ~/Work Work
 sync ~/.claude/skills      claude/skills
 sync ~/.claude/skills-archive claude/skills-archive
 sync ~/.claude/memory-archive claude/memory-archive
@@ -66,7 +67,7 @@ rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF.md" --log-file "$LOG" || fail=
 rclone delete "$DEST/handoff" --include 'HANDOFF-*.md' --log-file "$LOG" 2>/dev/null || true
 [ -d ~/Notes ] && sync ~/Notes Notes
 # Anything in Drive this job no longer covers goes to Drive's trash, never _old (her call 8 Nov 2026).
-TOP_KEEP=(boss-os bin 8raise-tools Misc claude-work codex-briefs claude handoff Notes LaunchAgents _old)
+TOP_KEEP=(boss-os bin 8raise-tools Misc claude-work codex-briefs Work claude handoff Notes LaunchAgents _old)
 prune() {  # $1 = Drive folder; the rest = the folder names kept there
   local dir=$1 n k keep; shift
   rclone lsf --dirs-only "$dir" 2>/dev/null | tr -d / | while read -r n; do

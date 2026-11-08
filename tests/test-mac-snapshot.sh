@@ -15,7 +15,7 @@ ok=0; bad() { echo "FAIL: $1"; ok=1; }
 PASS="test-pass-$RANDOM-Zq7"; KEY="vaultkey-$RANDOM$RANDOM-base64=="
 F=$T/home; mkdir -p "$F"/.west-peek-os/vault "$F"/.claude/projects/p/memory "$F"/.claude/skills/s "$F"/.boss-os/deck \
   "$F"/.boss-os/trailers/x/music "$F"/.boss-os/asmr-voice/venv "$F"/.boss-os/runtime "$F"/bin/launchd "$F"/Library/LaunchAgents \
-  "$F/Documents/My Folder" "$F"/.codex/sessions "$F"/claude-work/tts "$F"/Misc/node_modules/m
+  "$F/Documents/My Folder" "$F"/.codex/sessions "$F"/claude-work/tts "$F"/Misc/node_modules/m "$F"/Work/kit/.venv "$F"/Work/kit/env
 echo enc > "$F"/.west-peek-os/vault/OPENAI.enc; echo rule > "$F"/.claude/CLAUDE.md; echo mem > "$F"/.claude/projects/p/memory/m.md
 echo chat > "$F"/.claude/projects/p/chat.jsonl; echo skill > "$F"/.claude/skills/s/SKILL.md; echo deck > "$F"/.boss-os/deck/d.md
 head -c 50000 /dev/urandom > "$F"/.boss-os/trailers/x/music/score.mp3; echo render > "$F"/.boss-os/trailers/x/out.mp4
@@ -24,7 +24,7 @@ echo code > "$F"/.boss-os/runtime/x.ts; echo '#!/bin/sh' > "$F"/bin/job.sh; echo
 echo '<plist/>' > "$F"/Library/LaunchAgents/com.other.plist; echo doc > "$F/Documents/My Folder/a b.txt"
 echo 'model = "x"' > "$F"/.codex/config.toml; echo sess > "$F"/.codex/sessions/s.jsonl
 echo model > "$F"/claude-work/tts/kokoro-v1.0.onnx; echo py > "$F"/claude-work/tts/render.py; echo dep > "$F"/Misc/node_modules/m/i.js
-echo h > "$F"/HANDOFF.md
+echo h > "$F"/HANDOFF.md; echo w > "$F"/Work/kit/notes.md; touch "$F"/Work/kit/.venv/x.so "$F"/Work/kit/env/pyvenv.cfg "$F"/Work/kit/env/y.so
 # The stub Keychain. The secrets live in files, never in its arguments.
 printf '%s\n' "$PASS" > "$T/pass"; printf '%s\n' "$KEY" > "$T/key"
 cat > "$T/security" <<EOF
@@ -76,11 +76,11 @@ if printf '%s' "$PASS" | hdiutil attach -stdinpass -readonly -nobrowse -mountpoi
   MNT=$T/m2; R=$T/m2
   for f in .west-peek-os/vault/OPENAI.enc .claude/CLAUDE.md .claude/projects/p/memory/m.md .claude/skills/s/SKILL.md .boss-os/deck/d.md \
            .boss-os/trailers/x/music/score.mp3 .boss-os/asmr-voice/whisper-sample.m4a bin/job.sh Library/LaunchAgents/com.seq.job.plist \
-           "Documents/My Folder/a b.txt" .codex/config.toml claude-work/tts/render.py HANDOFF.md; do
+           "Documents/My Folder/a b.txt" .codex/config.toml claude-work/tts/render.py HANDOFF.md Work/kit/notes.md; do
     cmp -s "$F/$f" "$R/$f" || bad "not restored byte-identical: $f"
   done
   for f in .claude/projects/p/chat.jsonl .boss-os/trailers/x/out.mp4 .boss-os/asmr-voice/venv/lib.so .boss-os/runtime/x.ts \
-           Library/LaunchAgents/com.other.plist .codex/sessions/s.jsonl claude-work/tts/kokoro-v1.0.onnx Misc/node_modules/m/i.js; do
+           Library/LaunchAgents/com.other.plist .codex/sessions/s.jsonl claude-work/tts/kokoro-v1.0.onnx Misc/node_modules/m/i.js Work/kit/.venv/x.so Work/kit/env/y.so; do
     [ -e "$R/$f" ] && bad "should not be in the snapshot: $f"
   done
   [ "$(cat "$R/_vault-key/test-vault.master-key")" = "$KEY" ] || bad "vault key not in the image"

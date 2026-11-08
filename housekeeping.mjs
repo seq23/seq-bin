@@ -11,6 +11,10 @@
 //      a DRIVE_BACKUP_TOO_SLOW / DRIVE_BACKUP_FAILED stop in today's backup log, or no log at all → a
 //      row Claude fixes.
 //   3. Rules clean-up: the 1st of the month, or ~/.claude/CLAUDE.md over 2,500 words → one row a month.
+//   4. Google Drive sign-in: a Drive remote in rclone's config with no client_id of her own rides rclone's
+//      shared Google client, which Google retires during 2026 (8 Nov 2026) → one row she does (the clicks
+//      are in ~/bin/README.md, "Google OAuth client for rclone"). Every Drive remote on her own → closed.
+//      Only section names and whether client_id is set are read; no token leaves the file.
 //
 // Rule 0: every outcome is a line in the log. A post that fails, or a missing token, is a NAMED STOP
 // with a non-zero exit, never a silent 0. HOUSEKEEPING_DRY_RUN=1 prints the payloads and posts nothing.
@@ -154,6 +158,26 @@ function checkRules(state, posts, log) {
   return code;
 }
 
+// ─── 4. rclone's shared Google client ────────────────────────────────────────────────────────────────
+function checkRcloneClient(posts, log) {
+  let file = process.env.HOUSEKEEPING_RCLONE_CONFIG;
+  if (!file) { try { file = execFileSync("rclone", ["config", "file"], { encoding: "utf8" }).trim().split("\n").pop().trim(); } catch { file = ""; } }
+  if (!file || !fs.existsSync(file)) { log.push("rclone: no config found, not checked"); return; }
+  const shared = [];
+  for (const m of fs.readFileSync(file, "utf8").matchAll(/^\[([^\]]+)\]\n([\s\S]*?)(?=^\[|(?![\s\S]))/gm)) {
+    if (/^type\s*=\s*drive\s*$/m.test(m[2]) && !/^client_id\s*=\s*\S/m.test(m[2])) shared.push(m[1]);
+  }
+  log.push(`rclone: ${shared.length ? `on the shared Google client: ${shared.join(", ")}` : "every Drive remote has its own client"}`);
+  const own = shared.length === 0;
+  posts.push({
+    ...base, owner: "sequoia", stop: "RCLONE_OWN_CLIENT", ...(own ? { cleared: true } : {
+      title: `Make a Google OAuth client for rclone (${shared.join(", ")} still on the shared one Google is retiring)`,
+      next_step: `Google retires rclone's shared sign-in during 2026; then the backup to ${shared.join(", ")} stops. The clicks: ~/bin/README.md, "Google OAuth client for rclone". If gdrive already has one, run ~/bin/mac-snapshot.sh --own-client and sign in as sequoialtaylor@gmail.com.`.slice(0, 400),
+    }),
+    finish_line: "every Drive backup signs in with her own Google OAuth client",
+  });
+}
+
 async function main() {
   const state = readState();
   const posts = [], log = [];
@@ -161,6 +185,7 @@ async function main() {
   if (read === 0) throw stop("NOTHING_CHECKED", 2, "no checkout could be read (~/bin, ~/GitHub/*, ~/.boss-os/runtime, ~/aplayer-mode); nothing was posted.");
   checkBackup(posts, log);
   const rulesCode = checkRules(state, posts, log);
+  checkRcloneClient(posts, log);
   for (const l of log) console.log(l);
   const open = posts.filter((p) => !p.cleared);
   if (DRY) { for (const p of posts) console.log("DRY_RUN", JSON.stringify(p)); console.log(`housekeeping dry run: ${read} checkouts read, ${open.length} rows to open, ${posts.length - open.length} to clear`); return; }

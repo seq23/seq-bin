@@ -7,6 +7,8 @@
 set -u
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/housekeeping.sh"
 T=$(mktemp -d)
+export HOUSEKEEPING_RCLONE_CONFIG="$T/rclone.conf"
+printf '[gdrive]\ntype = drive\nclient_id = own.apps.googleusercontent.com\nclient_secret = s\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[gdrive-sl]\ntype = drive\nscope = drive.file\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[local]\ntype = alias\n' > "$T/rclone.conf"
 export HOME="$T" HOUSEKEEPING_NO_VAULT=1 HOUSEKEEPING_TODAY=2026-11-02 BOSS_OPEN_LOOPS_TOKEN=olt_test
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main -c commit.gpgsign=false)
 fail=0; bad(){ echo "FAIL: $1"; fail=1; }
@@ -59,6 +61,11 @@ row BACKUP_FAILED | grep -q '"owner":"claude"' || bad "backup stop row is not Cl
 cleared BACKUP_TOO_SLOW || bad "absent backup stop not cleared"
 row RULES_CLEANUP_2026_11 >/dev/null && bad "rules row posted at 100 words on the 2nd"
 [ -n "$(git -C "$T/GitHub/dirty" status --short)" ] || bad "the job changed the dirty checkout"
+# A Drive remote on rclone's shared Google client (retired during 2026) is her row, naming it; no token posted.
+opened RCLONE_OWN_CLIENT || bad "a Drive remote on the shared client opened no row"
+row RCLONE_OWN_CLIENT | grep -q '"owner":"sequoia".*gdrive-sl' || bad "shared-client row is not hers or does not name gdrive-sl: $(row RCLONE_OWN_CLIENT)"
+row RCLONE_OWN_CLIENT | grep -q '(gdrive,\|gdrive, gdrive-sl' && bad "a remote with its own client was named"
+grep -q TOKEN-NEVER-POSTED "$T/posts.jsonl" && bad "an rclone token was posted"
 
 # Run 1b: 2,500 words is at the limit, not over it (her call 2 Nov 2026: the trigger is 2,500) → no row.
 for _ in $(seq 1 2500); do printf 'word '; done > "$T/.claude/CLAUDE.md"
@@ -81,6 +88,9 @@ cleared UNSAVED_GITHUB_DIRTY || bad "saved checkout did not clear its row"
 opened UNSAVED_GITHUB_DIRTY && bad "saved checkout still posted as unsaved"
 cleared BACKUP_BIG_FOLDER || bad "decided folder did not clear its row"
 cleared BACKUP_FAILED || bad "clean backup did not clear the failure row"
+printf '[gdrive]\ntype = drive\nclient_id = a\n\n[gdrive-sl]\ntype = drive\nclient_id = b\n' > "$T/rclone.conf"
+: > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4b exit non-zero"
+cleared RCLONE_OWN_CLIENT || bad "every remote on its own client did not clear the row"
 
 # Run 5: Boss OS down → named stop, non-zero. Run 6: no token → named stop, non-zero.
 touch "$T/down"; out=$(bash "$S" 2>&1); rc=$?; rm "$T/down"

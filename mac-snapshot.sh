@@ -7,6 +7,8 @@
 #
 #   ~/bin/mac-snapshot.sh --now        # a run now (the scheduled run is the same thing)
 #   ~/bin/mac-snapshot.sh --measure    # how big the snapshot would be (staging bytes, no image, no upload)
+#   ~/bin/mac-snapshot.sh --set-passphrase  # hidden pop-up (twice), saved to the Keychain item mac-snapshot/sequoia
+#   ~/bin/mac-snapshot.sh --own-client # gdrive-sl uses the same own Google OAuth client as gdrive, then sign in
 #   tests/test-mac-snapshot.sh         # the fixture run: tiny image, test passphrase, local "Drive"
 #
 # Media rule (her call 8 Nov 2026): only irreplaceable sources (recorded voice samples, reference audio,
@@ -28,7 +30,7 @@ umask 077
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:---now}"
-case "$MODE" in --now|--measure) ;; *) echo "usage: mac-snapshot.sh [--now|--measure]" >&2; exit 64 ;; esac
+case "$MODE" in --now|--measure|--set-passphrase|--own-client) ;; *) echo "usage: mac-snapshot.sh [--now|--measure|--set-passphrase|--own-client]" >&2; exit 64 ;; esac
 H="${MAC_SNAPSHOT_HOME:-$HOME}"
 SECURITY="${MAC_SNAPSHOT_SECURITY:-/usr/bin/security}"
 REMOTE="${MAC_SNAPSHOT_REMOTE:-gdrive-sl}"
@@ -39,7 +41,10 @@ MAXSECS="${MAC_SNAPSHOT_MAX_SECS:-10800}"
 START=$(date +%s)
 D=$(date +%Y-%m-%d); NAME="mac-snapshot-$D.dmg"
 LOGDIR="${MAC_SNAPSHOT_LOGDIR:-$HOME/Library/Logs/mac-snapshot}"; mkdir -p "$LOGDIR"; LOG="$LOGDIR/$D.log"
-PASS_LINE='security add-generic-password -s mac-snapshot -a sequoia -w'
+# A bare `security add-generic-password … -w` run from a `!` prompt saved a BLANK passphrase (8 Nov 2026):
+# the pop-up below is the only route offered.
+# shellcheck disable=SC2088  # shown to her as text, not expanded
+PASS_LINE='~/bin/mac-snapshot.sh --set-passphrase'
 DRIVE_LINE='rclone config create gdrive-sl drive scope drive.file'
 
 log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
@@ -174,6 +179,41 @@ census() {  # $1 = dir -> "files bytes" (regular files only; the volume's own ho
     -o -type f -print0 | xargs -0 stat -f %z 2>/dev/null | awk '{n++; s+=$1} END {printf "%d %.0f\n", n, s}'
 }
 
+# Hidden pop-up, asked twice; stored through `security -i` on stdin, so it is never an argument any
+# process list can show. A blank or short answer is refused.
+if [ "$MODE" = --set-passphrase ]; then
+  ask() { osascript -e "text returned of (display dialog \"$1\" default answer \"\" with hidden answer with title \"Mac snapshot\")" 2>/dev/null; }
+  p1=$(ask "Snapshot passphrase (at least 12 characters). Save it in your password manager too: without it the backup cannot be opened.") || { echo "cancelled; nothing saved" >&2; exit 1; }
+  p2=$(ask "Type the same passphrase again.") || { echo "cancelled; nothing saved" >&2; exit 1; }
+  [ "$p1" = "$p2" ] || { echo "NAMED STOP [SNAPSHOT_PASSPHRASE_MISMATCH] the two did not match; nothing saved. Run it again." >&2; exit 1; }
+  [ ${#p1} -ge 12 ] || { echo "NAMED STOP [SNAPSHOT_PASSPHRASE_SHORT] under 12 characters; nothing saved." >&2; exit 1; }
+  case "$p1" in *'"'*|*\\*) echo "NAMED STOP [SNAPSHOT_PASSPHRASE_CHARS] please avoid \" and \\ in it; nothing saved." >&2; exit 1 ;; esac
+  printf 'add-generic-password -U -s mac-snapshot -a sequoia -w "%s"\n' "$p1" | "$SECURITY" -i >/dev/null 2>&1
+  unset p1 p2
+  n=$(passphrase | wc -c | tr -d ' ')
+  [ "$n" -ge 12 ] || { echo "NAMED STOP [SNAPSHOT_PASSPHRASE_NOT_SAVED] the Keychain did not keep it; run it again." >&2; exit 1; }
+  echo "Saved: the Keychain item mac-snapshot/sequoia holds a $n-character passphrase."; exit 0
+fi
+# rclone's shared Google client is being retired during 2026. gdrive already has her own OAuth client;
+# this copies its client_id/secret into gdrive-sl (file to file, never an argument) and signs in again.
+if [ "$MODE" = --own-client ]; then
+  conf=$(rclone config file | tail -1)
+  node - "$conf" <<'JS' || exit 1
+const fs = require("fs"); const f = process.argv[2]; const t = fs.readFileSync(f, "utf8");
+const sec = (n) => (t.match(new RegExp(`^\\[${n}\\]\\n([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`, "m")) || [])[1] || "";
+const val = (body, k) => (body.match(new RegExp(`^${k}\\s*=\\s*(.*)$`, "m")) || [])[1]?.trim() || "";
+const g = sec("gdrive"), id = val(g, "client_id"), secret = val(g, "client_secret");
+if (!id || !secret) { console.error("NAMED STOP [NO_OWN_CLIENT] gdrive has no client_id/client_secret to copy: make one first (see ~/bin/README.md, Google OAuth client for rclone)."); process.exit(1); }
+if (!/^\[gdrive-sl\]$/m.test(t)) { console.error("NAMED STOP [SNAPSHOT_DRIVE_NOT_CONNECTED] there is no gdrive-sl remote."); process.exit(1); }
+let s = sec("gdrive-sl").replace(/^client_(id|secret)\s*=.*\n/gm, "");
+s = `client_id = ${id}\nclient_secret = ${secret}\n` + s;
+fs.writeFileSync(f, t.replace(sec("gdrive-sl"), s), { mode: 0o600 });
+console.log("gdrive-sl now uses your own Google OAuth client.");
+JS
+  echo "A browser opens: sign in as sequoialtaylor@gmail.com and allow access."
+  rclone config reconnect gdrive-sl: && rclone about gdrive-sl: | head -3; exit $?
+fi
+
 log "=== mac-snapshot $MODE $(date '+%Y-%m-%d %H:%M %Z') ==="
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/mac-snapshot.XXXXXX") || stop SNAPSHOT_NO_STAGING "no temp folder" "Check the disk."
 chmod 700 "$STAGE"; mkdir -p "$STAGE/root"
@@ -186,8 +226,10 @@ if [ "$MODE" = --measure ]; then
 fi
 
 # ─── Preconditions (before any copying) ────────────────────────────────────────────────────────────────
-"$SECURITY" find-generic-password -s mac-snapshot -a sequoia >/dev/null 2>&1 ||
-  stop SNAPSHOT_PASSPHRASE_MISSING "the snapshot passphrase is not set" "Run this once in Terminal (it asks for the passphrase hidden), and save the same passphrase in your password manager: $PASS_LINE" sequoia 3
+# Present AND not blank (a blank item was saved once, 8 Nov 2026). Only the length is ever looked at.
+plen=$(passphrase | wc -c | tr -d ' ')
+[ "${plen:-0}" -ge 8 ] ||
+  stop SNAPSHOT_PASSPHRASE_MISSING "the snapshot passphrase is not set (or is blank)" "Run this once in Terminal; a hidden pop-up asks for it twice. Save the same passphrase in your password manager: $PASS_LINE" sequoia 3
 rclone listremotes 2>/dev/null | grep -qx "$REMOTE:" ||
   stop SNAPSHOT_DRIVE_NOT_CONNECTED "sequoialtaylor's Drive is not connected" "Run this once in Terminal and sign in as sequoialtaylor@gmail.com: $DRIVE_LINE" sequoia 3
 

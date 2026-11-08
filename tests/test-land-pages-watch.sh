@@ -32,7 +32,7 @@ case "$path" in
   */commits) f="$FX/list.json" ;;
   */check-runs) s="${path%/check-runs}"; f="$FX/runs-${s##*/}.json" ;;
   */commits/*) f="$FX/commit-${path##*/}.json"; [ -f "$f" ] || exit 1 ;;
-  'repos/{owner}/{repo}') echo seq23/site; exit 0 ;;
+  'repos/{owner}/{repo}') [ "$4" = .id ] && echo 42 || echo seq23/site; exit 0 ;;
   *) exit 1 ;;
 esac
 [ -f "$f" ] || f="$FX/none.json"
@@ -141,6 +141,16 @@ watchfx .github/workflows/search-loop.yml,questions/how-to/index.html; sed -i.ba
 check "a project whose Git production builds are paused is never waited for" 3 "Cloudflare Pages — no deploy needed" ""
 watchfx .github/workflows/search-loop.yml; rm "$FX/cf.json"
 check "watch paths unreadable: fail closed, still waits" 1 "Cloudflare Pages — not yet reported (queued) — TIMED OUT" ""
+# RENAMED REPO (8 Nov 2026): Cloudflare still records authority-backlink-network as "authority-network",
+# so matching on the name found no project; the repo id survives the rename.
+watchfx .github/workflows/search-loop.yml; sed -i.bak 's/"repo_name":"site",/"repo_name":"old-name","repo_id":42,/' "$FX/cf.json"
+check "a renamed repo's project is found by repo id: no deploy needed" 3 "Cloudflare Pages — no deploy needed" ""
+# DEAD OAUTH (8 Nov 2026): wrangler's login expired, so watch paths read as unknown everywhere. The
+# vault's token (a fake npm here, only inside ~/GitHub/boss-os) still reads the Pages list.
+watchfx .github/workflows/search-loop.yml; rm "$FX/home/.wrangler/config/default.toml"; mkdir -p "$FX/home/GitHub/boss-os"
+printf '#!/bin/bash\ncase "$PWD" in */GitHub/boss-os) printf vault-token ;; *) exit 1 ;; esac\n' > "$WORK/bin/npm"; chmod +x "$WORK/bin/npm"
+check "no wrangler login, vault token reads the watch paths: no deploy needed" 3 "Cloudflare Pages — no deploy needed" ""
+rm "$WORK/bin/npm"
 watchfx .github/workflows/search-loop.yml; rm "$FX/home/.wrangler/config/default.toml"
 check "no wrangler login: fail closed, still waits" 1 "not yet reported (queued) — TIMED OUT" ""
 

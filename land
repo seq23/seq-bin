@@ -289,9 +289,10 @@ case "$NAME" in
   # dream-wedding-builder" check-run on main dd5050f produced. `npm run deploy` exists but is NOT
   # the route — running it too would race Workers Builds.
   dream-wedding-builder) DEPLOY="" ; SELF="deploys itself through Workers Builds on push to main" ;;
-  # No wrangler config; three Pages projects build from main on push (check-runs "Cloudflare Pages:
-  # founderoperatorlibrary / memphisvendorlibrary / professionalresourcelibrary" on main).
-  authority-backlink-network) DEPLOY="" ; SELF="deploys itself through Cloudflare Pages on push to main (3 projects)" ;;
+  # The three publications moved to their own Cloudflare account (7-8 Nov 2026). The old account's
+  # Git-connected projects are paused (kept for rollback, so they post no check-runs); production is
+  # a direct upload by .github/workflows/deploy-publications.yml on every push to main.
+  authority-backlink-network) DEPLOY="" ; SELF="deploys itself through its own Deploy Publications workflow (direct upload, 3 sites) on push to main" ; DEPLOY_WF="deploy-publications.yml" ;;
   # Pages project p-n-p builds from Git; deploy-distribution.yml does IndexNow/GSC. Its wrangler.toml
   # binds D1 `pnp-admin` (migrations/, additive only). D1_PREMERGE (30 Oct 2026, #162): Pages ships the
   # new code the moment the merge lands and applies no migration, so the request form failed on a
@@ -1104,17 +1105,27 @@ pages_history() { # $1 merge sha -> "<secs>\t<n>\t<check-run name>" for up to 3 
   done < <(gh api "repos/{owner}/{repo}/commits?sha=main&per_page=10" --jq '.[] | "\(.sha)\t\(.commit.committer.date)"' 2>/dev/null)
 }
 pages_cf_sources() { # -> one JSON array [{name,inc,exc}] of the Pages projects building this repo's main from Git | rc 1 unreadable
-  local cfg tok slug page=1 total=1 n all="[]"
+  local cfg tok slug rid page=1 total=1 n all="[]"
   wrangler whoami >/dev/null 2>&1 || true
   cfg="$(ls -t "$HOME/.wrangler/config/default.toml" "$HOME/Library/Preferences/.wrangler/config/default.toml" 2>/dev/null | head -1)"
   tok="$( [ -z "$cfg" ] || sed -n 's/^oauth_token = "\(.*\)"$/\1/p' "$cfg")"
-  [ -n "$tok" ] || return 1
   slug="$(gh api "repos/{owner}/{repo}" --jq .full_name 2>/dev/null)"; [ -n "$slug" ] || return 1
+  # Cloudflare keeps the repo name from when the project was connected (authority-backlink-network
+  # was "authority-network" there, so it matched nothing); the numeric repo id survives a rename.
+  rid="$(gh api "repos/{owner}/{repo}" --jq .id 2>/dev/null)"
+  # A dead wrangler OAuth login (8 Nov 2026: "Failed to fetch auth token: 400") made every repo's
+  # watch paths unreadable, so a paused or idle project was waited for until TIMED OUT. The Boss OS
+  # vault's Cloudflare token reads the same Pages list; it is held in a variable, never printed.
+  n=""; [ -z "$tok" ] || n="$(curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=1" 2>/dev/null)"
+  if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$n"; then
+    tok="$( (cd "$HOME/GitHub/boss-os" 2>/dev/null && npm run -s vault:run -- sh -c 'printf %s "$CLOUDFLARE_API_TOKEN"') 2>/dev/null)"
+    [ -n "$tok" ] || return 1
+  fi
   while [ "$page" -le "$total" ]; do
     n="$(curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=$page")" || return 1
     jq -e '.success == true' >/dev/null 2>&1 <<<"$n" || return 1
     total="$(jq -r '.result_info.total_pages // 1' <<<"$n")"
-    all="$(jq -c --arg s "$slug" --argjson a "$all" '$a + [.result[]? | select(.source.type == "github" and "\(.source.config.owner)/\(.source.config.repo_name)" == $s and .source.config.production_branch == "main") | {name, inc: (.source.config.path_includes // ["*"]), exc: (.source.config.path_excludes // []), paused: (.source.config.production_deployments_enabled == false)}]' <<<"$n")" || return 1
+    all="$(jq -c --arg s "$slug" --arg rid "${rid:-}" --argjson a "$all" '$a + [.result[]? | select(.source.type == "github" and ("\(.source.config.owner)/\(.source.config.repo_name)" == $s or ($rid != "" and "\(.source.config.repo_id)" == $rid)) and .source.config.production_branch == "main") | {name, inc: (.source.config.path_includes // ["*"]), exc: (.source.config.path_excludes // []), paused: (.source.config.production_deployments_enabled == false)}]' <<<"$n")" || return 1
     page=$((page + 1))
   done
   printf '%s\n' "$all"

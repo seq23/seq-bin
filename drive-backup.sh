@@ -16,10 +16,11 @@ EXCL=(--exclude 'vault/**' --exclude '*token*' --exclude '*.env' --exclude '.env
       --exclude 'kdp/**' --exclude 'node_modules/**' --exclude '.git/**' --exclude '.DS_Store'
       --exclude '.venv*/**' --exclude 'venv/**' --exclude '__pycache__/**' --exclude 'site-packages/**' --exclude '*.pyc'
       --exclude-if-present pyvenv.cfg
-      --exclude '/runtime/**' --exclude '/trailers/**' --exclude '/repo-change/**' --exclude '/tts/**' --exclude '.cache/**' --exclude '.next/**' --exclude '.turbo/**' --exclude 'DerivedData/**'
+      --exclude '/runtime/**' --exclude '/trailers/**' --exclude '/repo-change/**' --exclude '/tts/**' --exclude '/claude-work/tts/**' --exclude '.cache/**' --exclude '.next/**' --exclude '.turbo/**' --exclude 'DerivedData/**'
       --exclude 'Pods/**' --exclude '.pytest_cache/**' --exclude '.mypy_cache/**' --exclude '.parcel-cache/**')
 # /runtime is the Boss OS code checkout (~/.boss-os/runtime), already on GitHub. Skipped by her ruling 1 Nov:
-# ~/.boss-os/trailers (1.2G generated videos), ~/.boss-os/repo-change (job logs), ~/claude-work/tts (703M model + venv).
+# ~/.boss-os/trailers (1.2G generated videos), ~/.boss-os/repo-change (job logs), ~/Work/claude-work/tts (703M model + venv).
+# Since 8 Nov 2026 8raise-tools, Misc, claude-work and codex-briefs live under ~/Work and go up with it.
 # The rest are rebuildable caches.
 # Rebuildable Python environments are skipped, whatever the folder is called (pyvenv.cfg marks one):
 # 55k tiny files there took 4.5h on the first run (1 Nov). --delete-excluded removes anything already
@@ -34,12 +35,23 @@ precheck() { local src=$1 name=$2 cur="$STATE/counts-${2//\//_}.txt" prev="$STAT
   rclone lsf -R --files-only "$src" "${EXCL[@]}" 2>/dev/null | awk -F/ 'NF>1{k=$1; if(NF>2)k=k"/"$2; c[k]++} END{for(k in c)print c[k]"\t"k}' | sort -k2 > "$cur.new"
   if [ -f "$prev" ]; then
     while IFS=$'\t' read -r n k; do
-      p=$(awk -F'\t' -v k="$k" '$2==k{print $1}' "$prev"); p=${p:-0}
+      p=$(awk -F'\t' -v k="$k" '$2==k{print $1}' "$prev")
       grep -qxF "$name/$k" "$STATE/big-folders-ok.txt" 2>/dev/null && continue
+      [ -z "$p" ] && p=$(moved_count "$name" "$k"); p=${p:-0}
       if [ $((n - p)) -gt "$BIG" ]; then echo "/$k/**" >> "$SKIPF"; flagged+=("$name/$k (+$((n - p)) files)"); fi
     done < "$cur.new"
   fi
-  mv "$cur.new" "$cur"; }
+  mv "$cur.new" "$cur"
+  # Counts of a folder that moved into ~/Work are used once (above), then dropped.
+  if [ "$name" = Work ]; then for m in "${MOVED[@]}"; do [ -d "$src/$m" ] && rm -f "$STATE/counts-$m.txt" "$STATE/counts-$m.prev"; done; fi; }
+# Folders that moved into ~/Work on 8 Nov 2026 (were synced on their own). Last night's count for
+# Work/<m>/<x> is what <m>/x* counted on its own, so the move itself is not taken for a big new folder.
+MOVED=(8raise-tools Misc claude-work codex-briefs)
+moved_count() { local name=$1 k=$2 top=${2%%/*} sub=${2#*/} m
+  [ "$name" = Work ] && [ "$k" != "$top" ] || return 0
+  for m in "${MOVED[@]}"; do [ "$m" = "$top" ] || continue
+    [ -f "$STATE/counts-$m.txt" ] && awk -F'\t' -v s="$sub" '$2==s || index($2, s"/")==1 {t+=$1} END{if(NR)print t+0}' "$STATE/counts-$m.txt"
+  done; }
 sync() { : > "$SKIPF"; precheck "$1" "$2"
   local left=$(( MAXSECS - ($(date +%s) - START) )); [ $left -lt 60 ] && { slow=${slow:-$2}; fail=1; return; }
   local ex=("${EXCL[@]}") del=(--delete-excluded); while read -r x; do [ -n "$x" ] && ex+=(--exclude "$x"); done < "$SKIPF"
@@ -50,10 +62,6 @@ sync() { : > "$SKIPF"; precheck "$1" "$2"
 BOSS_KEEP=(deck sourcing search-readiness asmr-voice)   # asmr-voice: the ~4 MB voice samples (its venv is skipped)
 for b in "${BOSS_KEEP[@]}"; do [ -d ~/.boss-os/$b ] && sync ~/.boss-os/$b boss-os/$b; done
 sync ~/bin                 bin
-sync ~/8raise-tools        8raise-tools
-sync ~/Misc                Misc
-sync ~/claude-work         claude-work
-sync ~/codex-briefs        codex-briefs
 [ -d ~/Work ] && sync ~/Work Work
 sync ~/.claude/skills      claude/skills
 sync ~/.claude/skills-archive claude/skills-archive
@@ -67,7 +75,7 @@ rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF.md" --log-file "$LOG" || fail=
 rclone delete "$DEST/handoff" --include 'HANDOFF-*.md' --log-file "$LOG" 2>/dev/null || true
 [ -d ~/Notes ] && sync ~/Notes Notes
 # Anything in Drive this job no longer covers goes to Drive's trash, never _old (her call 8 Nov 2026).
-TOP_KEEP=(boss-os bin 8raise-tools Misc claude-work codex-briefs Work claude handoff Notes LaunchAgents _old)
+TOP_KEEP=(boss-os bin Work claude handoff Notes LaunchAgents _old)
 prune() {  # $1 = Drive folder; the rest = the folder names kept there
   local dir=$1 n k keep; shift
   rclone lsf --dirs-only "$dir" 2>/dev/null | tr -d / | while read -r n; do

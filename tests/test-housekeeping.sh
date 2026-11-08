@@ -36,7 +36,7 @@ echo new > "$T/GitHub/dirty/b.txt"; touch -t 202001020000 "$T/GitHub/dirty/b.txt
 echo old > "$T/GitHub/.wt-agent/a.txt"; touch -t 202001010000 "$T/GitHub/.wt-agent/a.txt"; echo fresh > "$T/GitHub/.wt-agent/c.txt"
 mkdir -p "$T/.claude" "$T/Library/Application Support/drive-backup" "$T/Library/Logs/drive-backup"
 for _ in $(seq 1 100); do printf 'word '; done > "$T/.claude/CLAUDE.md"
-printf 'Misc/dump\n' > "$T/Library/Application Support/drive-backup/needs-decision.txt"
+printf 'Work/Misc/dump\n' > "$T/Library/Application Support/drive-backup/needs-decision.txt"
 echo "NAMED STOP: DRIVE_BACKUP_FAILED — see the log" > "$T/Library/Logs/drive-backup/2026-11-02.log"
 
 row(){ grep "\"stop\":\"$1\"" "$T/posts.jsonl"; }
@@ -55,7 +55,7 @@ cleared UNSAVED_BIN || bad "clean ~/bin did not clear its row"
 row UNSAVED_GITHUB_WT_AGENT >/dev/null && bad "running agent's worktree was posted"
 opened BACKUP_BIG_FOLDER || bad "held-back folder opened no row"
 row BACKUP_BIG_FOLDER | grep -q '"owner":"sequoia"' || bad "held-back folder row is not hers"
-row BACKUP_BIG_FOLDER | grep -q 'Misc/dump' || bad "held-back folder row does not name the folder"
+row BACKUP_BIG_FOLDER | grep -q 'Work/Misc/dump' || bad "held-back folder row does not name the folder"
 opened BACKUP_FAILED || bad "backup stop in today's log opened no row"
 row BACKUP_FAILED | grep -q '"owner":"claude"' || bad "backup stop row is not Claude's"
 cleared BACKUP_TOO_SLOW || bad "absent backup stop not cleared"

@@ -101,11 +101,8 @@ SOURCES=(
   ".west-peek-os/vault|"
   ".claude|*.jsonl;/sessions/;/file-history/;/paste-cache/;/cache/;/shell-snapshots/;/session-env/;/telemetry/;/chrome/;/statsig/;/todos/;/plugins/cache/"
   ".boss-os|/runtime/;/browser/;/kdp-profile/;/repo-change/;/trailers/**.mp4;/trailers/**.MP4"
-  "8raise-tools|"
-  "Misc|"
-  "claude-work|/tts/*.onnx;/tts/voices-*.bin"
-  "codex-briefs|"
-  "Work|"
+  # Work holds 8raise-tools, Misc, claude-work and codex-briefs (moved there 8 Nov 2026): listed once.
+  "Work|/claude-work/tts/*.onnx;/claude-work/tts/voices-*.bin"
   "Notes|"
   "bin|"
   "Library/Application Support/tz-watch|"
@@ -165,7 +162,7 @@ New Mac, step by step:
 Not in the snapshot on purpose (rebuildable or downloadable):
 - Python environments (venv, .venv): python3 -m venv venv && pip install the project's packages.
 - node_modules: npm install in the project.
-- ~/claude-work/tts models (Kokoro TTS, used by kokoro_onnx in render.py): kokoro-v1.0.onnx and
+- ~/Work/claude-work/tts models (Kokoro TTS, used by kokoro_onnx in render.py): kokoro-v1.0.onnx and
   voices-v1.0.bin from https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0
 - Rendered videos: the .mp4 files in ~/.boss-os/trailers (made again by its build.sh from the music,
   voice and frames kept here) and ~/Movies/Ask The Flowers (rendered exports only).

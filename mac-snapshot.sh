@@ -100,6 +100,7 @@ SOURCES=(
   "Misc|"
   "claude-work|/tts/*.onnx;/tts/voices-*.bin"
   "codex-briefs|"
+  "Work|"
   "Notes|"
   "bin|"
   "Library/Application Support/tz-watch|"

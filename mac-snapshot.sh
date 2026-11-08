@@ -103,6 +103,7 @@ SOURCES=(
   ".boss-os|/runtime/;/browser/;/kdp-profile/;/repo-change/;/trailers/**.mp4;/trailers/**.MP4"
   # Work holds 8raise-tools, Misc, claude-work and codex-briefs (moved there 8 Nov 2026): listed once.
   "Work|/claude-work/tts/*.onnx;/claude-work/tts/voices-*.bin"
+  "Brains|"   # hourly copy of the Boss OS brains (the live ones are in its database)
   "Notes|"
   "bin|"
   "Library/Application Support/tz-watch|"

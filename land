@@ -619,8 +619,19 @@ pr_large_reason() { large_reason "$PR_ADD" "$PR_DEL" "$PR_FILES" <<<"$PR_PATHS";
 # list from main and refuses to say LANDED while any migration is unapplied (it applies them first:
 # an already-merged PR, or one that slipped past, still owes them). Never `wrangler deploy`.
 # --- d1 begin (tests/test-land-d1.sh evals this block verbatim) ---
-D1_APPLY='CI=true npx wrangler d1 migrations apply "$D1_PREMERGE" --remote'
-D1_LIST='npx wrangler d1 migrations list "$D1_PREMERGE" --remote'
+# WRANGLER NEEDS A CLOUDFLARE TOKEN, AND THIS MAC HAS NO WRANGLER LOGIN (9 Nov 2026): p-n-p #179 and
+# #209 merged clean, then land stopped on a false D1_MIGRATIONS_PENDING ("the live site may be
+# failing") because the list call had no token and could not be read; with the vault's token it
+# said "No migrations to apply". So the D1 calls use the caller's CLOUDFLARE_API_TOKEN when set, else
+# run inside the Boss OS vault (its CLOUDFLARE_API_TOKEN), as the aplayer-mode deploy does. The token
+# is injected, never printed. An unreadable list still fails closed (d1_none_pending).
+vault_run() { (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- "$@"); }
+cf_token_run() { # run "$@" in $PWD with a Cloudflare token: the caller's, else the vault's
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then "$@"; return; fi
+  vault_run sh -c 'cd "$1" && shift && exec "$@"' sh "$PWD" "$@"
+}
+D1_APPLY='cf_token_run env CI=true npx wrangler d1 migrations apply "$D1_PREMERGE" --remote'
+D1_LIST='cf_token_run npx wrangler d1 migrations list "$D1_PREMERGE" --remote'
 touches_migrations() { grep -qE '(^|/)migrations/'; } # PR paths on stdin -> 0 when any is a migration
 d1_none_pending() { # $1 sha -> 0 only when wrangler, from that sha's wrangler.toml, says nothing is pending
   local out

@@ -178,7 +178,16 @@ else
 fi
 CHILD=$!
 wait "$CHILD"; RC=$?
-while kill -0 "$CHILD" 2>/dev/null; do wait "$CHILD"; RC=$?; done
+[ -n "${AI_RUN_TEST_FOREIGN_PID:-}" ] && CHILD="$AI_RUN_TEST_FOREIGN_PID"   # tests only: the PID got reused
+# A trap can end `wait` early while the engine still runs, so wait again while it lives. But a PID
+# that exists and is NOT our child (macOS reused it after the engine exited) makes `wait` return 127
+# at once: that is the end, not a reason to spin. 9 Nov 2026: this loop spun at 100% CPU for 50
+# minutes and cost the Monday CI sweep its first round.
+while kill -0 "$CHILD" 2>/dev/null; do
+  wait "$CHILD"; r=$?
+  [ "$r" -eq 127 ] && break
+  RC=$r
+done
 trap - TERM INT HUP
 
 [ -n "$OUT" ] || cat "$DEST"

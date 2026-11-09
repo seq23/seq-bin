@@ -256,6 +256,19 @@ sweep_prs_opened_this_run() {
       --jq "select(.state==\"OPEN\" and (.isDraft|not)) | \"$repo\t\(.number)\t\(.headRefName)\t\(.title)\"" 2>/dev/null </dev/null
   done < "$WORK/carried-prs.tsv"
 }
+# Danielle's stale grid PRs, handed to her runner (see the call before round 1). Bounded; never fatal.
+BOSS_OS_RUNTIME="${CI_SWEEP_BOSS_OS:-$HOME/.boss-os/runtime}"
+stale_grid_handoff() {
+  [ -s "$GRID_INBOX" ] || { say "grid hand-off: no grid inbox; nothing to hand to Danielle's runner"; return 0; }
+  if [ ! -f "$BOSS_OS_RUNTIME/scripts/ops/site-audit-lib.mjs" ]; then
+    say "NAMED STOP [NO_BOSS_OS_RUNTIME] $BOSS_OS_RUNTIME has no site-audit-lib.mjs; Danielle's stale grid PRs were not handed off"; return 0
+  fi
+  local out rc
+  out="$(cd "$BOSS_OS_RUNTIME" && timeout 5400 npm run --silent vault:run -- node scripts/ops/site-audit-lib.mjs stale-grid "$GRID_INBOX" 2>&1 </dev/null)"; rc=$?
+  printf '%s\n' "$out" | grep -E '^(HANDOFF|NAMED STOP)' | while IFS= read -r l; do say "grid hand-off: $l"; done
+  [ "$rc" -eq 0 ] || say "NAMED STOP [GRID_HANDOFF_FAILED] stale-grid exited $rc; see the lines above (the next sweep run retries)"
+  return 0
+}
 # The fix PRs that keep a run from being DONE: open, the sweep's own, not rejected.
 unfinished_prs() {
   sweep_prs_opened_this_run | sort -u | while IFS=$'\t' read -r repo num branch title; do
@@ -1004,6 +1017,12 @@ if [ -n "$RESUME_FROM" ]; then
   say "resumed from $RESUME_FROM: $(grep -c . "$WORK/merged.tsv") merge(s) and $(grep -c . "$WORK/dispatched.tsv") dispatch(es) carried"
 fi
 PROGRESS_LOG="$WORK/progress.tsv"; : > "$PROGRESS_LOG"
+# A STALE GRID PR OF DANIELLE'S LANE IS AN ACTION (9 Nov 2026). Seven danielle/site-audit-* PRs sat
+# 4-6 days as report lines. Before round 1 they go to her runner's own landing path (boss-os
+# site-audit-lib.mjs stale-grid): open >24h and green -> ~/bin/land; already on main -> closed;
+# a draft or conflict -> her Search Readiness run is re-armed and its next pass finishes it first.
+# The grid lanes call them QUIET (handed off), so no sweep agent works the same branch.
+stale_grid_handoff
 
 while :; do
   say "--- probing main (after round $round) ---"

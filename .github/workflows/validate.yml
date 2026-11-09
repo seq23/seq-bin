@@ -108,6 +108,9 @@ jobs:
         run: ./tests/test-housekeeping.sh
       - name: disk-sweep.sh removes only leaked clones, old fixtures and merged worktrees, and alerts once when low
         run: ./tests/test-disk-sweep.sh
+      # 9 Nov 2026: the compaction hook overwrote a hand-written Today status in ~/HANDOFF.md.
+      - name: handoff-on-compact.sh keeps a same-day hand-written status and replaces only its own note
+        run: ./tests/test-handoff-keeps-curated.sh
 
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh

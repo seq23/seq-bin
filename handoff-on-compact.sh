@@ -84,7 +84,8 @@ ${summary}
 # flight, what we did today) live ONLY in the "Today" section between the TODAY markers, which is
 # REPLACED, never stacked: a new note from the same session replaces that session's earlier note
 # (1 Nov 2026: five notes stacked in one day); notes from other sessions today are kept (newest 2);
-# a new day → yesterday's notes are dropped. Everything outside the markers is never touched. No markers
+# a new day → yesterday's notes (and any hand-written status above them) are dropped. Same day: a
+# hand-written status above the first session note is kept, never overwritten. Everything outside the markers is never touched. No markers
 # yet → the section is appended at the END of the file, never at the top.
 BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
 import os, re
@@ -97,14 +98,23 @@ if S not in doc or E not in doc:
 head, rest = doc.split(S, 1)
 body, tail = rest.split(E, 1)
 m = re.search(r"<!-- day:(\d{4}-\d{2}-\d{2}) -->", body)
-notes = []
+notes, curated = [], ""
 if m and m.group(1) == today:
-    notes = [n.rstrip() + "\n" for n in re.split(r"(?m)^(?=### Session note — )", body) if n.strip().startswith("### Session note")]
+    parts = re.split(r"(?m)^(?=### Session note — )", body)
+    notes = [n.rstrip() + "\n" for n in parts if n.strip().startswith("### Session note")]
+    # 9 Nov 2026 (hers: "should it be overwritten like that?"): anything hand-written in Today before
+    # the first session note (a curated status written in-session) is KEPT on the same day, above the
+    # new note; only the day line and the date line are regenerated. A new day still drops it.
+    pre = parts[0] if parts and not parts[0].strip().startswith("### Session note") else ""
+    pre = re.sub(r"<!-- day:\d{4}-\d{2}-\d{2} -->\n?", "", pre, count=1)
+    pre = re.sub(r"\A\s*_[^\n]*_\s*\n", "", pre, count=1)
+    curated = pre.strip()
 sid = re.search(r"session:(\S+) -->", block)
 if sid:
     notes = [n for n in notes if ("session:" + sid.group(1) + " -->") not in n]
 notes = [block] + notes[:2]
-out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + "\n".join(notes) + E + tail
+cur = (curated + "\n\n") if curated else ""
+out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + cur + "\n".join(notes) + E + tail
 tmp = path + ".tmp"
 open(tmp, "w").write(out)
 os.replace(tmp, path)

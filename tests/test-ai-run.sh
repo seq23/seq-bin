@@ -163,6 +163,14 @@ else
   bad "could not list tracked files to look for AI_RUN_WORKER setters"
 fi
 
+# 9 Nov 2026: a reused PID (alive, not our child) made the wait loop spin at 100% CPU for 50 minutes.
+reset; sleep 60 & FOREIGN=$!
+( sleep 1; true ) & SUB=$!; wait "$SUB"
+START=$(date +%s)
+env PATH="$BIN:$PATH" AI_RUN_TEST_FOREIGN_PID="$FOREIGN" timeout 15 "$AI" --role worker --out "$TMP/out.log" -- "quick" >/dev/null 2>&1; rc=$?
+check "a reused, foreign PID ends the wait instead of spinning (rc $rc)" test "$rc" -ne 124
+check "a reused, foreign PID ends the wait within 10 s" test $(( $(date +%s) - START )) -lt 10
+kill "$FOREIGN" 2>/dev/null
 echo
 [ "$asserts" -gt 0 ] || { echo "NAMED STOP [ZERO_ASSERTIONS] nothing was checked."; exit 3; }
 echo "$((asserts - failed))/$asserts passed"

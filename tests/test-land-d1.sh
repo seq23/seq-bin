@@ -35,6 +35,7 @@ esac
 NPX
 chmod +x "$WORK/bin/npx"
 export FAKE_D1="$WORK"
+export CLOUDFLARE_API_TOKEN=fake-token-for-tests
 fails=0; passes=0
 check() { # label expected actual
   if [ "$2" = "$3" ]; then echo "  ok   $1"; passes=$((passes+1)); else echo "  FAIL $1: expected '$2', got '$3'"; fails=$((fails+1)); fi
@@ -82,6 +83,22 @@ rm -f "$WORK/calls"; echo 1 > "$WORK/pending"
 ( PATH="$WORK/bin:$PATH"; deploy_at() { (eval "$2"); }; D1_PREMERGE=pnp-admin; PR_PATHS=migrations/x.sql; eval "$BLOCK"; d1_premerge abc >/dev/null 2>&1 )
 check "the apply is \`CI=true wrangler d1 migrations apply pnp-admin --remote\`" 1 "$(grep -c '^CI=true wrangler d1 migrations apply pnp-admin --remote$' "$WORK/calls")"
 check "the d1 block never runs \`wrangler deploy\`" 0 "$(grep -c 'wrangler deploy' <<<"$BLOCK" || true)"
+
+echo "== no token in the shell: the D1 calls go through the vault, never token-less"
+# vault_run is stubbed: it records the call and supplies a token, as the Boss OS vault does.
+vault_case() { # block -> "<rc> <vault calls> <lists seen with a token>"
+  rm -f "$WORK/calls" "$WORK/vault"; : > "$WORK/calls"; echo 0 > "$WORK/pending"
+  local rc=0
+  ( PATH="$WORK/bin:$PATH"; unset CLOUDFLARE_API_TOKEN; deploy_at() { (eval "$2"); }; D1_PREMERGE=pnp-admin
+    eval "$1"
+    vault_run() { echo x >> "$FAKE_D1/vault"; CLOUDFLARE_API_TOKEN=from-vault "$@"; }
+    d1_postmerge abc >/dev/null 2>&1 ) || rc=$?
+  printf '%s %s %s' "$rc" "$(grep -c x "$WORK/vault" 2>/dev/null || echo 0)" "$(grep -c ' list ' "$WORK/calls" || true)"
+}
+check "no token: the list runs through the vault and reads clean" "0 1 1" "$(vault_case "$BLOCK")"
+NOVAULT="$(sed 's/^  vault_run sh -c .*$/  "$@"/' <<<"$BLOCK")"
+[ "$NOVAULT" != "$BLOCK" ] || { echo "  FAIL the no-vault mutation did not apply"; fails=$((fails+1)); }
+check "negative proof: a block that never uses the vault is caught" yes "$([ "$(vault_case "$NOVAULT")" != "0 1 1" ] && echo yes || echo no)"
 
 echo "== where land calls it"
 L_PRE="$(grep -n 'd1_premerge "\$HEAD" || die "NAMED STOP \[D1_MIGRATION_FAILED\]' "$LAND" | cut -d: -f1 | head -1 || true)"

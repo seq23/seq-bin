@@ -38,7 +38,15 @@ while IFS=$'\t' read -r grepo gkind gevidence gtask ghead; do
   [ -n "$num" ] || continue
   case " $seen " in *" $bare#$num "*) continue ;; esac
   seen="$seen $bare#$num"
-  state="$(gh pr view "$num" --repo "$grepo" --json state --jq .state 2>/dev/null </dev/null || true)"
+  read -r state branch <<< "$(gh pr view "$num" --repo "$grepo" --json state,headRefName --jq '.state + " " + .headRefName' 2>/dev/null </dev/null || true)"
+  # DANIELLE'S OWN LANE IS HER RUNNER'S, NOT THIS SWEEP'S (9 Nov 2026). ci-sweep.sh hands every open
+  # danielle/site-audit-* grid PR to boss-os `site-audit-lib.mjs stale-grid` before round 1 (land it
+  # if green, close it if already on main, re-arm her pass to finish a draft). A sweep agent on the
+  # same branch would collide with that pass, so the lane is QUIET here, named as handed off.
+  if [ "$state" = OPEN ] && [ "${branch#danielle/site-audit-}" != "$branch" ]; then
+    printf 'QUIET\t%s\tgrid: stale PR #%s\t%s|grid-pr|%s|HANDED_TO_DANIELLE\thanded to Danielle'"'"'s runner (site-audit-lib.mjs stale-grid): %s\n' "$bare" "$num" "$bare" "$num" "$gevidence"
+    continue
+  fi
   case "$state" in
     OPEN)
       printf 'RED\t%s\tgrid: stale PR #%s\t%s|grid-pr|%s|OPEN\tBoss OS grid task %s — %s Land it with ~/bin/land if it is still right; close it with a one-line reason if it is superseded. %s\n' \

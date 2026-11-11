@@ -75,7 +75,7 @@ row RULES_CLEANUP_2026_11 >/dev/null && bad "rules row posted at 3,000 words"
 # Run 2: CLAUDE.md at 3,001 words → the month's rules row, once.
 for _ in $(seq 1 3001); do printf 'word '; done > "$T/.claude/CLAUDE.md"
 : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 2 exit non-zero"
-opened RULES_CLEANUP_2026_11 || bad "2,501-word CLAUDE.md opened no rules row"
+opened RULES_CLEANUP_2026_11 || bad "3,001-word CLAUDE.md opened no rules row"
 row RULES_CLEANUP_2026_11 | grep -q 'over 3,000 words, 3,001 words' || bad "rules row title wrong: $(row RULES_CLEANUP_2026_11)"
 : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 3 exit non-zero"
 row RULES_CLEANUP_2026_11 >/dev/null && bad "rules row posted twice in one month"

@@ -155,6 +155,8 @@ jobs:
         run: ./tests/test-scooter-watch-named.sh
       - name: a tail that cannot check for mail tells her, and its D1 calls carry the vault token
         run: ./tests/test-scooter-watch-fail.sh
+      - name: A tail watchdog only stops its own agent
+        run: ./tests/test-scooter-watch-watchdog.sh
 
   # The encrypted snapshot needs hdiutil, so its fixture run is on a macOS runner (no secrets, no network).
   mac-snapshot:

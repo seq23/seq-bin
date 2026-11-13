@@ -153,6 +153,8 @@ jobs:
         run: ./ci-sweep-selftest.sh
       - name: a named job is tailed, her own replies included
         run: ./tests/test-scooter-watch-named.sh
+      - name: a tail that cannot check for mail tells her, and its D1 calls carry the vault token
+        run: ./tests/test-scooter-watch-fail.sh
 
   # The encrypted snapshot needs hdiutil, so its fixture run is on a macOS runner (no secrets, no network).
   mac-snapshot:

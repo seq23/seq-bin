@@ -33,22 +33,39 @@ $(cat ~/bin/pnp-listings-job.md)"
 # ai-run --role brain (Claude), a NAMED EXCEPTION to the 3 Nov 2026 ruling (Codex does the hands-on
 # work): this job drives her own Chrome through Claude in Chrome, which only Claude can reach. Same
 # flags as before: Chrome tools only, no permission bypass.
-last=""
-for try in 1 2; do
-  [ $try = 2 ] && { echo "$(date) no result on the first try (${last:-nothing said}); trying once more in 10 minutes" >> "$LOG"; sleep 600; open -ga "Google Chrome"; sleep 20; }
+# A Claude usage limit never ends the day's run (her word 13 Nov 2026: "not get stopped b/c of usage
+# again"): a limit on the first model moves straight to the next model, and a limit on both waits an
+# hour and starts over, until 9 pm. Only Claude can drive her Chrome, so the ladder is Claude's models.
+LIMIT_RE='usage limit|limit reached|hit your [a-z ]*limit|out of (extra )?usage|rate.?limit|overloaded'
+WAIT=${LISTINGS_LIMIT_WAIT:-3600}
+last=""; model=opus; try=0; plain=0
+while :; do
+  try=$((try + 1))
   mark=$(wc -l < "$LOG" 2>/dev/null || echo 0)
-  printf "%s" "$PROMPT" | AI_RUN_CLAUDE_ARGS='--chrome --allowedTools=mcp__claude-in-chrome__*' \
+  printf "%s" "$PROMPT" | AI_RUN_CLAUDE_MODEL=$model AI_RUN_CLAUDE_ARGS='--chrome --allowedTools=mcp__claude-in-chrome__*' \
     ~/bin/ai-run --role brain --cwd ~ --out "$LOG" > /dev/null 2>&1
-  last=$(tail -n +$((mark + 1)) "$LOG" | grep -E "^(RESULT|STOP):" | tail -1)
-  echo "$(date) try $try: ${last:-no result}" >> "$LOG"
+  new=$(tail -n +$((mark + 1)) "$LOG")
+  last=$(printf "%s\n" "$new" | grep -E "^(RESULT|STOP):" | tail -1)
+  echo "$(date) try $try ($model): ${last:-no result}" >> "$LOG"
   [[ "$last" == RESULT:* ]] && break
   # Facebook wanting her own sign-in is not cured by trying again: stop and tell her.
   echo "$last" | grep -qiE "log ?in|sign ?in|password|checkpoint|captcha|verif|two-factor|2fa" && break
+  if [ -z "$last" ] && printf "%s\n" "$new" | tail -n 20 | grep -qiE "$LIMIT_RE"; then
+    if [ $model = opus ]; then model=sonnet; echo "$(date) usage limit on the first model; trying the next model now" >> "$LOG"; continue; fi
+    [ "$(date +%H)" -ge 21 ] && { last="STOP: Claude usage limit on every model, all day"; break; }
+    echo "$(date) usage limit on every model; trying again in $((WAIT / 60)) minutes" >> "$LOG"
+    sleep "$WAIT"; model=opus; open -ga "Google Chrome"; sleep 20; continue
+  fi
+  [ $plain = 1 ] && break; plain=1
+  echo "$(date) no result on the first try (${last:-nothing said}); trying once more in 10 minutes" >> "$LOG"; sleep ${LISTINGS_RETRY_WAIT:-600}; open -ga "Google Chrome"; sleep 20
 done
 if [[ "$last" == RESULT:* ]]; then
   [ $read_ok = 1 ] && echo "$sig" > $STATE/site.sig
   rm -f $STATE/retry; echo "$today $last" >> $STATE/results.log
-  [ $renew_day = 1 ] && (cd ~/GitHub/p-n-p && npx wrangler d1 execute pnp-admin --remote --command "INSERT INTO settings (key, value) VALUES ('marketplace_renew_sent', '$today') ON CONFLICT(key) DO UPDATE SET value = excluded.value" >> "$LOG" 2>&1)
+  # Through the vault: wrangler's own sign-in on this Mac expires, and then this write failed in
+  # silence, so Valerie kept being told to renew by hand (found 13 Nov 2026).
+  [ $renew_day = 1 ] && { (cd ~/GitHub/boss-os && node scripts/vault/vault.mjs run -- bash -c "cd ~/GitHub/p-n-p && npx wrangler d1 execute pnp-admin --remote --command \"INSERT INTO settings (key, value) VALUES ('marketplace_renew_sent', '$today') ON CONFLICT(key) DO UPDATE SET value = excluded.value\"" >> "$LOG" 2>&1) \
+    || echo "$today NAMED STOP [RENEW_MARK_NOT_SAVED] the site was not told the listings are done; the 4 pm reminder will still go" >> "$LOG"; }
 else
   [ "${FORCE:-0}" = 1 ] && exit 1
   days=$(( $(cat $STATE/retry 2>/dev/null || echo 0) + 1 )); echo $days > $STATE/retry

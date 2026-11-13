@@ -27,9 +27,20 @@ if [ $read_ok = 1 ]; then [ "$sig" != "$(cat $STATE/site.sig 2>/dev/null)" ] && 
 else echo "$today NOTE [SITE_NOT_READ] the site pages could not be read after 3 tries; not counted as a change, read again on the next run" >> "$LOG"; fi
 retry=0; [ -f $STATE/retry ] && retry=1
 [ "${FORCE:-0}" = 1 ] || [ $renew_day = 1 ] || [ $changed = 1 ] || [ $retry = 1 ] || { echo "$today nothing due" >> "$LOG"; exit 0; }
+# Real work first (owner, 1 Nov 2026: "the listings should show more of OUR REAL WORK"): bring the
+# newest real job photos and clips onto this Mac before the model runs (~/bin/pnp-real-work.mjs,
+# read-only, through the vault). A source that cannot be read is a NAMED STOP in the log and the
+# listings work still runs, with the real-work files already here. The once-a-week "more photos,
+# please" line in her morning email is Boss OS's own daily job (scripts/ops/pnp-photo-ask.mjs).
+REAL=$STATE/real-work
+real_out=$(cd ~/GitHub/boss-os && PNP_REAL_WORK_DIR="$REAL" node scripts/vault/vault.mjs run -- node ~/bin/pnp-real-work.mjs 2>&1); printf "%s\n" "$real_out" >> "$LOG"
+printf "%s\n" "$real_out" | grep -q "^real work photos: OUTPUT " \
+  || echo "$today NAMED STOP [REAL_PHOTOS_NOT_READ] the real-work photo step ended without its OUTPUT line; the listings run goes on with the photos already on this Mac" >> "$LOG"
 open -ga "Google Chrome"; sleep 20   # her Chrome must be open for Claude in Chrome
 PROMPT="Today is $today (renewal day: $renew_day; site pages changed since last run: $changed).
-$(cat ~/bin/pnp-listings-job.md)"
+$(cat ~/bin/pnp-listings-job.md)
+
+$(cat "$REAL/list.txt" 2>/dev/null || echo "REAL WORK ON THIS MAC: none could be listed today; use the site photos as before.")"
 # ai-run --role brain (Claude), a NAMED EXCEPTION to the 3 Nov 2026 ruling (Codex does the hands-on
 # work): this job drives her own Chrome through Claude in Chrome, which only Claude can reach. Same
 # flags as before: Chrome tools only, no permission bypass.
@@ -62,6 +73,8 @@ done
 if [[ "$last" == RESULT:* ]]; then
   [ $read_ok = 1 ] && echo "$sig" > $STATE/site.sig
   rm -f $STATE/retry; echo "$today $last" >> $STATE/results.log
+  # A real photo the Chrome tools would not attach is the team's to fix, never hers: say so in the log.
+  echo "$last" | grep -qi "attach refused" && echo "$today NAMED STOP [REAL_PHOTOS_NOT_ATTACHED] the Chrome tools refused a real-work file; the listings kept their current photos ($last)" >> "$LOG"
   # Through the vault: wrangler's own sign-in on this Mac expires, and then this write failed in
   # silence, so Valerie kept being told to renew by hand (found 13 Nov 2026).
   [ $renew_day = 1 ] && { (cd ~/GitHub/boss-os && node scripts/vault/vault.mjs run -- bash -c "cd ~/GitHub/p-n-p && npx wrangler d1 execute pnp-admin --remote --command \"INSERT INTO settings (key, value) VALUES ('marketplace_renew_sent', '$today') ON CONFLICT(key) DO UPDATE SET value = excluded.value\"" >> "$LOG" 2>&1) \

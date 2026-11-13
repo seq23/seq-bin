@@ -22,4 +22,6 @@ bare="$(grep -n 'npx wrangler d1 execute' "$w" | grep -v 'vault' | grep -v '^[0-
 [ -z "$bare" ] || { echo "FAIL: a D1 call runs without the vault token: $bare"; fail=1; }
 [ "$(grep -c 'check_failed "$CHECK_FAILS" check_alert' "$w")" -eq 2 ] || { echo "FAIL: a failed check exits uncounted"; fail=1; }
 grep -q '^check_ok "$CHECK_FAILS"' "$w" || { echo "FAIL: a working check does not clear the count"; fail=1; }
-[ $fail = 0 ] && echo "test-scooter-watch-fail: OK (8 cases)"; exit $fail
+# The tail agent is sent to its own worktree: the runners' checkout must stay on main.
+grep -q 'worktree add $HOME_DIR/GitHub/.wt-tail-$STAMP' "$w" || { echo "FAIL: the tail agent is not given its own worktree"; fail=1; }
+[ $fail = 0 ] && echo "test-scooter-watch-fail: OK (9 cases)"; exit $fail

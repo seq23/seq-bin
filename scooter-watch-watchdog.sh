@@ -5,16 +5,23 @@
 # GitHub issue in west-peek-os — a macOS banner alone disappears and does nothing if she's away.
 # If the agent already finished (fix lock gone), this is a no-op.
 #
+# 13 Nov 2026: the lock is one shared directory, so a watchdog whose own agent finished long ago
+# woke at its 2 h mark, found the NEXT agent's lock, and killed that agent 15 minutes into its
+# work (twice in one morning, each logged as "did not finish within 120 minutes"). A watchdog now
+# acts only while the lock still names the wrapper it was started for ($FIXLOCK/pid).
+#
 # 6 Oct 2026: kills claude's own PID ($FIXLOCK/claude_pid), not the wrapper's — killing the
 # wrapper left claude running orphaned. The wrapper's `wait` returns on the kill and it sends the
 # report and releases the lock; the lock is only removed here if the wrapper itself is gone.
 set -uo pipefail
 WRAPPER_PID="$1" CAP_SECONDS="$2" FIXLOCK="$3" FIXLOG="$4" TAIL_LOG="$5" REPORT_FILE="${6:-}" SUBJECT="${7:-}"
 GH_REPO="${SCOOTER_WATCH_GH_REPO:-seq23/west-peek-os}"
+OSA="${SCOOTER_WATCH_OSASCRIPT:-/usr/bin/osascript}"
+mine() { [ -d "$FIXLOCK" ] && [ "$(cat "$FIXLOCK/pid" 2>/dev/null)" = "$WRAPPER_PID" ]; }
 
 sleep "$CAP_SECONDS"
 
-[ -d "$FIXLOCK" ] || exit 0
+mine || exit 0   # no lock, or a later agent's lock: not this watchdog's to touch
 AGENT_PID="$(cat "$FIXLOCK/claude_pid" 2>/dev/null || echo "$WRAPPER_PID")"
 
 if kill -0 "$AGENT_PID" 2>/dev/null; then
@@ -33,7 +40,7 @@ if kill -0 "$AGENT_PID" 2>/dev/null; then
   sleep 2
   kill -9 "$AGENT_PID" 2>/dev/null
 
-  /usr/bin/osascript -e "display notification \"Tail agent ran ${CAP_MIN}min without finishing — killed, see fix-log.md\" with title \"Partner tail\" subtitle \"needs a look\" sound name \"Basso\"" \
+  "$OSA" -e "display notification \"Tail agent ran ${CAP_MIN}min without finishing — killed, see fix-log.md\" with title \"Partner tail\" subtitle \"needs a look\" sound name \"Basso\"" \
     >/dev/null 2>&1
 
   TITLE="[partner-tail] agent killed at ${CAP_MIN}min cap — $(date -u +%Y-%m-%d)"
@@ -60,12 +67,13 @@ Filed by \`~/bin/scooter-watch-watchdog.sh\`."
       echo "[watchdog] filed $URL" >> "$FIXLOG.alerts.log"
     else
       echo "[watchdog] FAILED to file GitHub issue: $URL" >> "$FIXLOG.alerts.log"
-      /usr/bin/osascript -e "display alert \"partner-tail: could not file the 2h-cap GitHub issue\" message \"gh issue create failed — check $FIXLOG.alerts.log\"" \
+      "$OSA" -e "display alert \"partner-tail: could not file the 2h-cap GitHub issue\" message \"gh issue create failed — check $FIXLOG.alerts.log\"" \
         >/dev/null 2>&1
     fi
   fi
 fi
 
 # The wrapper releases the lock after it emails the report; only clean up if the wrapper is gone.
-sleep 30
+sleep "${SCOOTER_WATCH_WATCHDOG_GRACE:-30}"
+mine || exit 0
 kill -0 "$WRAPPER_PID" 2>/dev/null || rm -rf "$FIXLOCK"

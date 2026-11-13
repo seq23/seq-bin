@@ -380,7 +380,18 @@ the input on the card (block_answer, rebuilt_for, the brief) from the stored inb
 (3) fix the cause in the repo as below; (4) queue ONE rebuild. Exactly one preview email reaches
 the partner for that reply. Record the stopped run id in the fix-log entry.
 
-Fix in $REPO per the decide-and-fix and strengthen-tests-never-weaken rules: root-cause, fix at
+KNOWN FRICTION FIRST: open issues labelled partner-tail are friction already found and not yet fixed
+(a tail killed at its cap, or a session that saw it). List them before you diagnose:
+  gh issue list --repo seq23/west-peek-os --label partner-tail --state open --json number,title,body
+Fix each one that is on the path this work took, and close it with the PR link.
+
+YOUR OWN WORKTREE, ALWAYS: $REPO is the checkout the Mac's job runners execute, and they update only
+while it sits on main (13 Nov 2026: left on a side branch, the Mac ran 30 Oct code for two weeks, 42
+fixes behind). Never switch its branch and never commit in it. Make changes in
+  git -C $REPO worktree add $HOME_DIR/GitHub/.wt-tail-$STAMP -b tail-$STAMP origin/main
+and remove that worktree when your PR has landed.
+
+Fix there per the decide-and-fix and strengthen-tests-never-weaken rules: root-cause, fix at
 source, never weaken or skip a test or validator, guard it with a test, open a PR, then
 'gh pr checks <pr>' yourself and land it with '$HOME_DIR/bin/land <pr>' (watch main to a
 terminal state; never take any agent's word for green). Do not run the full e2e suites locally

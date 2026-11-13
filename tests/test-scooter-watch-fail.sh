@@ -24,4 +24,6 @@ bare="$(grep -n 'npx wrangler d1 execute' "$w" | grep -v 'vault' | grep -v '^[0-
 grep -q '^check_ok "$CHECK_FAILS"' "$w" || { echo "FAIL: a working check does not clear the count"; fail=1; }
 # The tail agent is sent to its own worktree: the runners' checkout must stay on main.
 grep -q 'worktree add $HOME_DIR/GitHub/.wt-tail-$STAMP' "$w" || { echo "FAIL: the tail agent is not given its own worktree"; fail=1; }
-[ $fail = 0 ] && echo "test-scooter-watch-fail: OK (9 cases)"; exit $fail
+# Known friction is read from OPEN issues, so a fixed one must be closed or the next tail re-reads it.
+grep -q 'gh issue close <n>' "$w" || { echo "FAIL: the tail agent is not told to close a fixed issue"; fail=1; }
+[ $fail = 0 ] && echo "test-scooter-watch-fail: OK (10 cases)"; exit $fail

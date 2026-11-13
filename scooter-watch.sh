@@ -412,7 +412,9 @@ RECORD, for every event (fixed or not):
   b. For EACH friction you fixed, open ONE GitHub issue:
      gh issue create --repo seq23/west-peek-os --label partner-tail --title "[partner-tail] <friction in one line>" --body "<what the partner asked, what the OS did, root cause, fix PR, CONFIRMED/SUSPECTED>"
      (create the label first if missing: gh label create partner-tail --repo seq23/west-peek-os --color 7057ff --description "Friction found by the partner tail" --force)
-     and reference the issue URL from the fix-log entry.
+     and reference the issue URL from the fix-log entry. The issue is the record, and the open list is
+     what is still broken: CLOSE it (gh issue close <n> --comment "<PR link, merge sha, CONFIRMED>") the
+     moment its fix is deployed. Leave open only friction that is not fixed, saying what is left.
   c. FINISH by writing a plain-text report of at most 25 lines to $REPORT_FILE — it is emailed to
      Sequoia as-is. First line: the partner's subject(s). Then: what was asked, what the OS did
      (employee, card ids, final state), friction found, fixes landed (PR links), issues filed,

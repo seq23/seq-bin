@@ -176,17 +176,19 @@ fi
 . "$(dirname "$0")/scooter-watch-fail.sh"
 CHECK_FAILS="$STATE_DIR/check-failures"
 check_alert() { # <count> — the email an hour (then every 24 h) of failed checks sends her
-  local f="$STATE_DIR/check-failed-report.txt"
+  local f="$STATE_DIR/check-failed-report.txt" hours=$(( $1 / 4 ))
   {
-    echo "The partner tail cannot check for new email, so nothing Scooter (or you) sends to os@ is being tailed."
+    echo "The partner tail has been down for about $hours hour(s): it cannot check for new email."
     echo
-    echo "Failed checks in a row: $1 (one every 15 minutes)."
-    echo "What the last check said:"
-    tail -c 600 "$STATE_DIR/last-os-raw.json" 2>/dev/null | sed 's/^/  /'
+    echo "What still works: an email Scooter or you send to os@ reaches Porter and the work starts."
+    echo "What is missing: nobody is watching that work for friction, and no tail report comes to you."
     echo
-    echo "Nothing is needed from you: this is a repair job. Log: $RUN_LOG"
+    echo "To fix it: open Claude and say \"fix the partner tail\"."
+    echo
+    echo "For the repair (you can ignore this line): $(tr -s '[:space:]' ' ' < "$STATE_DIR/last-os-raw.json" 2>/dev/null | cut -c1-240)"
+    echo "Log: $RUN_LOG"
   } > "$f"
-  send_report "$f" "Partner tail is down: $1 checks failed in a row"
+  send_report "$f" "Partner tail is down ($hours hour(s)): say \"fix the partner tail\" to Claude"
 }
 TAILED_CARDS="$(awk -F'\t' '$6 ~ /^wc_/ {print $6}' "$MAILLOG" 2>/dev/null | tr ',' '\n' | sed '/^$/d' | sort -u | sed "s/.*/'&'/" | paste -sd, -)"
 [ -z "$TAILED_CARDS" ] && TAILED_CARDS="''"

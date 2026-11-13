@@ -168,10 +168,30 @@ fi
 # every card a tailed email opened, and every card handed off from those, is followed to DONE. One left
 # open and untouched 24h+ (not a partner's own decision) is re-tailed; and ANY card firm-wide that fails
 # twice or blocks as "tried and could not finish" is tailed, whoever or whatever opened it.
+# 13 Nov 2026: the D1 calls run under the vault runner (its CLOUDFLARE_API_TOKEN). They used this Mac's
+# wrangler login, which expired 9 Nov 18:10 CT: 332 ticks failed in a row and a partner email of 13 Nov
+# went untailed, with only a log line to show for it. A failed check is now counted, and an hour of
+# them emails her (scooter-watch-fail.sh).
+# shellcheck source=scooter-watch-fail.sh
+. "$(dirname "$0")/scooter-watch-fail.sh"
+CHECK_FAILS="$STATE_DIR/check-failures"
+check_alert() { # <count> — the email an hour (then every 24 h) of failed checks sends her
+  local f="$STATE_DIR/check-failed-report.txt"
+  {
+    echo "The partner tail cannot check for new email, so nothing Scooter (or you) sends to os@ is being tailed."
+    echo
+    echo "Failed checks in a row: $1 (one every 15 minutes)."
+    echo "What the last check said:"
+    tail -c 600 "$STATE_DIR/last-os-raw.json" 2>/dev/null | sed 's/^/  /'
+    echo
+    echo "Nothing is needed from you: this is a repair job. Log: $RUN_LOG"
+  } > "$f"
+  send_report "$f" "Partner tail is down: $1 checks failed in a row"
+}
 TAILED_CARDS="$(awk -F'\t' '$6 ~ /^wc_/ {print $6}' "$MAILLOG" 2>/dev/null | tr ',' '\n' | sed '/^$/d' | sort -u | sed "s/.*/'&'/" | paste -sd, -)"
 [ -z "$TAILED_CARDS" ] && TAILED_CARDS="''"
 os_query() {
-  (cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \
+  (cd "$REPO" && node scripts/vault/vault.mjs run -- npx wrangler d1 execute west-peek-os-db --remote --env production --json \
     --command "SELECT message_id AS id, received_at AS date, from_address AS \"from\", to_address AS \"to\", subject, work_card_id FROM inbound_message WHERE ((from_address LIKE '%$PARTNER_A%' AND received_at > '$STARTED_AT') OR (from_address LIKE '%$PARTNER_B%' AND received_at > '$PARTNER_B_SINCE')) UNION ALL SELECT 'stuck:' || n.id AS id, n.sent_at AS date, 'OS STUCK notice to ' || n.sent_to AS \"from\", n.sent_to AS \"to\", 'STUCK: ' || COALESCE(c.title, n.work_card_id) AS subject, n.work_card_id FROM work_card_notice n LEFT JOIN work_card c ON c.id = n.work_card_id WHERE n.kind = 'STUCK' AND n.sent_at > '$STUCK_SINCE' AND (n.sent_to LIKE '%$PARTNER_A%' OR n.sent_to LIKE '%$PARTNER_B%') UNION ALL SELECT 'friction:' || id || ':' || work_attempts || ':' || state AS id, COALESCE(blocked_at, work_last_failure_at) AS date, 'OS follow-through (friction)' AS \"from\", '' AS \"to\", 'FRICTION: ' || title AS subject, id AS work_card_id FROM work_card WHERE state NOT IN ('DONE','CANCELLED') AND ((work_attempts >= 2 AND work_last_failure_at > '$STUCK_SINCE') OR (state = 'BLOCKED' AND block_reason = 'tried_and_could_not_finish' AND blocked_at > '$STUCK_SINCE')) UNION ALL SELECT 'stall:' || c.id || ':' || substr(c.updated_at,1,13) AS id, c.updated_at AS date, 'OS follow-through (stalled)' AS \"from\", '' AS \"to\", 'STALLED 24h+: ' || c.title AS subject, c.id AS work_card_id FROM work_card c WHERE c.id IN (WITH RECURSIVE fam(id) AS (SELECT id FROM work_card WHERE id IN ($TAILED_CARDS) UNION SELECT k.id FROM work_card k JOIN fam ON k.assigned_from_card_id = fam.id) SELECT id FROM fam) AND c.state NOT IN ('DONE','CANCELLED') AND c.updated_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours') AND NOT (c.state = 'BLOCKED' AND COALESCE(c.block_reason,'') <> 'tried_and_could_not_finish') ORDER BY date" 2>>"$RUN_LOG")
 }
 OS_JSON="$(os_query)"
@@ -183,6 +203,7 @@ fi
 if [ -z "$OS_JSON" ]; then
   echo "[watch] OS inbound check (west-peek-os D1) produced no output — treating as a failed check, not zero mail"
   banner "Partner tail — check failed" "OS inbound query returned nothing; see $RUN_LOG" "Basso"
+  check_failed "$CHECK_FAILS" check_alert
   exit 1
 fi
 echo "$OS_JSON" > "$STATE_DIR/last-os-raw.json"
@@ -194,7 +215,8 @@ if not (isinstance(d1, list) and d1 and d1[0].get("success", True)):
 for r in d1[0].get("results", []):
     print("\t".join(str(r.get(k) or "").replace("\t", " ").replace("\n", " ") for k in ("id", "date", "from", "subject", "work_card_id")))
 PY
-)" || { echo "[watch] OS inbound query did not report success"; exit 1; }
+)" || { echo "[watch] OS inbound query did not report success"; check_failed "$CHECK_FAILS" check_alert; exit 1; }
+check_ok "$CHECK_FAILS"
 OS_TOTAL="$(printf '%s' "$OS_ROWS" | grep -c . || true)"
 echo "[watch] source 1: OS inbound table ($OS_MAILBOX), from Scooter — $OS_TOTAL row(s) since the window started"
 
@@ -225,7 +247,7 @@ while IFS=$'\t' read -r id date from subject card; do
     fi
     ref="$(printf '%s' "$subject" | grep -oE 'TLR-[A-Z0-9]{6}' | head -1)"
     if [ -z "$named" ] && [ -n "$ref" ] && printf '%s' "$from" | grep -qi "$PARTNER_B"; then
-      left="$(cd "$REPO" && npx wrangler d1 execute west-peek-os-db --remote --env production --json \
+      left="$(cd "$REPO" && node scripts/vault/vault.mjs run -- npx wrangler d1 execute west-peek-os-db --remote --env production --json \
         --command "SELECT COUNT(*) AS n FROM tlc_brand_reply WHERE notice_ref = '$ref' AND state NOT IN ('SENT','SKIPPED')" 2>>"$RUN_LOG" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["results"][0]["n"])' 2>/dev/null)"
       if [ "$left" = "0" ]; then

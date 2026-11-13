@@ -150,6 +150,28 @@ fi
 command -v gh >/dev/null 2>&1 || { log "NAMED STOP [NO_GH_CLI]"; exit 3; }
 gh auth status >/dev/null 2>&1 || { log "NAMED STOP [GH_NOT_AUTHENTICATED]"; exit 3; }
 
+# THE PROBE NEVER TAKES THE LAST OF THE HOUR'S GITHUB CALLS (13 Nov 2026). One probe is about
+# 300 REST calls (4 per repo, plus one per workflow outside the newest 80 runs) and the sweep
+# probes after every round: on a Friday with three sessions working, the account's 5,000 an hour
+# ran out twice (08:34 and 09:44 CT) and `land` could not verify a green run for 26 minutes each
+# time. Below the floor the probe waits for the reset instead of reading; an unreadable or
+# non-numeric answer is not a reason to wait (the reads below have their own retries and stops).
+RATE_FLOOR="${CI_SWEEP_RATE_FLOOR:-1500}"
+rate_floor_wait() {
+  local left waited=0
+  while :; do
+    left="$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null)" || return 0
+    case "$left" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$left" -ge "$RATE_FLOOR" ] && return 0
+    if [ "$waited" -ge "${CI_SWEEP_RATE_WAIT_MAX:-3900}" ]; then
+      log "rate floor: still $left GitHub calls left after ${waited}s; reading anyway (the reads name their own stops)"; return 0
+    fi
+    [ "$waited" -eq 0 ] && log "rate floor: $left GitHub calls left this hour (floor $RATE_FLOOR); waiting for the reset so land keeps its share"
+    sleep 60; waited=$((waited + 60))
+  done
+}
+rate_floor_wait
+
 SINCE="$(date -u -v-"${SILENCE_HOURS}"H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
        || date -u -d "${SILENCE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
 

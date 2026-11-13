@@ -5,7 +5,7 @@
   <key>Label</key><string>com.seq.ci-sweep-resume</string>
   <!-- Every 300 s (5 min). Owner, 12 Oct 2026: "just pick up where it left off
        if I close the lid and then re-open". ci-sweep-resume-on-wake.sh reads
-       state/outcomes.tsv: if today's latest sweep run (Mon+Fri 08:00, or the
+       state/outcomes.tsv: if today's latest sweep run (Wed+Sat 08:00, or the
        09:00 retry) ended MAIN-RED-INTERRUPTED because the Mac slept, no sweep
        is running, and its budget still has room before its stop-by time, it
        restarts ci-sweep.sh as a RESUME of that run (same ledger row, same

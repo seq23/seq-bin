@@ -3,16 +3,16 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.seq.ci-sweep-retry</string>
-  <!-- Monday and Friday, 09:00 local (CT), exactly one hour after
-       com.seq.ci-sweep (Mon+Fri 08:00; 2 Oct 2026, owner, first run Mon 5
-       Oct — was daily 07:00 with this retry at 08:00). Her instruction, 24 Sep
+  <!-- Wednesday and Saturday, 09:00 local (CT), exactly one hour after
+       com.seq.ci-sweep (Wed+Sat 08:00; 13 Nov 2026, owner, first run Sat 14
+       Nov — was daily 07:00 with this retry at 08:00). Her instruction, 24 Sep
        2026: if the primary run did not end MAIN-GREEN, try once more.
        ci-sweep-retry-if-red.sh reads state/outcomes.tsv (today's runs) and
        decides: already green today -> no-op; today's only run was not green
        -> run ci-sweep.sh once more; already retried once today -> no-op, wait
-       for the next Mon/Fri 08:00 run. Never more than one retry a run day.
-       Same two weekdays as the primary (launchd Weekday: 1 = Monday,
-       5 = Friday); on any other day there is no run to retry.
+       for the next Wed/Sat 08:00 run. Never more than one retry a run day.
+       Same two weekdays as the primary (launchd Weekday: 3 = Wednesday,
+        6 = Saturday); on any other day there is no run to retry.
        Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep-retry.plist);
        install with the steps in README.md. ci-sweep-selftest.sh asserts this
        schedule. -->
@@ -25,12 +25,12 @@
   <key>StartCalendarInterval</key>
   <array>
     <dict>
-      <key>Weekday</key><integer>1</integer>
+      <key>Weekday</key><integer>3</integer>
       <key>Hour</key><integer>9</integer>
       <key>Minute</key><integer>0</integer>
     </dict>
     <dict>
-      <key>Weekday</key><integer>5</integer>
+      <key>Weekday</key><integer>6</integer>
       <key>Hour</key><integer>9</integer>
       <key>Minute</key><integer>0</integer>
     </dict>

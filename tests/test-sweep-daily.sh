@@ -214,7 +214,7 @@ check "a banner is sent even when green" grep -q '^\[notify:dry\] banner: "CI sw
 absent "a green run files no issue" grep -q 'notify:dry\] issue' "$LOGS/run-green.log"
 check "no round was run" [ "$(rounds)" -eq 0 ]
 check "no carryover is left" [ ! -f "$CARRY" ]
-check "the log names the next Mon/Fri 08:00 run, nothing more today" grep -q 'next run: 08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
+check "the log names the next Wed/Sat 08:00 run, nothing more today" grep -q 'next run: 08:00 on the next Wed/Sat (launchd com.seq.ci-sweep). Nothing else runs today.' "$LOGS/run-green.log"
 check "nothing schedules a retry" no_retry_anywhere run-green
 
 # =============================================================================
@@ -410,7 +410,7 @@ setup red-ab
 out="$(env PATH="$BIN:$PATH" CI_SWEEP_DRY_RUN=1 CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROBE_BIN="$TMP/probe.sh" \
         CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_GITHUB_DIR="$TMP/github" "$SWEEP" 2>&1)"; rc=$?
 check "dry run exits 0 (rc=$rc)" [ "$rc" -eq 0 ]
-check "it names the schedule and the model" grep -q 'Mon+Fri 08:00 CT.*retry at 09:00' <<<"$out"
+check "it names the schedule and the model" grep -q 'Wed+Sat 08:00 CT.*retry at 09:00' <<<"$out"
 check "…the engine" grep -q 'engine: every round runs ai-run --role worker (Codex)' <<<"$out"
 check "…and the repos round 1 would dispatch to, with their merge route" grep -q 'beta — build — merge route: gh' <<<"$out"
 check "no round was run" [ "$(rounds)" -eq 0 ]
@@ -431,12 +431,12 @@ check "the log names today's 09:00 retry, once" \
   grep -q 'next run: 09:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green.' \
   "$LOGS/run-retry1.log"
 
-echo "=== 14. a SECOND non-green run today (the retry already ran) names the next Mon/Fri, not another retry ==="
+echo "=== 14. a SECOND non-green run today (the retry already ran) names the next Wed/Sat, not another retry ==="
 setup green
 sweep run-retry2 PATH="$TMP/nogh:$BIN:$PATH"
 check "still MAIN-UNKNOWN" [ "$(last_verdict)" = "MAIN-UNKNOWN" ]
-check "the log names the next Mon/Fri 08:00 run, not another retry" \
-  grep -q "next run: 08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today." \
+check "the log names the next Wed/Sat 08:00 run, not another retry" \
+  grep -q "next run: 08:00 on the next Wed/Sat (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today." \
   "$LOGS/run-retry2.log"
 rm -f "$LEDGER"
 

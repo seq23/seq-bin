@@ -1,19 +1,19 @@
 #!/bin/bash
-# CI sweep — Monday and Friday 08:00 CT, under launchd (launchd/com.seq.ci-sweep.plist
+# CI sweep — Wednesday and Saturday 08:00 CT, under launchd (launchd/com.seq.ci-sweep.plist
 # in this repo), with one automatic retry at 09:00 if that run does not end green
 # (launchd/com.seq.ci-sweep-retry.plist -> ci-sweep-retry-if-red.sh, which
 # runs THIS script again unchanged). Goal: every repo's main green by about
 # 11:30 (12:30 on a retry day).
-# 2 Oct 2026, owner: Mon+Fri 08:00, first run Mon 5 Oct — replaces daily 07:00
+# 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00, first run Sat 14 Nov — replaces daily 07:00
 # (+08:00 retry). The cadence lives in the plist; everything here reads the
 # ledger by day, so a run day is a run day whichever weekday it is.
 #
 # THE DESIGN (her approval, 23 Sep 2026; retry added on her instruction, 24 Sep 2026)
-#   · One run per run day (Mon, Fri at 08:00). This script itself never retries — it does
+#   · One run per run day (Wed, Sat at 08:00). This script itself never retries — it does
 #     not know whether it is the 08:00 run or the 09:00 retry, and does not need to:
 #     ci-sweep-retry-if-red.sh reads the ledger and runs it again exactly once
 #     if today's only run so far did not end MAIN-GREEN. A second non-green
-#     ending waits for the next Mon/Fri 08:00 run, briefed with what both tries did
+#     ending waits for the next Wed/Sat 08:00 run, briefed with what both tries did
 #     (state/carryover-next.md). If the Mac was asleep at 08:00, launchd fires
 #     the missed run once at wake, and the 09:00 retry check still runs as usual.
 #   · RESUME ON WAKE (owner, 12 Oct 2026: "just pick up where it left off if I close
@@ -299,7 +299,7 @@ park_open_prs() {
     printf '%s#%s\t%s\t%s\n' "$repo" "$num" "$branch" "$title" >> "$WORK/parked-prs"
     say "  PARKED PR $repo#$num ($branch): $why"
     pr_note "$repo" "$num" "[ci-sweep] PARKED — not landed work" \
-      "The sweep run that opened this pull request ended without merging it: $why. The next sweep run (today's 09:00 retry if this run wasn't green, otherwise the next Mon/Fri 08:00) resumes it: it re-reads the checks and lands it if green, and cannot end green while it is open. A person may close it or take it over. Run log: $RUN_LOG"
+      "The sweep run that opened this pull request ended without merging it: $why. The next sweep run (today's 09:00 retry if this run wasn't green, otherwise the next Wed/Sat 08:00) resumes it: it re-reads the checks and lands it if green, and cannot end green while it is open. A person may close it or take it over. Run log: $RUN_LOG"
   done < <(sweep_prs_opened_this_run | sort -u)
   [ "$n" -eq 0 ] && say "  (no open PR of this run's to park in [$(tr '\n' ' ' < "$WORK/scope-repos" 2>/dev/null)])"
   return 0
@@ -318,7 +318,7 @@ reject_audited_prs() {
     printf '%s\t%s\n' "$ref" "$why" >> "$WORK/rejected"
     say "  REJECTED $ref: $why"
     pr_note "$repo" "$num" "[ci-sweep] REJECTED by the audit — do not merge" \
-      "ci-sweep-audit.sh found a weakening in this pull request during sweep round $round: **$why**. The sweep will not merge it and ends this run. The next sweep run (today's 09:00 retry if this run wasn't green, otherwise the next Mon/Fri 08:00) is told what was rejected and why, and goes for the root cause instead. Either fix this PR so the weakening is gone, or close it. Run log: $RUN_LOG"
+      "ci-sweep-audit.sh found a weakening in this pull request during sweep round $round: **$why**. The sweep will not merge it and ends this run. The next sweep run (today's 09:00 retry if this run wasn't green, otherwise the next Wed/Sat 08:00) is told what was rejected and why, and goes for the root cause instead. Either fix this PR so the weakening is gone, or close it. Run log: $RUN_LOG"
   done < <(grep -E '✗ FATAL ' "$audit_file" 2>/dev/null)
   [ "$n" -eq 0 ] && say "  (the audit reported FATAL but named no PR the sweep could act on)"
   return 0
@@ -706,9 +706,9 @@ conclude() {
   today_rows=0
   [ -f "$LEDGER" ] && today_rows="$(awk -F'\t' -v d="$(at_time "$(date +%s)" +%Y-%m-%d)" '$2==d' "$LEDGER" | grep -c .)"
   if [ "$verdict" = "MAIN-GREEN" ]; then
-    next_note="08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Nothing else runs today."
+    next_note="08:00 on the next Wed/Sat (launchd com.seq.ci-sweep). Nothing else runs today."
   elif [ "$today_rows" -ge 2 ]; then
-    next_note="08:00 on the next Mon/Fri (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today."
+    next_note="08:00 on the next Wed/Sat (launchd com.seq.ci-sweep). Today's one retry already ran and was not green; nothing more today."
   else
     next_note="09:00 today, once (launchd com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh) — this run did not end green."
   fi
@@ -768,7 +768,7 @@ probe_main() {
 # dispatch to, which are parked from yesterday, and the merge route per repo. No
 # lock, no AI run, no PR, no merge, no notification.
 if [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
-  echo "[dry-run] schedule: Mon+Fri 08:00 CT (launchd com.seq.ci-sweep), one retry at 09:00 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Mon/Fri run"
+  echo "[dry-run] schedule: Wed+Sat 08:00 CT (launchd com.seq.ci-sweep), one retry at 09:00 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Wed/Sat run"
   echo "[dry-run] engine: every round runs ai-run --role worker (Codex); Codex out (limit or unavailable) hands the same brief to Claude; both out is a named stop"
   echo "[dry-run] budget: ${DEADLINE_MIN} min convergence, hard kill at ${HARD_KILL_MIN} awake min; round 1 cap ${ROUND1_CAP_MIN} min, later rounds ${ROUNDN_CAP_MIN} min"
   echo "[dry-run] rounds continue while a round makes progress; STUCK after ${NO_PROGRESS_LIMIT} consecutive rounds without"

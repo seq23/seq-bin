@@ -47,9 +47,9 @@ OWNER="${CI_SWEEP_OWNER:-seq23}"
 # The silence window. A repo with commits in this window and zero CI runs in it is
 # a finding — see the west-peek-os incident in ci-sweep-prompt.md: nothing was red
 # because nothing ran, for three weeks, on the fund's own operating system.
-# 98h: the sweep runs Monday and Friday at 08:00 (2 Oct 2026, owner; the 09:00
+# 98h: the sweep runs Wednesday and Saturday at 08:00 (13 Nov 2026, owner; the 09:00
 # retry is the SAME run day's window, not a second one), so the window must
-# cover the longest gap between primary runs — Mon 08:00 -> Fri 08:00 is 96h —
+# cover the longest gap between primary runs — Sat 08:00 -> Wed 08:00 is 96h —
 # plus slack for a run that fired late at wake. The old 26h window (sized for
 # the daily cadence) would leave Tuesday through Thursday unexamined.
 SILENCE_HOURS="${CI_SWEEP_SILENCE_HOURS:-98}"

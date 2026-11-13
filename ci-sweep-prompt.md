@@ -1,4 +1,4 @@
-Scheduled CI sweep — runs Monday and Friday at 08:00 CT (Mon+Fri since 2 Oct 2026), budget 3h30
+Scheduled CI sweep — runs Wednesday and Saturday at 08:00 CT (Wed+Sat since 13 Nov 2026; Mon+Fri before), budget 3h30
 (done by about 11:30), with one automatic retry at 09:00 if that run did not end green. Goal:
 every repo's `main` green. Find every red GitHub Actions run across Sequoia's repos and FIX
 them at the root. She should not be getting daily failure notifications.
@@ -44,7 +44,7 @@ live site sat degraded. **Nothing was red, because nothing ran.**
 So after the failure sweep, run a SILENCE sweep. For every repo with commits since
 the last sweep, check it produced at least one CI run:
 
-    WINDOW=$(date -u -v-98H +%Y-%m-%dT%H:%M:%SZ)   # the longest gap between runs (Mon->Fri, 96h), plus slack
+    WINDOW=$(date -u -v-98H +%Y-%m-%dT%H:%M:%SZ)   # the longest gap between runs (Sat->Wed, 96h), plus slack
 
     # commits in the window vs runs in the window
     gh api "repos/seq23/<name>/commits?since=$WINDOW" -q 'length'
@@ -167,7 +167,7 @@ a red lane went away, or a red lane's failure signature changed (a new root caus
 surfaced). Two rounds in a row that change nothing end the run as STUCK; the 3h30 budget
 ends it as UNFINISHED, with the exact unfinished list carried to the next run. **This run never retries itself**: if it does not end MAIN-GREEN, a
 separate 09:00 check (`ci-sweep-retry-if-red.sh`) runs the whole sweep again exactly once;
-a second non-green ending waits for the next Mon/Fri 08:00 run, briefed with what both tries did.
+a second non-green ending waits for the next Wed/Sat 08:00 run, briefed with what both tries did.
 
 This exists because of 2026-09-08. `Velocity Content Release` in
 `local-guides-citation-velocity` failed at 02:00 and 08:38. The 10:07 sweep dispatched

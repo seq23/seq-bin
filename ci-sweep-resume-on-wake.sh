@@ -2,8 +2,8 @@
 # CI sweep resume-on-wake — fired every 300 s by launchd (launchd/com.seq.ci-sweep-resume.plist).
 #
 # THE DESIGN (owner, 12 Oct 2026: "can we change everything so that it just picks up
-# where it left off if I close the lid and then re-open?"). The sweep runs Monday and
-# Friday at 08:00 CT (com.seq.ci-sweep) with one 09:00 retry if not green
+# where it left off if I close the lid and then re-open?"). The sweep runs Wednesday and
+# Saturday at 08:00 CT (com.seq.ci-sweep) with one 09:00 retry if not green
 # (com.seq.ci-sweep-retry -> ci-sweep-retry-if-red.sh). When the lid closes mid-run, the
 # supervisor's sentry sees the heartbeat gap at wake and ends the run as
 # MAIN-RED-INTERRUPTED (12 Oct 2026, 08:04 run: "no heartbeat for 627s, from 08:20:36 to
@@ -28,7 +28,7 @@
 #                                                 INTERRUPTED only for a sentry sleep gap)
 #   fewer than RESUME_MIN_LEFT_MIN minutes before the run's stop-by
 #                                              -> no-op: left INTERRUPTED; the 09:00 retry
-#                                                 (or the next Mon/Fri 08:00 run) applies
+#                                                 (or the next Wed/Sat 08:00 run) applies
 #   the 240-awake-minute ceiling nearly spent  -> no-op, same
 #   otherwise                                  -> exec ci-sweep.sh as a RESUME of that run:
 #                                                 same ledger row, same stop-by, its merges
@@ -115,7 +115,7 @@ fi
 now="$(date +%s)"
 left_min=$(( (stop_by - now) / 60 ))
 if [ "$left_min" -lt "$RESUME_MIN_LEFT_MIN" ]; then
-  say "no-op: $ledger_id is INTERRUPTED but its budget ends at $(hm "$stop_by") (${left_min} min left, under ${RESUME_MIN_LEFT_MIN}) — left INTERRUPTED; the 09:00 retry or the next Mon/Fri 08:00 run applies."
+  say "no-op: $ledger_id is INTERRUPTED but its budget ends at $(hm "$stop_by") (${left_min} min left, under ${RESUME_MIN_LEFT_MIN}) — left INTERRUPTED; the 09:00 retry or the next Wed/Sat 08:00 run applies."
   exit 0
 fi
 

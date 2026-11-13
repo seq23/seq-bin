@@ -106,6 +106,10 @@ jobs:
       # clean-up into Boss OS Open Loops rows, against a stub intake; a failed post must be a named stop.
       - name: housekeeping.sh opens and closes the right Open Loops rows
         run: ./tests/test-housekeeping.sh
+      # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the
+      # Marketplace listings job, against a stand-in for wrangler. A store it cannot read is a named stop.
+      - name: pnp-real-work.mjs lists real job photos newest first and never passes quietly on an unread store
+        run: ./tests/test-pnp-real-work.sh
       - name: disk-sweep.sh removes only leaked clones, old fixtures and merged worktrees, and alerts once when low
         run: ./tests/test-disk-sweep.sh
       # 9 Nov 2026: the compaction hook overwrote a hand-written Today status in ~/HANDOFF.md.

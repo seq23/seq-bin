@@ -369,7 +369,14 @@ FRICTION (fix at the root):
     deploy) rather than a partner decision;
   - a repo or site the OS refused or could not map, when the partner named it plainly;
   - a reply that opened a stray new card instead of steering the open one;
-  - anything AGENTS.md Rule 0 calls "runs but inert" on the path this work took.
+  - anything AGENTS.md Rule 0 calls "runs but inert" on the path this work took;
+  - A DROPPED ASK (ruling 13 Nov 2026; 14 Nov: Walker's November note left out Scooter's past-client check).
+    For EVERY partner email and reply in scope (inbound_message, work_steer.body, the raw .eml in R2 under
+    inbound-email/<day>/ — his own words, never the interpretation), list each separate thing he asked for.
+    Then read what was actually delivered (the outbound email after his message: the card description after
+    the last deliverable.emailed_to_partner, or the provider's copy) and mark each ask DONE in it, or NAMED in
+    it as not done with a reason. An ask that is neither is a silent drop: reopen the card so the same
+    employee builds it and emails it, and fix why it was dropped. Report "ASKS: <accounted>/<asked>".
 KNOWN-BAD INPUT: STOP THE BUILD FIRST, PREVIEW SECOND (her rule, 9 Oct 2026). If you find that a
 run in flight is working from input you KNOW is wrong or incomplete (a partner's answer cut
 short, a brief missing items he wrote, the wrong repo, a stale file), do not let it finish and

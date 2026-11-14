@@ -102,7 +102,8 @@ failed, stamp = os.environ.get("FAILED") == "1", os.environ.get("STAMP_LOCAL", "
 S, E, NOTE, CARRY = "<!-- TODAY:START -->", "<!-- TODAY:END -->", "### Session note — ", "### Carried over from "
 KEEP = 6  # session notes kept per day (one per session); older ones are named, never silently lost
 # Two sessions compacting at once must not lose each other's note: one writer at a time.
-lock = open(path + ".lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+# The lock lives in the temp folder, not beside HANDOFF.md: the home folder keeps ONE handoff file (her call 14 Nov 2026).
+lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
 doc = open(path).read() if os.path.exists(path) else ""
 if S not in doc or E not in doc:
     doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + E + "\n"

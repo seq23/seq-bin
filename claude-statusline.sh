@@ -11,6 +11,19 @@ cw = d.get("context_window") or {}
 size = cw.get("context_window_size") or 0
 pct = cw.get("used_percentage")
 used = int(size * pct / 100) if size and pct is not None else None
+if used is None and d.get("transcript_path"):
+    # Fallback (14 Nov 2026): a background-job session passes no context_window, so read the
+    # newest assistant turn's usage from the transcript: input + cache read + cache write = context.
+    try:
+        with open(d["transcript_path"], "rb") as f:
+            f.seek(0, 2); f.seek(max(0, f.tell() - 400_000))
+            for line in reversed(f.read().decode("utf-8", "ignore").splitlines()):
+                if '"usage"' not in line: continue
+                u = (json.loads(line).get("message") or {}).get("usage") or {}
+                t = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0)
+                if t:
+                    size = size or 1_000_000; used = t; pct = used * 100 / size; break
+    except Exception: pass
 parts = [c(model, "1")]
 if used is not None:
     k = f"{used//1000}K/{size//1000}K ({pct:.0f}%)"

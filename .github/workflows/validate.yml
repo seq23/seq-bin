@@ -165,6 +165,8 @@ jobs:
         run: ./tests/test-scooter-watch-fail.sh
       - name: A tail watchdog only stops its own agent
         run: ./tests/test-scooter-watch-watchdog.sh
+      - name: Partner tail runs with background tasks off
+        run: ./tests/test-scooter-watch-foreground.sh
 
   # The encrypted snapshot needs hdiutil, so its fixture run is on a macOS runner (no secrets, no network).
   mac-snapshot:

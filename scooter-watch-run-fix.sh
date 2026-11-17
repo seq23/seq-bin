@@ -21,7 +21,11 @@ REPO="$HOME/GitHub/west-peek-os"
 REPORT_LOG="$STATE_DIR/report.log"
 
 # 6 Nov 2026, her words: "A partner tail is a Claude Job" — the tail runs on Claude, never Codex.
-AI_RUN_WORKER=claude AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
+# NO BACKGROUND WAITS IN A HEADLESS TAIL (17 Nov 2026, tail-20261117T193151Z, issue west-peek-os#494): the
+# agent backgrounded its build wait, ended its turn on "the background wait will wake me", and idled
+# to the 2h cap with its fix landed but no report, issue or fix-log entry. With background tasks off,
+# every wait is one foreground call that returns to the agent.
+CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 AI_RUN_WORKER=claude AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
   "$AI_RUN" --role worker --cwd "$REPO" --network --out "$TAIL_LOG" -- "$(cat "$PROMPT_FILE")" \
   < /dev/null > /dev/null 2>&1 &
 echo $! > "$FIXLOCK/claude_pid"

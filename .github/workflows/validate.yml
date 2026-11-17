@@ -159,6 +159,8 @@ jobs:
         run: ./tests/test-scooter-watch-named.sh
       - name: a card a developer has taken over never launches a tail
         run: ./tests/test-scooter-watch-takeover.sh
+      - name: a card that recovered and waits on the partner raises no friction tail
+        run: ./tests/test-scooter-watch-recovered.sh
       - name: a tail that cannot check for mail tells her, and its D1 calls carry the vault token
         run: ./tests/test-scooter-watch-fail.sh
       - name: A tail watchdog only stops its own agent

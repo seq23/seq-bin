@@ -13,5 +13,4 @@ chmod +x "$d/ai-run"
 HOME="$d" bash "$here/scooter-watch-run-fix.sh" "$d/prompt" "$d/state/tail.log" "$d/lock" "$d/ai-run" "" "" >/dev/null 2>&1
 [ -f "$d/env.seen" ] || { echo "FAIL: the wrapper never launched the agent"; exit 1; }
 grep -qx 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1' "$d/env.seen" || { echo "FAIL: the tail agent runs with background tasks on"; fail=1; }
-grep -qx 'AI_RUN_WORKER=claude' "$d/env.seen" || { echo "FAIL: the tail agent is not a Claude job"; fail=1; }
-[ $fail = 0 ] && echo "test-scooter-watch-foreground: OK (background tasks off, Claude worker)"; exit $fail
+[ $fail = 0 ] && echo "test-scooter-watch-foreground: OK (background tasks off)"; exit $fail

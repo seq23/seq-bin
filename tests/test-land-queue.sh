@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2329  # workflow vars and last_duration are used by the queue block eval'd below
 # The merge queue (land's `queue` block): a post-merge run in flight on main is waited for before
 # merging, and a land within 30 minutes of another prints the batch warning. Drives the block
 # verbatim against a stub `gh`; no network.

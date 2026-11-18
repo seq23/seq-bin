@@ -292,6 +292,10 @@ case "$NAME" in
   # main on push: the active deployment on 25 Sep (version 86754b7d) is the one the "Workers Builds:
   # dream-wedding-builder" check-run on main dd5050f produced. `npm run deploy` exists but is NOT
   # the route — running it too would race Workers Builds.
+  # Peace Be Still (seq23/peace-be-still): the coming-soon site in site/ deploys itself through its own
+  # Site workflow (site.yml) on a push to main that touches site/**; content/ (the app library) is data
+  # the app build reads, so a content-only merge deploys nothing. Added 18 Nov 2026 when #6 could not land.
+  peace-be-still)       DEPLOY="" ; SELF="deploys itself through its own Site workflow (site.yml) on push to main when site/ changes; content/ is app data with nothing to deploy" ;;
   dream-wedding-builder) DEPLOY="" ; SELF="deploys itself through Workers Builds on push to main" ;;
   # The three publications moved to their own Cloudflare account (7-8 Nov 2026). The old account's
   # Git-connected projects are paused (kept for rollback, so they post no check-runs); production is

@@ -128,6 +128,14 @@ REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
 case "$REMOTE_URL" in
   *github.com[:/]*) REMOTE_NAME="$(printf '%s' "$REMOTE_URL" | sed -E 's#\.git$##; s#.*/##')"; [ -n "$REMOTE_NAME" ] && NAME="$REMOTE_NAME" ;;
 esac
+# Parked repos are never landed (her ruling 18 Nov 2026: "courtscope is parked we should skip
+# any activity on this repo going forward"). The list is Boss OS maps/repos.json category "parked".
+if python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); rows=d if isinstance(d,list) else d.get("rows",d.get("repos",[]))
+sys.exit(0 if any(r.get("repo")==sys.argv[2] and r.get("category")=="parked" for r in rows) else 1)' \
+  "${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/src/shared/boss/maps/repos.json" "$NAME" 2>/dev/null; then
+  echo "STOPPED: $NAME is parked (Boss OS repos.json). No work lands on a parked repo until she un-parks it."; exit 1
+fi
 # --- name end
 
 # The 7403 trap. `npm run deploy:production` in west-peek-os does NOT default the

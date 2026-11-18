@@ -185,6 +185,14 @@ if [ -z "$REPO_META" ]; then
   exit 3
 fi
 
+# Parked repos (her ruling, Boss OS maps/repos.json category "parked") are never
+# probed, fixed or merged: "courtscope is parked we should skip any activity on
+# this repo going forward" (18 Nov 2026).
+PARKED_REPOS="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); rows=d if isinstance(d,list) else d.get("rows",d.get("repos",[]))
+print(" ".join(r["repo"] for r in rows if r.get("category")=="parked"))' "${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/src/shared/boss/maps/repos.json" 2>/dev/null || true)"
+if [ -z "$PARKED_REPOS" ]; then log "NAMED NOTE [PARKED_LIST_UNREAD] could not read the parked list; nothing is skipped as parked this run."; fi
+
 lanes=0; red=0; pending=0; noci=0
 
 for dir in "$GITHUB_DIR"/*/; do
@@ -198,6 +206,7 @@ for dir in "$GITHUB_DIR"/*/; do
     *) continue ;;
   esac
   repo="$(basename "${origin%.git}")"
+  case " $PARKED_REPOS " in *" $repo "*) continue ;; esac
 
   if [ -n "$ONLY_REPOS" ]; then
     case " $ONLY_REPOS " in *" $repo "*) ;; *) continue ;; esac

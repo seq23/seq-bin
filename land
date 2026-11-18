@@ -17,6 +17,10 @@
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
+# MERGE QUEUE (15 Nov 2026): before merging, a post-merge e2e or deploy run still going on main is
+# waited for (bounded), never merged over and cancelled; another PR landed on the repo in the last 30
+# minutes prints "batch fixes into one round".
+#
 # A SMALL change ships to production on the fast check alone; a LARGE one (or --run-e2e) runs the
 # full e2e suite on main first and ships only on green. "Large" is defined once, in the `large`
 # block of this file. A suite already known red on main blocks a small change (E2E_KNOWN_RED).
@@ -777,6 +781,46 @@ if [ "$MODE" = promote ]; then
   exit 0
 fi
 
+# --- queue begin (tests/test-land-queue.sh evals this block verbatim) ---
+# A MERGE QUEUE OF ONE (owner, 15 Nov 2026: "stop changes taking hours"). e2e.yml cancels a superseded
+# run (concurrency cancel-in-progress), so a merge landed while main's post-merge e2e or deploy is still
+# running threw that run away and the next land started it again from zero. So before merging: when
+# main has a run of this repo's post-merge workflows (E2E_WF, PROMOTE_WF when it exists, DEPLOY_WF) in
+# progress, wait for it to finish (one bounded wait, 1.5x its longest recent run, never cancelled by
+# this script), then merge. And one line when another PR landed on this repo in the last 30 minutes.
+queue_workflows() { printf '%s\n' "$E2E_WF" "$DEPLOY_WF" "$( [ -n "$E2E_WF" ] && printf '%s' "$PROMOTE_WF")" | grep -v '^$' | sort -u; }
+queue_inflight() { # -> "<run id>\t<workflow>\t<sha>" of the first post-merge run on main still running, or nothing
+  local wf st row
+  for wf in $(queue_workflows); do
+    for st in in_progress queued; do
+      row="$(gh run list --workflow "$wf" --branch main --status "$st" --limit 1 --json databaseId,headSha \
+              -q ".[0] | select(. != null) | \"\(.databaseId)\t$wf\t\(.headSha)\"" 2>/dev/null)"
+      [ -n "$row" ] && { printf '%s\n' "$row"; return 0; }
+    done
+  done
+  return 0
+}
+queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 one ran past its ceiling (named on stdout)
+  local row rid wf sha ceil deadline
+  while row="$(queue_inflight)"; [ -n "$row" ]; do
+    IFS=$'\t' read -r rid wf sha <<<"$row"
+    ceil=$(( $(last_duration "$wf") * 3 / 2 )); [ "$ceil" -ge 600 ] || ceil=600
+    echo "     queue: $wf run $rid on main ${sha:0:7} is still running — waiting for it before merging (ceiling $((ceil / 60)) min)"
+    deadline=$(( $(date +%s) + ceil ))
+    while [ -z "$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)" ]; do
+      [ "$(date +%s)" -lt "$deadline" ] || { echo "NAMED STOP [QUEUE_RUN_PAST_CEILING] $wf run $rid on main ran past $((ceil / 60)) min; nothing was merged. Read it: gh run view $rid"; return 1; }
+      sleep 20
+    done
+    echo "     queue: $wf run $rid finished: $(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+  done
+  return 0
+}
+recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the last 30 minutes
+  local since; since="$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+  gh pr list --state merged --base main --limit 20 --json number,mergedAt \
+    -q "[.[] | select(.mergedAt >= \"$since\" and .number != $1) | \"#\(.number)\"] | join(\" \")" 2>/dev/null
+}
+# --- queue end ---
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
 
@@ -855,6 +899,9 @@ if [ -n "$D1_PREMERGE" ]; then
   d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (output above), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."
 fi
 
+RECENT="$(recent_lands "$PR")"
+[ -z "$RECENT" ] || echo "     WARNING: $NAME already had $RECENT landed in the last 30 minutes — batch fixes into one round"
+queue_wait || die "PR #$PR was NOT merged: main's post-merge run is past its ceiling (above)."
 say "2/5  merging"
 # Pinned to the head verified above: a push after the check cannot ride in unverified.
 if ! MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)"; then

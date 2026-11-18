@@ -72,6 +72,8 @@ answer() { # mode-file default
 }
 merged() { [ -f "$FAKE_DIR/merged" ]; }
 case "$a" in
+  # the merge queue (test-land-queue.sh covers it): nothing in flight, no recent land, in every case here.
+  "run list --workflow "*"--status in_progress"*|"run list --workflow "*"--status queued"*|"pr list --state merged"*) exit 0 ;;
   "pr view "*"state,mergeCommit"*) merged && echo "MERGED/$MERGESHA" || echo "OPEN/"; exit 0 ;;
   "pr checks "*) answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
   "pr view "*headRefOid*) answer head "$HEADSHA" ;;

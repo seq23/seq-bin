@@ -1,0 +1,15 @@
+{
+  "_what": "The shared banned-word list for ship-ready-baseline (row 18): words that read as machine-written on any page, screen or email. From Peace Be Still's phase-1 UI list (app/src/quality/banned.json), minus its brand-only words (urban, space, journey, speak life, your faith companion); exact words, so 'elevated' or 'seamlessly' are not hits; a repo adds its own in ship-ready.json \"words\". Regex fragments, matched case-insensitively on whole words of the visible text.",
+  "words": [
+    "unlock",
+    "elevate",
+    "dive in",
+    "delve",
+    "seamless",
+    "empower",
+    "tailored",
+    "embark",
+    "ai-powered",
+    "sparkles?"
+  ]
+}

@@ -90,6 +90,14 @@ jobs:
       # and one that patches a function fixed in the last 30 days without "Patch or rebuild:".
       - name: land's gates refuse what they should (ship-ready, launch-ready, baseline, patch history)
         run: ./tests/test-land-gates.sh
+      # Row 18 (20 Nov 2026): the shared ship-ready-baseline tool catches every automatic fail on a
+      # fixture site, passes a clean one, and fails on zero pages rendered.
+      - name: ship-ready-baseline catches each automatic fail and passes a clean page
+        run: |
+          set -euo pipefail
+          npm ci --prefix ship-ready-baseline --no-audit --no-fund
+          npx --prefix ship-ready-baseline playwright install --with-deps chromium
+          ./tests/test-ship-ready-baseline.sh
       # Build first, test in batches (26 Sep 2026): staging on every land, `land --promote` ships
       # the newest green. 2 Oct 2026: a small change ships on the fast check; a large one only
       # through the suite; a known-red or unread suite blocks a small change. Evals land's plan

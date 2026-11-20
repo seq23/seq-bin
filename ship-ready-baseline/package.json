@@ -1,0 +1,7 @@
+{
+  "name": "ship-ready-baseline",
+  "private": true,
+  "type": "module",
+  "description": "Renders a repo's real output and fails on the automatic fails (row 18). Run by .github/workflows/ship-ready-baseline.yml.",
+  "dependencies": { "axe-core": "4.13.0", "playwright": "1.62.1" }
+}

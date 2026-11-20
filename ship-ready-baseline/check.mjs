@@ -5,7 +5,8 @@
 //   { "kind": "site|app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
 //     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"] (omitted: "/" + 7 from sitemap.xml),
 //     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"],
-//     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>" }
+//     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>",
+//     "allow": { "<placeholder phrase true for this repo>": "<why>" } }
 // or a list of those (a site and an app in one repo).
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
 // one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
@@ -52,7 +53,11 @@ mkdirSync(join(OUT, "shots"), { recursive: true });
 const shared = JSON.parse(readFileSync(new URL("./words.json", import.meta.url), "utf8"));
 const wordRe = new RegExp(`(?<![\\p{L}\\p{N}])(?:${[...shared.words, ...(cfg.words || [])].join("|")})(?![\\p{L}\\p{N}])`, "iu");
 const glyphRe = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|[✦✧]/u; // emoji and sparkles; ©, ® and ™ are text
-const placeholderRe = /lorem ipsum|\bTODO\b|\bTBD\b|coming soon|\{\{|\}\}|\bundefined\b|\bNaN\b|\[object Object\]/i;
+// Code words are matched in their own case ("todo" is Spanish for "all"); phrases in any case.
+const placeholderRe = /[Ll]orem ipsum|\bTODO\b|\bTBD\b|[Cc]oming [Ss]oon|COMING SOON|\{\{|\}\}|\bundefined\b|\bNaN\b|\[object Object\]/;
+// A repo may allow a phrase that is true for it, with the reason: { "allow": { "coming soon": "the app is not in the stores yet" } }.
+const allowed = Object.keys(cfg.allow || {}).map((k) => k.toLowerCase());
+for (const [k, why] of Object.entries(cfg.allow || {})) if (!String(why).trim()) stop(`allow "${k}" needs its reason`);
 
 const run = (cmd) => { console.log(`$ ${cmd}`); execSync(cmd, { stdio: "inherit", shell: "/bin/bash" }); };
 if (cfg.build) run(cfg.build);
@@ -69,6 +74,8 @@ async function serveDir(dir) {
   const isFile = (p) => existsSync(p) && statSync(p).isFile();
   const server = createServer((req, res) => {
     const url = decodeURIComponent(new URL(req.url, "http://x").pathname);
+    // Server code (Pages Functions, a Worker's /api) does not run in a static serve: answer empty, not 404.
+    if (/^\/(api|cdn-cgi)\//.test(url)) { res.writeHead(204).end(); return; }
     const base = join(root, url);
     if (!base.startsWith(root)) { res.writeHead(403).end(); return; }
     const hit = [base, `${base}.html`, join(base, "index.html")].find(isFile);
@@ -101,6 +108,8 @@ async function judge(browser, origin, target, viewport, opts) {
   const t0 = Date.now(); const T = (s) => process.env.SRB_DEBUG && console.log(`    ${s} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   results.push(row);
   const context = await browser.newContext({ viewport });
+  // Third-party analytics cannot answer a localhost origin (CORS); they are not the page's own errors.
+  await context.route(/(cloudflareinsights\.com|clarity\.ms|googletagmanager\.com|google-analytics\.com|plausible\.io|connect\.facebook\.net)/, (r) => r.fulfill({ status: 204, body: "" }));
   const page = await context.newPage();
   page.setDefaultTimeout(20000);
   const consoleErrors = []; const badResponses = [];
@@ -143,7 +152,8 @@ async function judge(browser, origin, target, viewport, opts) {
   for (const r of new Set(badResponses)) fail(row, `${target.label} asks for an asset that fails: ${r}`);
   for (const src of facts.brokenImgs) fail(row, `${target.label} has a broken image: ${src}`);
   for (const e of [...new Set(consoleErrors)].slice(0, 5)) fail(row, `${target.label} logs a console error: ${e.slice(0, 160)}`);
-  const ph = facts.text.match(placeholderRe); if (ph) fail(row, `${target.label} shows placeholder text: "${ph[0]}"`);
+  const ph = [...facts.text.matchAll(new RegExp(placeholderRe, "g"))].map((m) => m[0]).find((m) => !allowed.includes(m.toLowerCase()));
+  if (ph) fail(row, `${target.label} shows placeholder text: "${ph}"`);
   const w = facts.text.match(wordRe); if (w) fail(row, `${target.label} uses a banned word: "${w[0]}"`);
   const g = facts.text.match(glyphRe); if (g) fail(row, `${target.label} shows an emoji or sparkle: ${g[0]}`);
   if (facts.small.length) fail(row, `${target.label} has text under 12 px: ${facts.small.slice(0, 3).join(", ")}`);
@@ -213,7 +223,7 @@ if (kind === "site" && targets.length) {
 await browser.close(); srv.close();
 
 const rendered = results.filter((r) => r.shot).length;
-const lines = results.flatMap((r) => r.fails);
+const lines = [...new Set(results.flatMap((r) => r.fails))];
 if (rendered === 0) lines.unshift("ZERO pages rendered: list pages (or emails) in ship-ready.json that this check can open");
 writeFileSync(join(OUT, "baseline.json"), JSON.stringify({ kind, rendered, pass: lines.length === 0, pages: results.map(({ links, ...r }) => r) }, null, 2));
 const summary = [`## ship-ready-baseline: ${lines.length ? "FAIL" : "PASS"} (${rendered} page renders)`, ...lines.map((l) => `- ${l}`)].join("\n");

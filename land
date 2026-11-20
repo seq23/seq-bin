@@ -90,7 +90,7 @@ set -uo pipefail
 if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
   _copy="$(mktemp -t land.XXXXXX)" || exit 1
   cat "$0" > "$_copy" && chmod +x "$_copy"
-  LAND_RUNNING_FROM_COPY=1 exec bash "$_copy" "$@"
+  LAND_DIR="$(cd "$(dirname "$0")" && pwd)" LAND_RUNNING_FROM_COPY=1 exec bash "$_copy" "$@"
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -837,6 +837,150 @@ recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the 
     -q "[.[] | select(.mergedAt >= \"$since\" and .number != $1) | \"#\(.number)\"] | join(\" \")" 2>/dev/null
 }
 # --- queue end ---
+
+# --- gates begin (tests/test-land-gates.sh evals this block verbatim) ---
+# TWO QUESTIONS EVERY PR ANSWERS BEFORE IT MERGES (owner, 19-20 Nov 2026: "would a 20 yr veteran do
+# this?" and "nothing looks and feels and sounds like AI created it"). Skills no code reads are wishes,
+# so both live here, read from the PR body, each refusal one plain line saying what to add.
+#  1. PATCH OR REBUILD. A PR that changes lines inside a function a `fix` commit changed in the last
+#     LAND_PATCH_DAYS (30) days stops unless its body has `Patch or rebuild: <why> ... #N` naming each
+#     such fix. Functions use git's default funcname rule (a line starting with a letter, _ or $ opens
+#     one; it runs to the next); history is `git log -L` on the merge base. 19 Nov 2026, west-peek-os:
+#     webPropertyChange.ts took #527, #531, #532, #537, #540, #546 and #551 in one day.
+#  2. SHIP-READY. A PR that changes what a person sees (land-surfaces.json: pages, app screens, emails,
+#     video/social output, per repo type) stops unless its body has
+#     `Ship-ready: PASS — <reviewer> looked at <real output>` from a reviewer who is not the builder
+#     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
+#     public (a launch marker added, or the repo's first surface) also needs `Launch-ready: PASS — ...`.
+#     A CI check named `ship-ready-baseline` (row 18), when the PR has one, must be green.
+LAND_SURFACES="${LAND_SURFACES:-${LAND_DIR:-$HOME/bin}/land-surfaces.json}"
+LAND_PATCH_DAYS="${LAND_PATCH_DAYS:-30}"
+gate_lines() { # $1 jq path into land-surfaces.json -> its patterns joined into one ERE (rc 1: file unreadable)
+  jq -er "[$1] | flatten | map(select(type == \"string\")) | join(\"|\")" "$LAND_SURFACES" 2>/dev/null
+}
+surface_re() { # stdin: every path on main -> one ERE of what people see in this repo
+  local tree types t detect surf re
+  tree="$(cat)"; re="$(gate_lines '.everywhere')" || return 1
+  types="$(jq -r '.types[] | "\(.detect)\t\(.surfaces | join("|"))"' "$LAND_SURFACES")" || return 1
+  while IFS=$'\t' read -r detect surf; do
+    [ -n "$detect" ] && grep -qE "$detect" <<<"$tree" && re="$re|$surf"
+  done <<<"$types"
+  printf '%s\n' "$re"
+}
+surface_files() { # $1 ERE from surface_re; stdin: changed paths -> the ones a person sees
+  local ex; ex="$(gate_lines '.exclude')" || return 1
+  grep -E "$1" | grep -vE "$ex" || true
+}
+signoff() { # $1 Ship-ready|Launch-ready; stdin: PR body -> the reviewer on its last PASS line (rc 1 none)
+  local line
+  line="$(grep -E "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line" | sed -E "s/^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *//; s/ looked at .*//; s/^[[:space:]]+//; s/[[:space:]]+$//"
+}
+builders() { # stdin: the PR view JSON (author, commits) -> one lowercase identity per line
+  jq -r '(.author.login // empty),
+         (.commits[]? | (.authors[]? | (.login // empty), (.name // empty), (.email // empty)), (.messageBody // "" | split("\n")[] | select(test("^co-authored-by:|session_"; "i"))))' 2>/dev/null \
+  | awk '
+      /^[Cc]o-[Aa]uthored-[Bb]y:/ { sub(/^[^:]*: */, ""); n = $0; sub(/ *<.*/, "", n); print n; if (match($0, /<[^>]*>/)) print substr($0, RSTART + 1, RLENGTH - 2); next }
+      /session_[A-Za-z0-9]+/ { while (match($0, /session_[A-Za-z0-9]+/)) { print substr($0, RSTART, RLENGTH); $0 = substr($0, RSTART + RLENGTH) } next }
+      /:/ || NF == 0 { next }
+      { print }' \
+  | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | grep . | sort -u
+}
+is_builder() { # $1 reviewer, $2 builder identities -> 0 when the reviewer is (or cannot be told from) the builder
+  local r id; r="$(tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  case "$r" in ""|me|i|self|myself|builder|"the builder"|"same agent"|"<reviewer>"*|"<"*) return 0 ;; esac
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$r" = "$id" ] && return 0
+    case "$id" in session_*|*@*) case "$r" in *"$id"*) return 0 ;; esac ;; esac
+  done <<<"$2"
+  return 1
+}
+baseline_red() { # $1 the PR's checks JSON -> prints "<name>: <bucket>" and rc 0 when ship-ready-baseline is present and not green
+  jq -er '[.[] | select(.name | test("(^|[ /])ship-ready-baseline$")) | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"] | select(length > 0) | join("; ")' <<<"$1" 2>/dev/null
+}
+gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 1 with one plain line on stdout
+  local tree re files added launch body reviewer ids
+  tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
+  re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
+  files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
+  [ -n "$files" ] || return 0
+  body="$(jq -r '.body // ""' <<<"$2")"; ids="$(builders <<<"$2")"
+  reviewer="$(signoff Ship-ready <<<"$body")" \
+    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add to the PR body the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>"; return 1; }
+  is_builder "$reviewer" "$ids" \
+    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
+  added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
+  launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
+  [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
+  [ -n "$launch" ] || return 0
+  reviewer="$(signoff Launch-ready <<<"$body")" \
+    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add to the PR body the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
+  is_builder "$reviewer" "$ids" \
+    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
+  return 0
+}
+patch_code() { # stdin: paths -> those that hold code (functions), not data, docs, media or lockfiles
+  grep -vE '(^|/)(tests?|__tests__|e2e|fixtures)/|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$|\.(json|jsonc|md|mdx|txt|csv|tsv|lock|svg|snap|ya?ml|html?|css|scss|xml|png|jpe?g|gif|webp|avif|ico|mp4|mov|mp3|wav|pdf)$' || true
+}
+func_ranges() { # $1 base sha  $2 path; stdin: hunks "<old start> <old count>" -> "s,e" of each enclosing function
+  local src
+  src="$(git show "$1:$2" 2>/dev/null)" || return 0
+  awk -v n="$(printf '%s\n' "$src" | wc -l | tr -d ' ')" '
+    NR == FNR { line[FNR] = $0; if ($0 ~ /^[[:alpha:]_$]/) starts[++k] = FNR; next }
+    { a = $1 + 0; c = $2 + 0
+      if (c == 0) { if (a < 1 || line[a] ~ /^}/) next; lo = a; hi = a } else { lo = a; hi = a + c - 1 }
+      for (L = lo; L <= hi; L++) {
+        s = 1; e = n
+        for (i = 1; i <= k; i++) { if (starts[i] <= L) s = starts[i]; else { e = starts[i] - 1; break } }
+        seen[s "," e] = 1
+      } }
+    END { for (r in seen) print r }' <(printf '%s\n' "$src") -
+}
+patch_fixes() { # $1 base  $2 head -> "<ref>\t<path>\t<subject>" for each fix commit of the last LAND_PATCH_DAYS days in a function the PR changes
+  local f ranges args r ref
+  git diff --name-only --no-renames --diff-filter=MD "$1" "$2" | patch_code | while IFS= read -r f; do
+    ranges="$(git diff -U0 --no-renames --no-ext-diff "$1" "$2" -- "$f" \
+      | sed -nE 's/^@@ -([0-9]+)(,([0-9]+))? .*/\1 \3/p' | awk '{ print $1, ($2 == "" ? 1 : $2) }' | func_ranges "$1" "$f")"
+    [ -n "$ranges" ] || continue
+    args=(); for r in $ranges; do args+=(-L "$r:$f"); done
+    git log --no-patch --since="$LAND_PATCH_DAYS days ago" --format='LANDFIX%x09%h%x09%s' "${args[@]}" "$1" 2>/dev/null \
+      | sed -n 's/^LANDFIX\t//p' \
+      | grep -iE $'\t''(.*[^[:alnum:]])?(fix|fixes|fixed|hotfix|bugfix)([^[:alnum:]].*)?$' \
+      | while IFS=$'\t' read -r sha subj; do
+          ref="$(grep -oE '\(#[0-9]+\)$' <<<"$subj" | tr -d '()')"
+          printf '%s\t%s\t%s\n' "${ref:-$sha}" "$f" "$subj"
+        done
+  done | sort -u -t$'\t' -k1,1
+}
+patch_answered() { # $1 PR body  $2 ref (#N or short sha) -> 0 when a "Patch or rebuild:" line names it and says why
+  grep -E '^[[:space:]>*-]*Patch or rebuild:' <<<"$1" | grep -E -- "$2([^0-9a-zA-Z]|$)" \
+    | sed -E 's/^[[:space:]>*-]*Patch or rebuild://' | grep -v '<' | awk 'NF >= 5 { ok = 1 } END { exit !ok }'
+}
+gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body -> rc 1 with one plain line on stdout
+  local fixes missing ref
+  fixes="$(patch_fixes "$2" "$3")"
+  [ -n "$fixes" ] || return 0
+  missing="$(cut -f1 <<<"$fixes" | while IFS= read -r ref; do patch_answered "$4" "$ref" || printf '%s ' "$ref"; done)"
+  [ -n "$missing" ] || return 0
+  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add to the PR body the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
+  return 1
+}
+gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line on stdout) | 75 could not read
+  local base body msg
+  git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; return 75; }
+  msg="$(gate_quality "$1" "$3")" || { echo "$msg"; return 1; }
+  # The patch check needs the PR's commits only when it changes code that is already on main.
+  jq -r '.files[]?.path' <<<"$3" | patch_code | while IFS= read -r p; do git cat-file -e "origin/main:$p" 2>/dev/null && echo "$p"; done | grep -q . || return 0
+  git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
+  git cat-file -e "$2^{commit}" 2>/dev/null || { echo "PR #$1's head ${2:0:7} could not be fetched for the patch-history check"; return 75; }
+  base="$(git merge-base origin/main "$2")" || { echo "PR #$1 has no merge base with main"; return 75; }
+  body="$(jq -r '.body // ""' <<<"$3")"
+  msg="$(gate_patch "$1" "$base" "$2" "$body")" || { echo "$msg"; return 1; }
+  return 0
+}
+# --- gates end ---
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
 
@@ -870,6 +1014,8 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 # at its 30-minute cap, `gh pr checks` printed it as "fail" and still exited 0, and this script
 # merged a PR whose merge state read UNSTABLE. A cancelled, skipped-by-failure or failing check is
 # not green whatever the exit code says; only `pass` (and a genuinely `skipping` job) is.
+# Row 18's shared baseline (renders the real output, fails on the automatic fails): its own sentence.
+BASELINE_RED="$(baseline_red "$CHECKS")" && die "PR #$PR's ship-ready-baseline check is not green ($BASELINE_RED): fix what its job summary lists, push, and land again."
 NOTGREEN="$(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' <<<"$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
 # CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
@@ -877,7 +1023,7 @@ NOTGREEN="$(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | "
 # every section, and only a click would have caught it. hostile-review step 4 said to click it; a
 # skill no code reads is a wish. So a PR that changes a screen people operate (operated_ui_files)
 # lands only with a "Clicked through: <what, 390 px, console clean>" line in its body or a comment.
-PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments)" \
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
 UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
 if [ -n "$UIFILES" ]; then
@@ -910,6 +1056,13 @@ case "${STATE##*/}" in
   *) die "PR #$PR merge state is ${STATE##*/} — not landing" ;;
 esac
 echo "     green, head $HEAD, $STATE"
+# The two gates (block above): patch or rebuild, and ship-ready. Before any side effect (D1, merge).
+GATE_MSG="$(gate_pr "$PR" "$HEAD" "$PRMETA")"; GATE_RC=$?
+case "$GATE_RC" in
+  0) : ;;
+  75) unverified network "$GATE_MSG" ;;
+  *) die "$GATE_MSG" ;;
+esac
 if [ -n "$D1_PREMERGE" ]; then
   pr_size "$PR"
   d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (output above), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."

@@ -18,6 +18,7 @@ const require = createRequire(import.meta.url);
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const CONFIG = arg("--config", "ship-ready.json");
 const OUT = resolve(arg("--out", "ship-ready-out"));
+const PAGE_SECS = Number(process.env.SHIP_READY_PAGE_SECS || 90);
 const stop = (msg) => { console.error(`NAMED STOP [SHIP_READY_CONFIG] ${msg}`); process.exit(2); };
 
 let cfg;
@@ -157,7 +158,11 @@ const browser = await chromium.launch();
 const linkSet = new Set();
 for (const t of targets) for (const vp of viewports) {
   const t0 = Date.now();
-  const row = await judge(browser, srv.url, t, vp, { site: kind === "site" });
+  // A page that has not finished in PAGE_SECS is a fail by name, never a hung job.
+  const row = await Promise.race([
+    judge(browser, srv.url, t, vp, { site: kind === "site" }),
+    new Promise((r) => setTimeout(() => { const x = { page: t.label, viewport: `${vp.width}x${vp.height}`, fails: [`${t.label} did not finish rendering at ${vp.width} px within ${PAGE_SECS} s`] }; results.push(x); r(x); }, PAGE_SECS * 1000)),
+  ]);
   console.log(`  ${t.label} @${vp.width}: ${row.fails.length} fail(s), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   for (const f of row.fails) console.log(`    - ${f}`);
   for (const l of row.links || []) linkSet.add(l);

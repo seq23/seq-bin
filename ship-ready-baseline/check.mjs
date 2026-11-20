@@ -3,7 +3,7 @@
 // Called by .github/workflows/ship-ready-baseline.yml (workflow_call) with the caller repo checked out.
 // The caller's ship-ready.json says what to render:
 //   { "kind": "site|app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
-//     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"],
+//     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"] (omitted: "/" + 7 from sitemap.xml),
 //     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"] }
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
 // one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
@@ -151,7 +151,16 @@ if (kind === "email") {
   for (const f of readdirSync(em.dir).filter((f) => f.endsWith(".html")).sort()) targets.push({ label: f, url: `${srv.url}/${f}` });
 } else {
   srv = typeof cfg.serve === "string" && existsSync(cfg.serve) && statSync(cfg.serve).isDirectory() ? await serveDir(cfg.serve) : await serveCmd(cfg.serve, cfg.base_url);
-  for (const p of cfg.pages || []) targets.push({ label: p, url: `${srv.url}${p}` });
+  // No pages listed: the home page plus a spread of up to 7 from the site's own sitemap.xml.
+  let pages = cfg.pages;
+  if (!pages) {
+    pages = ["/"];
+    const xml = await fetch(`${srv.url}/sitemap.xml`).then((r) => (r.ok ? r.text() : "")).catch(() => "");
+    const locs = [...new Set([...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => { try { return new URL(m[1]).pathname; } catch { return ""; } }).filter((p) => p && p !== "/" && !p.endsWith(".xml")))];
+    const step = Math.max(1, Math.floor(locs.length / 7));
+    for (let i = 0; i < locs.length && pages.length < 8; i += step) pages.push(locs[i]);
+  }
+  for (const p of pages) targets.push({ label: p, url: `${srv.url}${p}` });
 }
 const viewports = kind === "site" ? [{ width: 390, height: 844 }, { width: 1280, height: 800 }] : [{ width: 390, height: 844 }];
 const browser = await chromium.launch();

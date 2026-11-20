@@ -1,0 +1,54 @@
+# ship-ready-baseline (row 18, 20 Nov 2026): ONE shared check that renders a repo's real output and
+# fails on the automatic fails (sideways scroll at 390 px, broken assets and links, console errors,
+# placeholder text, banned words / emoji / sparkles, missing title / description / og:image, a default
+# 404, text under 12 px or under 4.5:1 contrast, zero pages rendered). `land` refuses a PR whose
+# ship-ready-baseline check is red. Each repo calls it with a 10-line caller and a ship-ready.json:
+#
+#   jobs:
+#     ship-ready-baseline:
+#       uses: seq23/seq-bin/.github/workflows/ship-ready-baseline.yml@v1
+#
+# The tool (ship-ready-baseline/check.mjs) is checked out from this repo at `tool_ref` (default v1,
+# the same tag the caller pins). Screenshots + baseline.json are the `ship-ready-baseline` artifact.
+name: ship-ready-baseline
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: "path of the caller's ship-ready.json"
+        type: string
+        default: ship-ready.json
+      tool_ref:
+        description: "seq-bin ref the tool is read from (keep it equal to the tag in `uses:`)"
+        type: string
+        default: v1
+permissions:
+  contents: read
+jobs:
+  ship-ready-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: seq23/seq-bin
+          ref: ${{ inputs.tool_ref }}
+          path: .ship-ready-tool
+          sparse-checkout: ship-ready-baseline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the tool and its browser
+        run: |
+          set -euo pipefail
+          npm ci --prefix .ship-ready-tool/ship-ready-baseline --no-audit --no-fund
+          npx --prefix .ship-ready-tool/ship-ready-baseline playwright install --with-deps chromium
+      - name: Render the real output and judge it
+        run: node .ship-ready-tool/ship-ready-baseline/check.mjs --config "${{ inputs.config }}" --out ship-ready-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ship-ready-baseline
+          path: ship-ready-out
+          if-no-files-found: warn

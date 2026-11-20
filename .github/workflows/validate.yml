@@ -106,6 +106,9 @@ jobs:
       # clean-up into Boss OS Open Loops rows, against a stub intake; a failed post must be a named stop.
       - name: housekeeping.sh opens and closes the right Open Loops rows
         run: ./tests/test-housekeeping.sh
+
+      - name: the dangerous-command guard refuses each irreversible command and lets a harmless one through
+        run: ./tests/test-command-guard.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the
       # Marketplace listings job, against a stand-in for wrangler. A store it cannot read is a named stop.
       - name: pnp-real-work.mjs lists real job photos newest first and never passes quietly on an unread store
@@ -178,5 +181,7 @@ jobs:
         run: command -v rclone >/dev/null || brew install rclone
       - name: mac-snapshot builds, verifies, restores and never logs a secret
         run: ./tests/test-mac-snapshot.sh
+      - name: the monthly restore drill proves each backup reads, and names the one that does not
+        run: ./tests/test-restore-drill.sh
       - name: the nightly drive-backup stays small and leaves nothing private on Drive
         run: zsh ./tests/test-drive-backup-guards.sh

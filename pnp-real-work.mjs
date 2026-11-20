@@ -40,7 +40,10 @@ const NEW_DAYS = 14;
 const MAX_SETS = 12; // newest photo sets kept on this Mac
 const MAX_CLIPS = 3;
 const MAX_UPLOAD = 9 * 1024 * 1024; // file_upload refuses 10 MB and over in one call
-const SETS_SQL = `SELECT p.id AS id, p.created_at AS at, p.ai_edited AS edited, p.note AS note, i.images AS images FROM photo_packs p JOIN pack_items i ON i.pack_id = p.id AND i.kind = 'carousel' WHERE p.status = 'ready' AND p.privacy IN ('clean', 'fixed') ORDER BY p.created_at DESC LIMIT ${MAX_SETS}`;
+// Only sets the owner uploaded from real jobs (made_by 'studio'). The content engine (20 Nov 2026) also
+// writes photo_packs (made_by 'engine', ids pck_eng_*): designed carousels built partly from AI porch and
+// grazing images. They are not real work and must never be offered to the listings job as such.
+const SETS_SQL = `SELECT p.id AS id, p.created_at AS at, p.ai_edited AS edited, p.note AS note, i.images AS images FROM photo_packs p JOIN pack_items i ON i.pack_id = p.id AND i.kind = 'carousel' WHERE p.status = 'ready' AND p.privacy IN ('clean', 'fixed') AND p.made_by = 'studio' ORDER BY p.created_at DESC LIMIT ${MAX_SETS}`;
 const CLIPS_SQL = `SELECT id, created_at AS at, r2_key AS r2_key, hook_text AS note FROM clips WHERE status = 'approved' AND hidden = 0 ORDER BY created_at DESC LIMIT ${MAX_CLIPS}`;
 
 function wrangler(args) {

@@ -29,7 +29,8 @@ echo "\$*" >> "$TMP/calls"
 [ -f "$TMP/down" ] && { echo "Authentication error [code: 10000]" >&2; exit 1; }
 if [ "\$1" = d1 ]; then
   case "\$*" in
-    *photo_packs*) echo '[{"results":[{"id":"pck_old","at":"$old","edited":1,"note":"SECRETNAME shower","images":"[\"packs/pck_old/c1.jpg\"]"},{"id":"pck_new","at":"$recent","edited":0,"note":"hotel room","images":"[\"packs/pck_new/c1.jpg\",\"packs/pck_new/c2.jpg\"]"}]}]' ;;
+    *"made_by = 'studio'"*) echo '[{"results":[{"id":"pck_old","at":"$old","edited":1,"note":"SECRETNAME shower","images":"[\"packs/pck_old/c1.jpg\"]"},{"id":"pck_new","at":"$recent","edited":0,"note":"hotel room","images":"[\"packs/pck_new/c1.jpg\",\"packs/pck_new/c2.jpg\"]"}]}]' ;;
+    *photo_packs*) echo '[{"results":[{"id":"pck_eng_carousel","at":"$recent","edited":0,"note":"engine carousel","images":"[\"packs/pck_eng_carousel/c1.jpg\"]"}]}]' ;;
     *) echo '[{"results":[{"id":"clp_big","at":"$recent","r2_key":"clips/big.mp4","note":"big"},{"id":"clp_ok","at":"$old","r2_key":"clips/ok.mp4","note":"ok"}]}]' ;;
   esac
 else
@@ -45,6 +46,7 @@ rc=$(run)
 check "exits 0" is '[ "$rc" = 0 ]'
 check "last line is the OUTPUT line: 3 new (2 studio + the owner photo), 5 usable" is '[ "$(tail -1 "$TMP/log")" = "real work photos: OUTPUT 3 new, 5 usable" ]'
 check "newest first in the manifest" is '[ "$(node -e "const m=require(\"$TMP/out/manifest.json\").photos;console.log(m.map(p=>p.date).join()===m.map(p=>p.date).sort().reverse().join()&&m.length===5)")" = true ]'
+check "a content-engine carousel (made_by engine) is never offered as real work" is '! grep -q -e pck_eng -e "engine carousel" "$TMP/out/list.txt"'
 check "the 9.5 MB clip is not offered" is '! grep -q clp_big "$TMP/out/list.txt"'
 check "the list gives full paths, the AI mark and the owner notes" is 'grep -q "^- $TMP/out/studio-2026-01-05-pck_old-1.jpg | 2026-01-05 | photo | .* | touched up with AI | " "$TMP/out/list.txt" && grep -q "| not marked as AI-edited | hotel room" "$TMP/out/list.txt" && grep -q "Owner notes line." "$TMP/out/list.txt"'
 check "the log carries no file name and no note" is '! grep -q -e SECRETNAME -e pck_ -e backdrop "$TMP/log"'

@@ -89,7 +89,7 @@ export function rmTargetProblem(target, cwd) {
   if (glob === -1 && REBUILDABLE.has(basename(abs)) && abs.split("/").length > 3) return null;
   const inside = (root) => (abs + "/").startsWith(root) && abs + "/" !== root;
   if (SCRATCH().some(inside)) return null;
-  if (/^\/Users\/[^/]+\/GitHub\/\.wt-[^/]+(\/|$)/.test(abs + "/") || abs.startsWith(`${HOME}/GitHub/.wt-`)) return null;
+  if (abs.startsWith(`${HOME}/GitHub/.wt-`)) return null;
   if (abs.startsWith(`${HOME}/.boss-os/repo-change/wt-`)) return null;
   return `it recursively deletes ${full}, which is outside scratch (/tmp, $TMPDIR) and the agent worktrees (~/GitHub/.wt-*); that cannot be undone`;
 }
@@ -130,7 +130,7 @@ function gitProblem(a, cwd, env) {
     || (sub === "checkout" && rest.includes("--") && rest.slice(rest.indexOf("--") + 1).some((x) => x === "." || x === ":/"))
     || (sub === "restore" && rest.some((x) => x === "." || x === ":/") && !rest.includes("--staged"));
   if (destroys) {
-    const own = /^\/Users\/[^/]+\/(GitHub\/(?!\.wt-)[^/]+|bin)(\/|$)/.test(dir + "/") && !dir.includes("/GitHub/.wt-");
+    const own = (dir + "/").startsWith(`${HOME}/bin/`) || ((dir + "/").startsWith(`${HOME}/GitHub/`) && !(dir + "/").startsWith(`${HOME}/GitHub/.wt-`) && dir !== `${HOME}/GitHub`);
     if (own && env.dirtyOf(dir)) return `it throws away unsaved work in ${dir}, her own checkout; commit or move it first (agents work in their own worktree)`;
   }
   return null;

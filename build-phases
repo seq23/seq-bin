@@ -64,7 +64,7 @@ idle=0; carry=""
 for round in $(seq 1 "$ROUNDS"); do
   before="$(git -C "$WT" rev-parse HEAD)"; dirty_before="$(git -C "$WT" status --porcelain)"
   prompt="You are building PHASE $PHASE of $BRIEFS/PHASES.md in this worktree ($WT, branch $BR). Read $BRIEFS/COMMON.md and $BRIEFS/QUALITY.md first.
-Work until the phase's Done line is fully true, not one pass. Commit with git as you go (clear messages). Run the typecheck and the tests you touched; CI runs the rest.
+Work until the phase's Done line is fully true, not one pass. Commit with git as you go (clear messages). While building, run ONLY the typecheck (fast). Run the full test suite ONCE, right before you write STATUS: complete, and fix what fails; never run it after each small change. CI runs everything on each push.
 YOUR JOB ENDS AT CODE + TESTS. The phone-width look (390 px), screenshots and the independent hostile review are the REVIEWER's job after you finish: never mark the phase incomplete for them, never wait for a browser. Prove screens with rendered-component tests instead (render each screen in tests and assert on its text and states).
 Then write $RESULT, FIRST LINE exactly 'STATUS: complete' (every Done item that code and tests can prove is true) or 'STATUS: incomplete' (something code can do is still missing), then under 25 lines: what was built, tests run, what is still missing and why.
 ${carry}"

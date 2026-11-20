@@ -67,7 +67,7 @@ if (cfg.build) run(cfg.build);
 const TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript",
   ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif", ".ico": "image/x-icon", ".woff2": "font/woff2",
-  ".woff": "font/woff", ".txt": "text/plain", ".xml": "application/xml", ".mp4": "video/mp4", ".webmanifest": "application/manifest+json" };
+  ".woff": "font/woff", ".txt": "text/plain", ".xml": "application/xml", ".mp4": "video/mp4", ".wasm": "application/wasm", ".map": "application/json", ".webmanifest": "application/manifest+json" };
 async function serveDir(dir) {
   const root = resolve(dir);
   if (!existsSync(root)) stop(`serve directory ${dir} does not exist`);

@@ -27,7 +27,8 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20 Nov 2026: the ship-ready-baseline fixtures (a real browser, 16 sites) took the lane past 10 min.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

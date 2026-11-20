@@ -35,6 +35,10 @@ rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'ZERO pages rendered' "$d/log"; } &
 d="$W/sitemap"; page "$d/site" '<p>Home</p>'; mkdir -p "$d/site/menu"; cp "$d/site/index.html" "$d/site/menu/index.html"; sed -i.bak 's#<p>Home</p>#<p>Lorem ipsum menu</p>#' "$d/site/menu/index.html"
 printf '<urlset><url><loc>https://x.test/</loc></url><url><loc>https://x.test/menu/</loc></url></urlset>' > "$d/site/sitemap.xml"; echo '{ "kind": "site", "serve": "site" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q '/menu/ shows placeholder text' "$d/log"; } && ok "no pages listed: the sitemap's pages are judged" || bad "sitemap pages (rc $rc)"
+d="$W/list"; page "$d/a" '<p>Fine</p>'; page "$d/b" '<p>TODO later</p>'; echo '[{ "kind": "site", "serve": "a", "pages": ["/"] }, { "kind": "site", "serve": "b", "pages": ["/"] }]' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'OUTPUT PASS' "$d/log" && grep -q 'placeholder text' "$d/log"; } && ok "a list judges each output; one red makes the check red" || bad "list (rc $rc)"
+d="$W/notyet"; mkdir -p "$d"; echo '{ "kind": "app", "not_yet": "needs a signed-in API" }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 0 ] && grep -q 'NOT RUN YET (app) — needs a signed-in API' "$d/log"; } && ok "not_yet passes with its reason named" || bad "not_yet (rc $rc)"
 d="$W/badcfg"; mkdir -p "$d"; echo '{ "kind": "poster" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'SHIP_READY_CONFIG' "$d/log"; } && ok "a bad config is a named stop (exit 2)" || bad "bad config (rc $rc)"
 [ "$fails" = 0 ] && echo "test-ship-ready-baseline: every automatic fail is caught and a clean page passes" || exit 1

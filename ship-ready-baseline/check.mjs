@@ -4,7 +4,9 @@
 // The caller's ship-ready.json says what to render:
 //   { "kind": "site|app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
 //     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"] (omitted: "/" + 7 from sitemap.xml),
-//     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"] }
+//     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"],
+//     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>" }
+// or a list of those (a site and an app in one repo).
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
 // one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync, appendFileSync } from "node:fs";
@@ -23,6 +25,25 @@ const stop = (msg) => { console.error(`NAMED STOP [SHIP_READY_CONFIG] ${msg}`); 
 
 let cfg;
 try { cfg = JSON.parse(readFileSync(CONFIG, "utf8")); } catch (e) { stop(`${CONFIG} could not be read: ${e.message}`); }
+// Several outputs in one repo (a site and an app, several publications): a list, each judged in turn.
+if (Array.isArray(cfg)) {
+  if (!cfg.length) stop("an empty list renders nothing (rule 0)");
+  let worst = 0;
+  cfg.forEach((one, i) => {
+    const file = resolve(`.ship-ready-${i}.json`); writeFileSync(file, JSON.stringify(one));
+    try { execSync(`node "${new URL(import.meta.url).pathname}" --config "${file}" --out "${join(OUT, String(i))}"`, { stdio: "inherit" }); }
+    catch (e) { worst = Math.max(worst, e.status || 1); }
+  });
+  process.exit(worst);
+}
+// A repo whose output cannot be rendered in CI yet says why; the job passes with that reason in its
+// summary, and the reason is a dated Open Loops row (never a silent skip).
+if (cfg.not_yet) {
+  const why = `## ship-ready-baseline: NOT RUN YET (${cfg.kind || "?"}) — ${cfg.not_yet}`;
+  console.log(why); console.log(`::warning title=ship-ready-baseline not run yet::${cfg.not_yet}`);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, why + "\n");
+  console.log("OUTPUT NOT_YET"); process.exit(0);
+}
 const kind = cfg.kind;
 if (!["site", "app", "email"].includes(kind)) stop(`kind must be site, app or email (got ${kind})`);
 mkdirSync(join(OUT, "shots"), { recursive: true });

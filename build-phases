@@ -62,11 +62,11 @@ failed_log() {
 
 idle=0; carry=""
 # HEAVY SLOTS (her yes 20 Nov 2026: 8 GB RAM, 22 GB swap): at most 2 heavy local jobs at once. A round starts only
-# when fewer than 2 other `codex exec` runs are live; the wait is bounded (90 min) and says so, never silent.
+# when fewer than 2 heavy jobs (codex exec, engine renders, the audio fill) are live; the wait is bounded (90 min) and says so, never silent.
 heavy_slot() {
   local waited=0
-  while [ "$(pgrep -f 'codex exec' | wc -l | tr -d ' ')" -ge 2 ]; do
-    [ "$waited" -eq 0 ] && echo "[$(date +%H:%M)] round $round: waiting for a heavy slot (2 Codex builds already running)"
+  while [ "$(pgrep -f 'codex exec|engine/render.mjs|audio/fill.py' | wc -l | tr -d ' ')" -ge 2 ]; do
+    [ "$waited" -eq 0 ] && echo "[$(date +%H:%M)] round $round: waiting for a heavy slot (2 heavy jobs already running: Codex builds, renders or the audio fill)"
     [ "$waited" -ge 5400 ] && { echo "NAMED STOP [NO_HEAVY_SLOT] waited 90 min for a slot; re-run when a build finishes"; exit 3; }
     sleep 60; waited=$((waited + 60))
   done

@@ -1,0 +1,93 @@
+#!/bin/bash
+# build-phases — Codex builds one phase of an app brief to "ready for review", hands-off.
+#
+#   build-phases --repo OWNER/NAME --briefs DIR --phase N [--rounds 8] [--branch BR]
+#
+# WHY (20 Nov 2026): Codex runs called by hand stopped after one pass with work left, could not
+# commit (sandbox), and never saw CI. This loop fixes all three on top of the ONE runner, ai-run:
+#   · every round is `ai-run --role worker --network` (ai-run makes the repo's .git writable);
+#   · rounds repeat until Codex writes `STATUS: complete` as the first line of
+#     <briefs>/phase-N-result.md AND the PR's checks are green; a red check's failed log is the
+#     next round's brief; review findings in <briefs>/reviews/hostile-phase-N.md (Claude's,
+#     never Codex's own) are fixed the same way;
+#   · after each round the runner commits anything left and pushes, so no round's work is lost;
+#   · STUCK after 2 rounds in a row that moved nothing; the round cap ends it otherwise.
+# Codex only: AI_RUN_NO_CLAUDE_FALLBACK=1, so a usage limit is NAMED STOP [CODEX_LIMIT], never Claude.
+# It never merges: the builder never grades its own work. Landing is the reviewer's `land`.
+#
+# Worktree ~/GitHub/.wt-<name>-phase-N (or the one already on --branch), branch codex/<name>-phase-N
+# unless --branch names an existing one; one PR per phase.
+# Last line (OUTPUT): READY <pr-url> | STUCK | ROUND_CAP | CODEX_LIMIT | NAMED STOP …
+# Exit: 0 ready · 3 stuck/cap · 75 Codex limit · 64 usage.
+set -uo pipefail
+REPO="" BRIEFS="" PHASE="" ROUNDS=8 BRANCH=""
+while [ $# -gt 0 ]; do case "$1" in
+  --repo) REPO="$2"; shift 2;; --briefs) BRIEFS="$2"; shift 2;;
+  --phase) PHASE="$2"; shift 2;; --rounds) ROUNDS="$2"; shift 2;; --branch) BRANCH="$2"; shift 2;;
+  *) echo "usage: build-phases --repo OWNER/NAME --briefs DIR --phase N [--rounds 8]"; exit 64;; esac; done
+[ -n "$REPO" ] && [ -d "$BRIEFS" ] && [ -n "$PHASE" ] || { echo "NAMED STOP [USAGE] --repo, --briefs and --phase are required"; exit 64; }
+NAME="${REPO#*/}"; CLONE="${BUILD_PHASES_CLONE:-$HOME/GitHub/$NAME}"
+BR="${BRANCH:-codex/$NAME-phase-$PHASE}"
+# a worktree already on the branch is reused (a phase started before this runner existed)
+WT="$(git -C "$CLONE" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$BR" '/^worktree /{w=substr($0,10)} $0=="branch "b{print w; exit}')"
+WT="${WT:-$HOME/GitHub/.wt-$NAME-phase-$PHASE}"
+RESULT="$BRIEFS/phase-$PHASE-result.md"; REVIEW="$BRIEFS/reviews/hostile-phase-$PHASE.md"
+LOGDIR="$BRIEFS/logs"; mkdir -p "$LOGDIR" "$BRIEFS/reviews"
+AIRUN="${BUILD_PHASES_AIRUN:-$HOME/bin/ai-run}"
+say() { echo "[$(date +%H:%M)] $*"; }
+
+git -C "$CLONE" fetch -q origin || { echo "NAMED STOP [FETCH_FAILED] $CLONE"; exit 64; }
+if [ ! -d "$WT" ]; then
+  if git -C "$CLONE" rev-parse -q --verify "origin/$BR" >/dev/null; then git -C "$CLONE" worktree add -q "$WT" -B "$BR" "origin/$BR"
+  else git -C "$CLONE" worktree add -q "$WT" -b "$BR" origin/main; fi || { echo "NAMED STOP [WORKTREE_FAILED] $WT"; exit 64; }
+fi
+
+pr_url() { gh pr list -R "$REPO" --head "$BR" --state open --json url -q '.[0].url' 2>/dev/null; }
+push_round() { # commit leftovers, push, open the PR once
+  ( cd "$WT" && if [ -n "$(git status --porcelain)" ]; then git add -A && git commit -qm "Phase $PHASE (Codex, round $1): work in progress" \
+      -m "Co-Authored-By: Codex <noreply@openai.com>"; fi; git push -q -u origin "$BR" 2>&1 | tail -1 ) || true
+  [ -n "$(pr_url)" ] || gh pr create -R "$REPO" --head "$BR" --draft --title "Phase $PHASE (Codex build)" \
+    --body "Built by Codex through ~/bin/build-phases from the phase brief in the briefs folder. Merged only after an independent review on the CI preview." >/dev/null 2>&1 || true
+}
+checks_state() { # green | red | none
+  local u; u="$(pr_url)"; [ -n "$u" ] || { echo none; return; }
+  timeout 1500 gh pr checks "$u" --watch >/dev/null 2>&1
+  local s; s="$(gh pr checks "$u" --json bucket -q '[.[].bucket]|unique|join(",")' 2>/dev/null)"
+  case "$s" in "") echo none;; *fail*|*cancel*) echo red;; *pending*) echo red;; *) echo green;; esac
+}
+failed_log() {
+  local id; id="$(gh run list -R "$REPO" -b "$BR" -L 5 --json databaseId,conclusion -q '[.[]|select(.conclusion=="failure")][0].databaseId' 2>/dev/null)"
+  [ -n "$id" ] && gh run view "$id" -R "$REPO" --log-failed 2>/dev/null | tail -80
+}
+
+idle=0; carry=""
+for round in $(seq 1 "$ROUNDS"); do
+  before="$(git -C "$WT" rev-parse HEAD)"; dirty_before="$(git -C "$WT" status --porcelain)"
+  prompt="You are building PHASE $PHASE of $BRIEFS/PHASES.md in this worktree ($WT, branch $BR). Read $BRIEFS/COMMON.md and $BRIEFS/QUALITY.md first.
+Work until the phase's Done line is fully true, not one pass. Commit with git as you go (clear messages). Run the typecheck and the tests you touched; CI runs the rest.
+Then write $RESULT, FIRST LINE exactly 'STATUS: complete' or 'STATUS: incomplete', then under 25 lines: what was built, tests run, what is still missing and why.
+${carry}"
+  [ -s "$REVIEW" ] && grep -q '^VERDICT: fail' "$REVIEW" && prompt+="
+An independent reviewer FAILED this phase. Fix every finding in $REVIEW at its root, then set STATUS again."
+  say "round $round: Codex building"
+  AI_RUN_NO_CLAUDE_FALLBACK=1 AI_RUN_ADD_DIRS="$BRIEFS" AI_RUN_CALLER=build-phases \
+    "$AIRUN" --role worker --cwd "$WT" --network --out "$LOGDIR/phase-$PHASE-round-$round.log" -- "$prompt"
+  rc=$?
+  [ "$rc" = 75 ] && { push_round "$round"; echo "OUTPUT CODEX_LIMIT phase $PHASE after round $round (work pushed; rerun after the reset)"; exit 75; }
+  push_round "$round"
+  [ "$(git -C "$WT" rev-parse HEAD)" = "$before" ] && [ -z "$dirty_before" ] && idle=$((idle+1)) || idle=0
+  [ "$idle" -ge 2 ] && { echo "OUTPUT STUCK phase $PHASE: 2 rounds moved nothing ($(pr_url))"; exit 3; }
+  if head -1 "$RESULT" 2>/dev/null | grep -q '^STATUS: complete'; then
+    st="$(checks_state)"; say "round $round: Codex says complete; checks $st"
+    if [ "$st" = green ]; then
+      if [ -s "$REVIEW" ] && grep -q '^VERDICT: fail' "$REVIEW"; then
+        # the reviewer's findings are answered only when Codex wrote a newer result than the review
+        [ "$RESULT" -nt "$REVIEW" ] && { echo "OUTPUT READY $(pr_url) (review findings answered; re-review)"; exit 0; }
+      else echo "OUTPUT READY $(pr_url)"; exit 0; fi
+    fi
+    [ "$st" = red ] && carry="CI IS RED on your PR. Fix the root cause. Failed log tail:
+$(failed_log)"
+    [ "$st" = none ] && carry="No CI checks ran on the PR. Make the repo's CI run on this branch's pull request."
+  else carry="Your last round ended with the phase incomplete. Continue from $RESULT; do not redo finished work."; fi
+done
+echo "OUTPUT ROUND_CAP phase $PHASE after $ROUNDS rounds ($(pr_url))"; exit 3

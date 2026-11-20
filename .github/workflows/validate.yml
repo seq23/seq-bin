@@ -66,6 +66,11 @@ jobs:
       - name: land must watch its own merge commit's run
         run: ./tests/test-land-merge-run.sh
 
+      # seq-bin's last land step fast-forwards the launchd copy (the main checkout, ~/bin), never
+      # the worktree land runs from (20 Nov 2026: a false STOPPED after a good merge from a worktree).
+      - name: land must fast-forward the launchd copy, wherever it runs from
+        run: ./tests/test-land-launchd-copy.sh
+
       # The web property change lane (23 Sep 2026) lands partner changes with `land <pr>`; a site
       # repo with no route makes land stop after the work is built. Evals land's routes block.
       - name: land must know how every West Peek site repo reaches production

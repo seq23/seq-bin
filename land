@@ -1097,7 +1097,6 @@ say "3/5  syncing main"
 # is fast-forwarded only when that cannot touch her work: on main, and no tracked file changed.
 # --- sync begin (tests/test-land-flow.sh) ---
 git fetch -q origin main || git fetch -q origin main || die "#$PR IS MERGED, but origin/main could not be fetched. Nothing was deployed. Re-run 'land $PR'."
-SYNCED=""
 CUR="$(git symbolic-ref -q --short HEAD)"
 DIRTY="$(git status --porcelain --untracked-files=no)"
 if [ "$CUR" != main ]; then
@@ -1105,7 +1104,7 @@ if [ "$CUR" != main ]; then
 elif [ -n "$DIRTY" ]; then
   echo "     local main has $(grep -c . <<<"$DIRTY") uncommitted tracked change(s) — left exactly as they are, not fast-forwarded; later steps read origin/main"
 elif git merge -q --ff-only origin/main 2>/dev/null; then
-  SYNCED=1
+  :
 else
   echo "     local main has commits origin/main does not — left as it is; later steps read origin/main"
 fi
@@ -1451,15 +1450,27 @@ pages_kick() { # -> 0 at least one build triggered | 1 none (named on stdout)
 # ~/bin IS PRODUCTION: launchd runs its working copy, so here — and only here — the local checkout
 # must move. Her uncommitted work in it is never touched: the fast-forward runs only on main and only
 # when no file she has changed is one the incoming commits change (git refuses to clobber either way).
-if [ -z "$DEPLOY" ] && { [ "$NAME" = bin ] || [ "$NAME" = seq-bin ]; } && [ -z "$SYNCED" ]; then
+# The launchd copy is the repo's MAIN checkout (the folder holding the shared .git), never the
+# worktree land runs from (20 Nov 2026: land from ~/GitHub/.wt-* said "STOPPED: ... is on <branch>,
+# not main, so launchd still runs the old scripts" after a good merge — it judged the worktree).
+# --- launchd begin (tests/test-land-launchd-copy.sh) ---
+if [ -z "$DEPLOY" ] && { [ "$NAME" = bin ] || [ "$NAME" = seq-bin ]; }; then
+  LIVE_DIR="$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')"
   say "5/5  $NAME $SELF"
-  [ "$CUR" = main ] || die "#$PR IS MERGED and main is green, but $REPO_DIR is on ${CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $REPO_DIR checkout main && git -C $REPO_DIR merge --ff-only origin/main"
-  OVERLAP="$(comm -12 <(git status --porcelain --untracked-files=no | cut -c4- | sort -u) <(git diff --name-only HEAD origin/main | sort -u))"
-  [ -z "$OVERLAP" ] || die "#$PR IS MERGED and main is green, but the merge changes file(s) with uncommitted local edits in $REPO_DIR ($(echo "$OVERLAP" | paste -sd, -)), so it was NOT fast-forwarded and launchd still runs the old scripts. Nothing of hers was touched."
-  git merge -q --ff-only origin/main || die "#$PR IS MERGED and main is green, but $REPO_DIR could not fast-forward to origin/main (local commits?), so launchd still runs the old scripts."
-  say "LANDED — #$PR is merged, main is green, and $REPO_DIR is at $(git log --oneline -1) (her $(grep -c . <<<"$DIRTY") uncommitted change(s) untouched)."
+  if [ "$(git -C "$LIVE_DIR" rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+    say "LANDED — #$PR is merged, main is green, and $LIVE_DIR is already at $(git -C "$LIVE_DIR" log --oneline -1)."
+    exit 0
+  fi
+  LIVE_CUR="$(git -C "$LIVE_DIR" symbolic-ref -q --short HEAD)"
+  [ "$LIVE_CUR" = main ] || die "#$PR IS MERGED and main is green, but $LIVE_DIR is on ${LIVE_CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $LIVE_DIR checkout main && git -C $LIVE_DIR merge --ff-only origin/main"
+  LIVE_DIRTY="$(git -C "$LIVE_DIR" status --porcelain --untracked-files=no)"
+  OVERLAP="$(comm -12 <(cut -c4- <<<"$LIVE_DIRTY" | sed '/^$/d' | sort -u) <(git -C "$LIVE_DIR" diff --name-only HEAD origin/main | sort -u))"
+  [ -z "$OVERLAP" ] || die "#$PR IS MERGED and main is green, but the merge changes file(s) with uncommitted local edits in $LIVE_DIR ($(echo "$OVERLAP" | paste -sd, -)), so it was NOT fast-forwarded and launchd still runs the old scripts. Nothing of hers was touched."
+  git -C "$LIVE_DIR" merge -q --ff-only origin/main || die "#$PR IS MERGED and main is green, but $LIVE_DIR could not fast-forward to origin/main (local commits?), so launchd still runs the old scripts."
+  say "LANDED — #$PR is merged, main is green, and $LIVE_DIR is at $(git -C "$LIVE_DIR" log --oneline -1) (her $(grep -c . <<<"$LIVE_DIRTY") uncommitted change(s) untouched)."
   exit 0
 fi
+# --- launchd end ---
 
 if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"

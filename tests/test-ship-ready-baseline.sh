@@ -39,6 +39,10 @@ d="$W/list"; page "$d/a" '<p>Fine</p>'; page "$d/b" '<p>TODO later</p>'; echo '[
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'OUTPUT PASS' "$d/log" && grep -q 'placeholder text' "$d/log"; } && ok "a list judges each output; one red makes the check red" || bad "list (rc $rc)"
 d="$W/notyet"; mkdir -p "$d"; echo '{ "kind": "app", "not_yet": "needs a signed-in API" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 0 ] && grep -q 'NOT RUN YET (app) — needs a signed-in API' "$d/log"; } && ok "not_yet passes with its reason named" || bad "not_yet (rc $rc)"
+case_ "Spanish \"todo\" is not a placeholder" '<p lang="es">Para todo el mundo</p>' 0 "OUTPUT PASS"
+case_ "a page's /api call is server code, not a broken asset" '<p>Hi</p><script>fetch("/api/track-event", { method: "POST" })</script>' 0 "OUTPUT PASS"
+d="$W/allow"; page "$d/site" '<p>App coming soon. TODO</p>'; echo '{ "kind": "site", "serve": "site", "pages": ["/"], "allow": { "coming soon": "the app is not in the stores yet" } }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'placeholder text: "TODO"' "$d/log" && ! grep -q '"coming soon"' "$d/log"; } && ok "an allowed phrase (with its reason) passes; the TODO beside it still fails" || bad "allow (rc $rc)"
 d="$W/badcfg"; mkdir -p "$d"; echo '{ "kind": "poster" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'SHIP_READY_CONFIG' "$d/log"; } && ok "a bad config is a named stop (exit 2)" || bad "bad config (rc $rc)"
 [ "$fails" = 0 ] && echo "test-ship-ready-baseline: every automatic fail is caught and a clean page passes" || exit 1

@@ -57,7 +57,7 @@ sync() { : > "$SKIPF"; precheck "$1" "$2"
   local ex=("${EXCL[@]}") del=(--delete-excluded); while read -r x; do [ -n "$x" ] && ex+=(--exclude "$x"); done < "$SKIPF"
   # A skipped big folder may already be partly in Drive: never delete it, just do not add to it tonight.
   [ -s "$SKIPF" ] && del=()
-  rclone sync "$1" "$DEST/$2" "${ex[@]}" "${del[@]}" --backup-dir "$DEST/_old/$D/$2" --transfers 8 --checkers 16 --max-duration "${left}s" --log-file "$LOG" --log-level NOTICE
+  rclone sync "$1" "$DEST/$2" "${ex[@]}" "${del[@]}" --backup-dir "$DEST/_old/$D/$2" --skip-links --transfers 8 --checkers 16 --max-duration "${left}s" --log-file "$LOG" --log-level NOTICE
   local rc=$?; [ $rc -eq 10 ] && slow=${slow:-$2}; [ $rc -ne 0 ] && fail=1; }
 BOSS_KEEP=(deck sourcing search-readiness asmr-voice)   # asmr-voice: the ~4 MB voice samples (its venv is skipped)
 for b in "${BOSS_KEEP[@]}"; do [ -d ~/.boss-os/$b ] && sync ~/.boss-os/$b boss-os/$b; done
@@ -70,7 +70,10 @@ for f in CLAUDE.md rules-history.md; do rclone copyto ~/.claude/$f "$DEST/claude
 # Only the latest handoff is kept (her call 1 Nov: no pile of dated copies).
 # Claude memory files (no chat history: only the memory/ folders under projects).
 rclone copy ~/.claude/projects "$DEST/claude/memory" --include '*/memory/**' --log-file "$LOG" || fail=1
-rclone copy ~/Library/LaunchAgents "$DEST/LaunchAgents" --include 'com.seq.*.plist' "${EXCL[@]}" --log-file "$LOG" || fail=1
+# Only her job definitions (they hold no secrets: every plist reads keys from the vault at run time). An
+# --include list mixed with the --exclude list is applied in an order rclone calls "indeterminate" (warned
+# in launchd.err every night to 19 Nov 2026), so this copy uses the include alone.
+rclone copy ~/Library/LaunchAgents "$DEST/LaunchAgents" --include 'com.seq.*.plist' --log-file "$LOG" || fail=1
 rclone copyto ~/HANDOFF.md "$DEST/handoff/HANDOFF.md" --log-file "$LOG" || fail=1
 rclone delete "$DEST/handoff" --include 'HANDOFF-*.md' --log-file "$LOG" 2>/dev/null || true
 [ -d ~/Notes ] && sync ~/Notes Notes

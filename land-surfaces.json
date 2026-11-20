@@ -1,0 +1,58 @@
+{
+  "_what": "What a person sees, per repo type. land's gates block reads this (and only this) to decide whether a PR needs a 'Ship-ready: PASS' line, and which added files mean something NEW goes public ('Launch-ready: PASS'). Patterns are POSIX ERE matched against repo-relative paths. A type applies when any path on origin/main matches its detect pattern; 'everywhere' applies to every repo. Decided 20 Nov 2026 from the layouts of every seq23 repo under ~/GitHub.",
+  "exclude": [
+    "(^|/)(tests?|__tests__|__snapshots__|e2e|playwright|fixtures|docs|\\.github|\\.githooks|reports|ARTIFACTS)/",
+    "\\.(test|spec|stories)\\.[cm]?[jt]sx?$",
+    "(^|/)[A-Z][A-Z0-9_-]*\\.md$"
+  ],
+  "everywhere": [
+    "\\.(html?|css|scss|astro|vue|svelte|tsx|jsx|mjml|hbs|eml)$",
+    "\\.(png|jpe?g|webp|gif|avif|svg|ico)$",
+    "\\.(mp4|mov|webm|mp3|wav|m4a|srt|vtt)$",
+    "(^|/)(e?mails?|mailers?|templates)/",
+    "(^|/)(public|static)/"
+  ],
+  "types": [
+    {
+      "type": "site",
+      "_layout": "static and framework sites: p-n-p, secondaries, spry-vc, sprylabs-hpc-site, local-guides-*, cynthia-brown-dds-site, 901johnsons-site (next), courtscope (astro), peace-be-still and keepmyproof site/",
+      "detect": "(^|/)(index\\.html|_headers|_redirects|astro\\.config\\.mjs|next\\.config\\.m?js)$",
+      "surfaces": [
+        "(^|/)(site|content|questions|guides|pages|assets|components|app|sites|dist)/",
+        "(^|/)(_redirects|robots\\.txt|sitemap\\.xml|llms\\.txt)$"
+      ]
+    },
+    {
+      "type": "web-app",
+      "_layout": "Workers + React consoles: boss-os, west-peek-os (src/client/), creator-studios and the creator dashboards (app/, help/)",
+      "detect": "(^|/)src/client/|(^|/)vite\\.config\\.[cm]?[jt]s$",
+      "surfaces": [
+        "(^|/)src/client/",
+        "(^|/)(app|help)/"
+      ]
+    },
+    {
+      "type": "mobile-app",
+      "_layout": "Expo apps: keepmyproof, aplayer-mode apps/mobile, approvalprep, dream-wedding-builder (app/, store/ listings and screenshots)",
+      "detect": "(^|/)(app\\.json|app\\.config\\.[jt]s|eas\\.json)$",
+      "surfaces": [
+        "(^|/)(app|screens|components|store)/",
+        "(^|/)app\\.(json|config\\.[jt]s)$"
+      ]
+    },
+    {
+      "type": "channel",
+      "_layout": "video and social output: how-we-know (channel/, captions/, renders/, visuals/), peace-be-still audio/, creator-studios studios/",
+      "detect": "(^|/)(channel|captions|renders|studios)/",
+      "surfaces": [
+        "(^|/)(channel|captions|renders|visuals|thumbnails|voice|audio|shorts|pins|posts|social|studios)/"
+      ]
+    }
+  ],
+  "launch": [
+    "(^|/)wrangler\\.(toml|jsonc?)$",
+    "(^|/)(app\\.json|app\\.config\\.[jt]s|eas\\.json)$",
+    "(^|/)channel/(about|trailer)\\.md$",
+    "(^|/)CNAME$"
+  ]
+}

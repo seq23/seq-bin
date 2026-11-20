@@ -161,6 +161,7 @@ fixture() {
   git init -q --bare -b main "$W/origin.git"
   git clone -q "$W/origin.git" "$W/pusher" 2>/dev/null
   mkdir -p "$W/pusher/artifacts"; echo '{"v":1}' > "$W/pusher/artifacts/a.json"; echo one > "$W/pusher/other.txt"
+  mkdir -p "$W/pusher/site"; echo '<h1>live</h1>' > "$W/pusher/site/index.html"   # a live page: a screen PR is not the repo's first surface (Launch-ready)
   echo '{"lockfileVersion":3}' > "$W/pusher/package-lock.json"   # identical lockfile: deploy_at shares her node_modules
   if [ -n "${2:-}" ]; then mkdir -p "$W/pusher/.github/workflows"; echo "name: $2" > "$W/pusher/.github/workflows/$2.yml"; fi
   git -C "$W/pusher" add -A; git -C "$W/pusher" commit -qm base; git -C "$W/pusher" push -q origin HEAD:main
@@ -170,7 +171,7 @@ fixture() {
 }
 run_land() { # name [flags...] -> sets OUT, RC
   local name="$1"; shift
-  OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 PAGES_APPEAR_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" 7 "$@" 2>&1)"; RC=$?
+  OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 PAGES_APPEAR_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" 7 "$@" 2>&1)"; RC=$?
   [ -z "${LAND_TEST_SHOW:-}" ] || printf '%s\n' "$OUT" | sed 's/^/    | /'   # LAND_TEST_SHOW=1: print what land said
 }
 npm_log() { cat "$FAKE/npm-log" 2>/dev/null || true; }
@@ -236,11 +237,16 @@ check "nothing was merged" eval '! merge_called'
 fixture approvalprep
 echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "with a Clicked through comment: rc 0" [ "$RC" -eq 0 ]
+check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "add to the PR body the line  Ship-ready: PASS — "'
+check "…and nothing was merged" eval '! merge_called'
+fixture approvalprep
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "with a Clicked through comment and a fresh Ship-ready PASS: rc 0" [ "$RC" -eq 0 ]
 check "…and it was merged" merge_called
 check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
 fixture approvalprep
-echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
 

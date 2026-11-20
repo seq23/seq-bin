@@ -85,6 +85,11 @@ jobs:
       # Drives the whole of land against a fake gh and a real git origin.
       - name: land must leave her checkout alone and never read could-not-check as an answer
         run: ./tests/test-land-flow.sh
+      # 20 Nov 2026 (rows 6c, 6e, 20): land refuses a PR that changes what people see without a fresh
+      # reviewer's Ship-ready PASS (Launch-ready for something new; a red ship-ready-baseline check),
+      # and one that patches a function fixed in the last 30 days without "Patch or rebuild:".
+      - name: land's gates refuse what they should (ship-ready, launch-ready, baseline, patch history)
+        run: ./tests/test-land-gates.sh
       # Build first, test in batches (26 Sep 2026): staging on every land, `land --promote` ships
       # the newest green. 2 Oct 2026: a small change ships on the fast check; a large one only
       # through the suite; a known-red or unread suite blocks a small change. Evals land's plan

@@ -408,6 +408,10 @@ fixes behind). Never switch its branch and never commit in it. Make changes in
   git -C $REPO worktree add $HOME_DIR/GitHub/.wt-tail-$STAMP -b tail-$STAMP origin/main
 and remove that worktree when your PR has landed.
 
+PATCH TWICE -> REBUILD (her ruling 19 Nov 2026): before any fix, 'git log -L'/'git log -S' the code.
+If it was fixed before for the same kind of problem (e.g. another phrase the keywords misread), do not
+add another patch: replace that design (meaning is read by the first read, never by keywords), and ask
+"built from scratch today, would it look like this?" (~/.claude/skills/ship-ready/engineering.md).
 Fix there per the decide-and-fix and strengthen-tests-never-weaken rules: root-cause, fix at
 source, never weaken or skip a test or validator, guard it with a test, open a PR, then
 'gh pr checks <pr>' yourself and land it with '$HOME_DIR/bin/land <pr>' (watch main to a

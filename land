@@ -873,9 +873,9 @@ surface_files() { # $1 ERE from surface_re; stdin: changed paths -> the ones a p
 }
 signoff() { # $1 Ship-ready|Launch-ready; stdin: PR body -> the reviewer on its last PASS line (rc 1 none)
   local line
-  line="$(grep -E "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
+  line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] || return 1
-  printf '%s\n' "$line" | sed -E "s/^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *//; s/ looked at .*//; s/^[[:space:]]+//; s/[[:space:]]+$//"
+  printf '%s\n' "$line" | sed -E "s/^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *//; s/ [Ll][Oo][Oo][Kk][Ee][Dd] [Aa][Tt] .*//; s/^[[:space:]]+//; s/[[:space:]]+$//"
 }
 builders() { # stdin: the PR view JSON (author, commits) -> one lowercase identity per line
   jq -r '(.author.login // empty),

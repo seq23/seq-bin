@@ -246,6 +246,10 @@ check "with a Clicked through comment and a fresh Ship-ready PASS: rc 0" [ "$RC"
 check "…and it was merged" merge_called
 check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
 fixture approvalprep
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "a capitalised \"Looked at\" sign-off is accepted (21 Nov 2026: PBS #74 was refused for the capital L): rc 0" [ "$RC" -eq 0 ]
+fixture approvalprep
 echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]

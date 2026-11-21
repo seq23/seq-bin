@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.pbs-fill-start-once</string>
+  <!-- Her call 20 Nov 2026: PBS audio fill on at 5 PM CT Sat 21 Nov, then every night 17:00-08:00 (the fill's own window). Fires only on 2026-11-21; a no-op after. -->
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-c</string>
+    <string>[ "$(TZ=America/Chicago date +%Y-%m-%d)" = "2026-11-21" ] || exit 0; U=$(id -u); git -C $HOME/GitHub/.pbs-runner pull -q --ff-only origin main; launchctl enable gui/$U/com.seq.pbs-library-fill; launchctl bootstrap gui/$U $HOME/Library/LaunchAgents/com.seq.pbs-library-fill.plist; echo "$(date) PBS fill turned on (her call 20 Nov: every night 5 PM)" >> $HOME/.peace-be-still/logs/library-fill.log</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/.peace-be-still/logs/fill-start-once.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/.peace-be-still/logs/fill-start-once.log</string>
+</dict></plist>

@@ -164,6 +164,28 @@ function wranglerProblem(a, cwd) {
   return null;
 }
 
+// Her ruling 21 Nov 2026 ("u should have fucking known to do that"): the same check failing twice is a bug
+// to root-cause, not a run to repeat. `gh run rerun <id>` is refused when that run failed AND the run of the
+// same workflow on the same branch before it also failed. Reads GitHub with gh (5 s cap); unreadable = let through.
+function runHistory(id, repo) {
+  const R = repo ? ["-R", repo] : [];
+  const q = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const run = q(["run", "view", id, ...R, "--json", "workflowName,headBranch,conclusion,databaseId"]);
+  const list = q(["run", "list", ...R, "-w", run.workflowName, "-b", run.headBranch, "-L", "6", "--json", "databaseId,conclusion,status"]);
+  return { run, list };
+}
+function rerunProblem(a, env) {
+  if (!(a[1] === "run" && a[2] === "rerun")) return null;
+  const id = a.slice(3).find((x) => /^\d+$/.test(x));
+  const ri = a.indexOf("-R") >= 0 ? a.indexOf("-R") : a.indexOf("--repo");
+  if (!id) return null;
+  let h; try { h = (env.runHistory ?? runHistory)(id, ri >= 0 ? a[ri + 1] : null); } catch { return null; }
+  if (!h || h.run.conclusion !== "failure") return null;
+  const before = h.list.filter((r) => r.status === "completed" && r.databaseId !== h.run.databaseId && r.databaseId < h.run.databaseId);
+  if (before[0]?.conclusion === "failure") return `the same check (${h.run.workflowName} on ${h.run.headBranch}) has already failed twice in a row; re-running will not change it. Read the failing step, run only that test, fix the cause, push once`;
+  return null;
+}
+
 /** Why this command line must not run, or null. `env` lets tests stub git. */
 export function verdict(line, { cwd = process.cwd(), env = { branchOf, dirtyOf } } = {}) {
   for (const a of commands(String(line ?? ""))) {
@@ -179,10 +201,11 @@ export function verdict(line, { cwd = process.cwd(), env = { branchOf, dirtyOf }
       }
     } else if (cmd === "git") why = gitProblem(a, cwd, env);
     else if (cmd === "launchctl") {
-      if (["unload", "bootout", "remove", "disable"].includes(a[1]) && a.slice(2).some((x) => x.includes("com.seq."))) {
+      if (["unload", "bootout", "remove", "disable"].includes(a[1]) && a.slice(2).some((x) => x.includes("com.seq.") || x.includes("$"))) {
         why = `it stops a com.seq.* scheduled job (launchctl ${a[1]}); jobs are reloaded with ~/bin/install-launchd.sh or the repo's installer, never stopped by hand`;
       }
     } else if (cmd === "gh" && a[1] === "repo" && a[2] === "delete") why = "it deletes a GitHub repository";
+    else if (cmd === "gh" && a[1] === "run" && a[2] === "rerun") why = rerunProblem(a, env);
     else if (cmd === "security" && /^delete-(generic|internet)-password$/.test(a[1] ?? "")) why = "it deletes a Keychain secret";
     else if (cmd === "diskutil" && /^(erase|zero|secureErase|reformat|partitionDisk)/i.test(a[1] ?? "")) why = "it erases a disk";
     else why = wranglerProblem(a, cwd);
@@ -199,7 +222,9 @@ export function commandOf(input) {
 }
 
 // ─── --self-test: every rule still refuses, a harmless command still passes ──────────────────────────
-const STUB = { branchOf: () => "main", dirtyOf: () => " M a.txt" };
+const FAILED_TWICE = () => ({ run: { workflowName: "check", headBranch: "feat/x", conclusion: "failure", databaseId: 9 }, list: [{ databaseId: 9, status: "completed", conclusion: "failure" }, { databaseId: 8, status: "completed", conclusion: "failure" }] });
+const FAILED_ONCE = () => ({ run: { workflowName: "check", headBranch: "feat/x", conclusion: "failure", databaseId: 9 }, list: [{ databaseId: 9, status: "completed", conclusion: "failure" }, { databaseId: 8, status: "completed", conclusion: "success" }] });
+const STUB = { branchOf: () => "main", dirtyOf: () => " M a.txt", runHistory: FAILED_TWICE };
 export const MUST_BLOCK = [
   "rm -rf ~/GitHub/boss-os", "rm -fr /Users/x/Brains", "rm -r -f ~", "cd /tmp && rm -rf $HOME/bin", "rm -rf \"$TARGET\"", "rm --recursive --force ~/Work",
   "rm -rf /", "rm -rf /tmp", "bash -lc 'rm -rf ~/.boss-os'", "rm ~/Library/LaunchAgents/com.seq.ci-sweep.plist", "sudo rm -rf /usr/local",
@@ -208,7 +233,7 @@ export const MUST_BLOCK = [
   "wrangler deploy", "npx wrangler deploy --env production", "npx wrangler pages deploy dist", "wrangler versions deploy",
   "npx wrangler d1 execute WP_OS_DB --remote --command \"DELETE FROM prospects\"", "wrangler d1 execute db --remote --command='DROP TABLE x'", "wrangler d1 delete boss-os", "wrangler d1 time-travel restore db --timestamp=1",
   "wrangler r2 bucket delete media", "wrangler delete --name boss-os",
-  "launchctl unload ~/Library/LaunchAgents/com.seq.ci-sweep.plist", "launchctl bootout gui/501/com.seq.housekeeping",
+  "launchctl unload ~/Library/LaunchAgents/com.seq.ci-sweep.plist", "launchctl disable gui/501/$j", "gh run rerun 123 -R seq23/x", "launchctl bootout gui/501/com.seq.housekeeping",
   "gh repo delete seq23/x --yes", "security delete-generic-password -s west-peek-os-vault", "diskutil eraseDisk APFS X disk2",
 ];
 export const MUST_PASS = [
@@ -216,12 +241,12 @@ export const MUST_PASS = [
   "git push -u origin phase1-drill-guard", "git push --force origin my-branch", "git status", "git reset --soft HEAD~1", "git clean -n",
   "wrangler deploy --dry-run", "npm run deploy:production", "~/bin/land 12", "npx wrangler d1 execute WP_OS_DB --local --command \"DELETE FROM x\"",
   "npx wrangler d1 execute WP_OS_DB --remote --command \"SELECT COUNT(*) FROM standing_duties\"", "npx wrangler d1 export WP_OS_DB --env production --remote --output /tmp/x.sql",
-  "launchctl list | grep com.seq.", "launchctl kickstart gui/501/com.seq.housekeeping", "echo 'rm -rf ~' > notes.txt", "grep -n \"git push --force\" README.md",
+  "launchctl list | grep com.seq.", "gh run rerun 456", "launchctl enable gui/501/$j", "launchctl kickstart gui/501/com.seq.housekeeping", "echo 'rm -rf ~' > notes.txt", "grep -n \"git push --force\" README.md",
 ];
 export function selfTest() {
   const cwd = `${HOME}/GitHub/boss-os`;
   const missed = MUST_BLOCK.filter((c) => !verdict(c, { cwd, env: STUB }));
-  const wrong = MUST_PASS.filter((c) => verdict(c, { cwd: `${HOME}/GitHub/.wt-phase1-bin`, env: { branchOf: () => "phase1-drill-guard", dirtyOf: () => "" } }));
+  const wrong = MUST_PASS.filter((c) => verdict(c, { cwd: `${HOME}/GitHub/.wt-phase1-bin`, env: { branchOf: () => "phase1-drill-guard", dirtyOf: () => "", runHistory: FAILED_ONCE } }));
   return { missed, wrong };
 }
 

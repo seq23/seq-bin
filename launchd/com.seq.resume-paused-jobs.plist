@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.resume-paused-jobs</string>
+  <!-- Her call 21 Nov 2026: Mac daily jobs paused for the day; they resume at 00:05 CT Sun 22 Nov and run on their normal schedule. Fires only on 2026-11-22. -->
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-c</string>
+    <string>[ "$(TZ=America/Chicago date +%Y-%m-%d)" = "2026-11-22" ] || exit 0; U=$(id -u); while read j; do launchctl enable gui/$U/$j; done &lt; $HOME/.config/paused-2026-11-21.txt; echo "$(date) resumed $(wc -l &lt; $HOME/.config/paused-2026-11-21.txt) jobs paused 21 Nov" &gt;&gt; $HOME/.config/paused-2026-11-21.log</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>5</integer></dict>
+</dict></plist>

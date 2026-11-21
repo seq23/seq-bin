@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.seq.pbs-chat-redteam-once</string>
+  <!-- PBS chat round-7 live red team on CF2 free neurons, which reset 00:00 UTC (6 PM CT). Fires only on 2026-11-21; a no-op after. -->
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-lc</string>
+    <string>[ "$(TZ=America/Chicago date +%Y-%m-%d)" = "2026-11-21" ] || exit 0; gh run rerun 44860433808 -R seq23/peace-be-still &amp;&amp; echo "$(date) OUTPUT pbs-chat-redteam: rerun 44860433808 started" || echo "$(date) NAMED STOP RERUN_FAILED"</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>10</integer></dict>
+  <key>StandardOutPath</key><string>/Users/sequoiataylor/.peace-be-still/logs/chat-redteam-once.log</string>
+  <key>StandardErrorPath</key><string>/Users/sequoiataylor/.peace-be-still/logs/chat-redteam-once.log</string>
+</dict></plist>

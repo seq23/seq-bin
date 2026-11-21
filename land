@@ -1019,7 +1019,6 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # with the command that files it by hand.
 file_bypass_check() {
   local slug body out poster="${LAND_DIR:-$HOME/bin}/open-loops.mjs" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
-  [ -f "$poster" ] || poster="$HOME/bin/open-loops.mjs"   # land run from a copy outside ~/bin
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
     title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",

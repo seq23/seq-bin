@@ -692,6 +692,7 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
   res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, data: { action: "opened" } }));
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
+cp "$HERE/../open-loops.mjs" "$W/"   # the poster sits beside land (the fixture copy runs from $W)
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done

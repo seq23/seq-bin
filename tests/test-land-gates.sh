@@ -65,6 +65,13 @@ for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent sess
 done
 gate "$(meta "$GOOD" "$SITE")"
 check "a fresh reviewer's PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
+echo "=== owner override (her ruling 21 Nov 2026) ==="
+gate "$(meta "$(printf 'Tweaks the page.\n\nOwner override: "land it deploy it finish it" (21 Nov 2026 13:10 CT)')" "$SITE")"
+check "her Owner override line, no PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
+gate "$(meta "$(printf 'Owner override: <her words> (date)')" "$SITE")"
+check "a placeholder override is not her words -> refused" [ "$RC" -eq 1 ]
+gate "$(meta "$(printf 'Owner override: ok')" "$SITE")"
+check "a one-word override is refused" [ "$RC" -eq 1 ]
 gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px')" '[{"path":"src/mail/welcome.ts"}]')"
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"

@@ -51,7 +51,7 @@ gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a sub
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
 SITE='[{"path":"site/index.html"}]'
-GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px'
+GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px; Engineering: PASS'
 
 run_cases() {
 echo "=== ship-ready: a PR that changes what people see ==="
@@ -65,6 +65,18 @@ for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent sess
 done
 gate "$(meta "$GOOD" "$SITE")"
 check "a fresh reviewer's PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
+echo "=== engineering rides on the Ship-ready PASS (her ruling 21 Nov 2026) ==="
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px' "$SITE")"
+check "a PASS that says nothing of engineering -> refused (rc 1)" [ "$RC" -eq 1 ]
+check "…in one line naming engineering.md 1–6 and exactly what to add" eval 'one_line && grep -q "engineering.md" <<<"$MSG" && grep -q "1–6" <<<"$MSG" && grep -q "; Engineering: PASS" <<<"$MSG"'
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; checked engineering.md 1–6' "$SITE")"
+check "the words \"engineering.md 1–6\" on the line -> allowed" [ "$RC" -eq 0 ]
+gate "$(meta "$(printf 'Engineering: PASS\nShip-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px')" "$SITE")"
+check "Engineering: PASS on another line is not this reviewer's -> refused" [ "$RC" -eq 1 ]
+gate "$(meta 'Ship-ready: PASS — builder looked at the home page at 390 px; Engineering: PASS' "$SITE")"
+check "Engineering: PASS signed by the builder -> refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: FAIL (engineering.md fail 1)' "$SITE")"
+check "Engineering: FAIL -> refused" [ "$RC" -eq 1 ]
 echo "=== owner override (her ruling 21 Nov 2026) ==="
 gate "$(meta "$(printf 'Tweaks the page.\n\nOwner override: "land it deploy it finish it" (21 Nov 2026 13:10 CT)')" "$SITE")"
 check "her Owner override line, no PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
@@ -72,7 +84,7 @@ gate "$(meta "$(printf 'Owner override: <her words> (date)')" "$SITE")"
 check "a placeholder override is not her words -> refused" [ "$RC" -eq 1 ]
 gate "$(meta "$(printf 'Owner override: ok')" "$SITE")"
 check "a one-word override is refused" [ "$RC" -eq 1 ]
-gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px')" '[{"path":"src/mail/welcome.ts"}]')"
+gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px, engineering.md 1-6 clean')" '[{"path":"src/mail/welcome.ts"}]')"
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]
@@ -132,6 +144,8 @@ neg() { # label, sed expression applied to land
 neg "a signoff that never asks who signed" '/^is_builder()/a\
   return 1'
 neg "a patch check that never reads history" '/^patch_fixes()/a\
+  return 0'
+neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering()/a\
   return 0'
 neg "a quality gate that sees no surfaces" 's/^  \[ -n "\$files" \] || return 0$/  return 0/'
 echo "test-land-gates: every gate refuses what it should and lets through what it should"

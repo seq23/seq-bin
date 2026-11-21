@@ -16,6 +16,7 @@
 #   land 96         # that PR number
 #   land 96 --owner="<her words>"  # HER bypass (21 Nov 2026): skips the review, click-through and patch
 #                      # sign-offs; CI, the safety checks, deploy and smoke still run. Only when SHE says ship it.
+#                      # Once green, an engineering check of the merged diff is filed on Open Loops for the next day.
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
@@ -164,7 +165,11 @@ unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing 
 # gh_read runs inside $( ), so what went wrong is left in a file, not a variable the subshell loses.
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
-trap 'rm -f "$GH_ERR_FILE"' EXIT
+land_exit() { # $1 exit code. A land that ended green under her bypass files its engineering check.
+  [ "$1" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ] && file_bypass_check
+  rm -f "$GH_ERR_FILE"
+}
+trap 'land_exit $?' EXIT
 gh_kind() { # stderr text -> network | auth | api
   # A GitHub 5xx is "did not answer", never a refusal. 30 Oct 2026: during a GitHub incident
   # the merge call of three green PRs (how-we-know#256, local-guides-generator#140,
@@ -855,6 +860,9 @@ recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the 
 #     `Ship-ready: PASS — <reviewer> looked at <real output>` from a reviewer who is not the builder
 #     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
 #     public (a launch marker added, or the repo's first surface) also needs `Launch-ready: PASS — ...`.
+#     The same Ship-ready line carries `Engineering: PASS` (or "engineering.md 1–6"): the reviewer who
+#     passed what people see also passed how it is built (her ruling 21 Nov 2026: "our rules dont allow
+#     things to be built cheaply and horribly"; a keyword guess shipped in West Peek OS that day).
 #     A CI check named `ship-ready-baseline` (row 18), when the PR has one, must be green.
 LAND_SURFACES="${LAND_SURFACES:-${LAND_DIR:-$HOME/bin}/land-surfaces.json}"
 LAND_PATCH_DAYS="${LAND_PATCH_DAYS:-30}"
@@ -874,10 +882,17 @@ surface_files() { # $1 ERE from surface_re; stdin: changed paths -> the ones a p
   local ex; ex="$(gate_lines '.exclude')" || return 1
   grep -E "$1" | grep -vE "$ex" || true
 }
-signoff() { # $1 Ship-ready|Launch-ready; stdin: PR body -> the reviewer on its last PASS line (rc 1 none)
+pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line (rc 1 none)
   local line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
-  [ -n "$line" ] || return 1
+  [ -n "$line" ] && printf '%s\n' "$line"
+}
+covers_engineering() { # stdin: one PASS line -> 0 when it also passes engineering.md's automatic fails 1–6
+  grep -qiE 'engineering: *pass|engineering\.md *(fails? *)?1 *(–|—|-|to) *6'
+}
+signoff() { # $1 Ship-ready|Launch-ready; stdin: PR body -> the reviewer on its last PASS line (rc 1 none)
+  local line
+  line="$(pass_line "$1")" || return 1
   printf '%s\n' "$line" | sed -E "s/^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *//; s/ [Ll][Oo][Oo][Kk][Ee][Dd] [Aa][Tt] .*//; s/^[[:space:]]+//; s/[[:space:]]+$//"
 }
 builders() { # stdin: the PR view JSON (author, commits) -> one lowercase identity per line
@@ -911,9 +926,11 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   [ -n "$files" ] || return 0
   body="$(jq -r '.body // ""' <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add to the PR body the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>"; return 1; }
+    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add to the PR body the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
+    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>; Engineering: PASS"; return 1; }
+  pass_line Ship-ready <<<"$body" | covers_engineering \
+    || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks the automatic fails 1–6 in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
   added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
   launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
@@ -994,6 +1011,27 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
   return 0
 }
 # --- gates end ---
+# HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
+# dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
+# landed under `Owner override:` skipped its engineering review, so once it is green and deployed land
+# files ONE Open Loops row (one per repo#PR, the intake upserts) for the next day: the merged diff is
+# checked against engineering.md 1–6. It never blocks or fails the land; a failed post is printed loudly
+# with the command that files it by hand.
+file_bypass_check() {
+  local slug body out poster="${LAND_DIR:-$HOME/bin}/open-loops.mjs" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
+  [ -f "$poster" ] || poster="$HOME/bin/open-loops.mjs"   # land run from a copy outside ~/bin
+  slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
+  body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
+    title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",
+    finish_line: "engineering.md 1–6 checked on the merged diff; fails fixed or dated",
+    next_step: "Read the merged change against the six automatic fails in engineering.md; fix each fail now or give it a dated row."}')"
+  if [ "${LAND_OPEN_LOOPS_NO_VAULT:-}" = 1 ]; then out="$(node "$poster" "$body" 2>&1)"
+  else out="$(cd "$boss" 2>/dev/null && npm run -s vault:run -- node "$poster" "$body" 2>&1)"; fi
+  if [ $? -eq 0 ]; then echo "     engineering check of $slug#$PR filed on Open Loops for tomorrow ($(tail -1 <<<"$out"))"; return 0; fi
+  printf '\n\033[31;1mNAMED STOP [BYPASS_CHECK_NOT_FILED] #%s LANDED, but its engineering check was NOT filed on Open Loops: %s\nFile it by hand:  cd %s && npm run -s vault:run -- node %s '"'"'%s'"'"'\033[0m\n' \
+    "$PR" "$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")" "$boss" "$poster" "$body"
+  return 0
+}
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
 
@@ -1044,7 +1082,7 @@ if [ -n "$OWNER_WORDS" ]; then
     printf '%s\n\nOwner override: "%s" (%s)\n' "$OBODY" "$OWNER_WORDS" "$(TZ=America/Chicago date '+%d %b %Y %H:%M CT')" \
       | gh pr edit "$PR" --body-file - >/dev/null || die "the owner override could not be written to PR #$PR"
   fi
-  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run)"
+  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; an engineering check of the merged diff is filed for tomorrow)"
 fi
 PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
@@ -1110,6 +1148,9 @@ if ! MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)";
 fi
 fi
 
+# Landed under her bypass (this run's --owner, or the override already on the PR): the exit trap files
+# the engineering check once the land ends green (file_bypass_check).
+{ [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; } && LAND_BYPASSED=1
 say "3/5  syncing main"
 # THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`
 # in whatever checkout land ran from. 26 Sep 2026, local-guides-citation-velocity #159: her tree

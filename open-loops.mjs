@@ -2,6 +2,9 @@
 // row on repo#stop; `cleared: true` closes it. Retries a 5xx once; a 4xx is final.
 //
 //   node open-loops.mjs '<json body>'   # posts with BOSS_OPEN_LOOPS_TOKEN; prints the action
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 export const OPEN_LOOPS_URL = process.env.OPEN_LOOPS_URL || "https://boss.sequoiataylor.com/api/boss/open-loops/intake";
 
 export async function post(body, token, url = OPEN_LOOPS_URL) {
@@ -17,7 +20,9 @@ export async function post(body, token, url = OPEN_LOOPS_URL) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run as a script whatever path it was called by: a symlinked dir (macOS /var -> /private/var) made the
+// plain URL compare false, and the poster exited 0 having posted nothing (21 Nov 2026).
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const token = process.env.BOSS_OPEN_LOOPS_TOKEN;
   if (!token) { console.error("NAMED STOP [OPEN_LOOPS_TOKEN_MISSING] BOSS_OPEN_LOOPS_TOKEN is not in the environment; nothing was posted."); process.exit(3); }
   const body = JSON.parse(process.argv[2]);

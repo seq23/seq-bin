@@ -78,6 +78,9 @@ case "$a" in
   "pr checks "*) answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
   "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # pr-meta = the PR's files/body/comments JSON (case 1d); absent = one non-screen file, no body.
+  # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
+  "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
+  "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
   "pr view "*"files,body,comments"*) cat "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
@@ -240,17 +243,17 @@ run_land approvalprep
 check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "add to the PR body the line  Ship-ready: PASS — "'
 check "…and nothing was merged" eval '! merge_called'
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "with a Clicked through comment and a fresh Ship-ready PASS: rc 0" [ "$RC" -eq 0 ]
 check "…and it was merged" merge_called
 check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "a capitalised \"Looked at\" sign-off is accepted (21 Nov 2026: PBS #74 was refused for the capital L): rc 0" [ "$RC" -eq 0 ]
 fixture approvalprep
-echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
 
@@ -678,6 +681,52 @@ fixture build-first-fixture promote
 LAND="$BROKEN" run_promote build-first-fixture
 check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
 check "…without ever watching run 777" eval '! grep -q "^run view 777" "$FAKE/calls"'
+
+echo "=== 21. her bypass files ONE engineering check on Open Loops after a green land, never blocks it ==="
+cat > "$W/stub.mjs" <<'JS'
+import http from "node:http"; import fs from "node:fs";
+const dir = process.argv[2];
+http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => {
+  if (fs.existsSync(`${dir}/down`)) { res.writeHead(500); return res.end("down"); }
+  fs.appendFileSync(`${dir}/posts.jsonl`, JSON.stringify({ auth: req.headers.authorization, body: JSON.parse(b) }) + "\n");
+  res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, data: { action: "opened" } }));
+}); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
+JS
+cp "$HERE/../open-loops.mjs" "$W/"   # the poster sits beside land (the fixture copy runs from $W)
+mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
+trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
+for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
+OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$W/api/port")/intake"
+export LAND_OPEN_LOOPS_NO_VAULT=1 BOSS_OPEN_LOOPS_TOKEN=olt_test OPEN_LOOPS_URL
+posts() { cat "$W/api/posts.jsonl" 2>/dev/null; }
+# shellcheck disable=SC2034 # read inside the eval below
+TOMORROW="$(TZ=America/Chicago date -v+1d +%F 2>/dev/null || TZ=America/Chicago date -d tomorrow +%F)"
+fixture approvalprep
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=the important thing is our rules dont allow things to be built cheaply'
+check "a changed screen with no review, under --owner: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…her words went on the PR" eval 'jq -r .body "$FAKE/pr-meta" | grep -q "^Owner override: \"the important thing is our rules"'
+check "…ONE row was posted, with the token" eval '[ "$(posts | grep -c .)" -eq 1 ] && posts | jq -e "select(.auth == \"Bearer olt_test\")" >/dev/null'
+check "…titled for the repo and PR, owner claude, due tomorrow (Central)" eval 'posts | jq -e --arg d "$TOMORROW" "select(.body.title == \"Engineering check of seq23/approvalprep#7 (landed under her bypass)\" and .body.owner == \"claude\" and .body.next_date == \$d and .body.stop == \"OWNER_BYPASS_PR_7\")" >/dev/null'
+check "…with the finish line" eval 'posts | jq -e "select(.body.finish_line == \"engineering.md 1–6 checked on the merged diff; fails fixed or dated\")" >/dev/null'
+check "…and land says it filed it" has "engineering check of seq23/approvalprep#7 filed on Open Loops for tomorrow"
+: > "$W/api/posts.jsonl"; fixture approvalprep
+run_land approvalprep
+check "a land with no bypass posts nothing" eval '[ "$RC" -eq 0 ] && [ -z "$(posts)" ]'
+fixture approvalprep; : > "$FAKE/merged"
+echo '{"files":[{"path":"README.md"}],"body":"x\n\nOwner override: \"ship it now please\" (21 Nov 2026 10:00 CT)","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=ship it now please'
+check "a re-run on the already-merged bypass PR files it (the intake keeps one row per repo#PR)" eval '[ "$RC" -eq 0 ] && [ "$(posts | grep -c .)" -eq 1 ]'
+: > "$W/api/posts.jsonl"; : > "$W/api/down"; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "the API down: the land still ends rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…and says so loudly, with the command that files it by hand" eval 'has "NAMED STOP [BYPASS_CHECK_NOT_FILED]" && has "File it by hand:  cd "'
+rm -f "$W/api/down"; : > "$W/api/posts.jsonl"; fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+echo '[{"name":"test","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/1"}]' > "$FAKE/checks"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "a red PR under --owner is still refused, and nothing is filed" eval '[ "$RC" -eq 1 ] && ! merge_called && [ -z "$(posts)" ]'
+unset LAND_OPEN_LOOPS_NO_VAULT BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
 
 # Rule 0: this must have examined something.
 [ "$passes" -ge 160 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }

@@ -109,12 +109,12 @@ case "$a" in
   "workflow run promote.yml "*|"workflow run deploy.yml "*) echo "$a" > "$FAKE_DIR/dispatched"; exit 0 ;;
   "run list --workflow promote.yml --event workflow_dispatch"*|"run list --workflow deploy.yml --event workflow_dispatch"*)
     [ -f "$FAKE_DIR/dispatched" ] && echo 778; exit 0 ;;
-  "run view 778 "*conclusion*) c="$(cat "$FAKE_DIR/dispatch-conc" 2>/dev/null || echo success)"
+  "api repos/{owner}/{repo}/actions/runs/778 "*) c="$(cat "$FAKE_DIR/dispatch-conc" 2>/dev/null || echo success)"
     [ "$c" = success ] && [ ! -f "$FAKE_DIR/dispatch-no-record" ] && echo "$ORIGIN_MAIN" > "$FAKE_DIR/prod-state"
     echo "$c"; exit 0 ;;
   "run list --workflow promote.yml "*|"run list --workflow deploy.yml "*)
     if [ -f "$FAKE_DIR/promote-inflight" ] && [ ! -f "$FAKE_DIR/promote-done" ]; then printf '777\t%s\tin_progress\n' "$ORIGIN_MAIN"; fi; exit 0 ;;
-  "run view 777 "*conclusion*)
+  "api repos/{owner}/{repo}/actions/runs/777 "*)
     [ -f "$FAKE_DIR/promote-hang" ] && exit 0
     t="$(cat "$FAKE_DIR/promote-ticks" 2>/dev/null || echo 0)"
     if [ "$t" -le 0 ]; then : > "$FAKE_DIR/promote-done"; echo success; else echo $((t - 1)) > "$FAKE_DIR/promote-ticks"; fi; exit 0 ;;
@@ -129,7 +129,7 @@ case "$a" in
   "run list --workflow e2e "*"--status success"*) [ -f "$FAKE_DIR/e2e-pending" ] || echo "$ORIGIN_MAIN"; exit 0 ;;
   "run list --workflow e2e "*"databaseId,headSha,status"*) [ -f "$FAKE_DIR/e2e-pending" ] && echo 800; exit 0 ;;
   "run list --workflow e2e "*) exit 0 ;;
-  "run view 800 "*conclusion*) rm -f "$FAKE_DIR/e2e-pending"
+  "api repos/{owner}/{repo}/actions/runs/800 "*) rm -f "$FAKE_DIR/e2e-pending"
     if [ -f "$FAKE_DIR/e2e-red" ]; then echo failure; else : > "$FAKE_DIR/promote-inflight"; echo success; fi; exit 0 ;;  # green e2e fires promote.yml
   # What production runs. promote-done (the repo's own promote run finished) = origin/main.
   # Otherwise prod-state: a sha, "unrecorded" (the default), or "tls" (the API does not answer).
@@ -145,8 +145,7 @@ case "$a" in
   "api -X POST repos/{owner}/{repo}/deployments "*) cat > "$FAKE_DIR/deploy-record"; echo 4242; exit 0 ;;   # …and the deployment (its JSON is kept)
   "run list "*) echo 900; exit 0 ;;
   "run watch "*) exit 0 ;;
-  "run view 900 "*conclusion*) echo success; exit 0 ;;
-  "run view 900 "*status*) echo completed; exit 0 ;;
+  "api repos/{owner}/{repo}/actions/runs/900 "*) echo success; exit 0 ;;
   "api "*) exit 0 ;;   # no Cloudflare check-runs posted
   *) echo "fake gh: unhandled: $a" >&2; exit 1 ;;
 esac
@@ -179,7 +178,7 @@ run_land() { # name [flags...] -> sets OUT, RC
   [ -z "${LAND_TEST_SHOW:-}" ] || printf '%s\n' "$OUT" | sed 's/^/    | /'   # LAND_TEST_SHOW=1: print what land said
 }
 npm_log() { cat "$FAKE/npm-log" 2>/dev/null || true; }
-suite_untouched() { ! grep -q "^run view 800" "$FAKE/calls" && ! grep -q "^workflow run e2e" "$FAKE/calls"; }
+suite_untouched() { ! grep -q "^api repos/{owner}/{repo}/actions/runs/800" "$FAKE/calls" && ! grep -q "^workflow run e2e" "$FAKE/calls"; }
 dispatched() { [ -f "$FAKE/dispatched" ]; }
 small_pr() { printf '10 2 1\nworker/domain/sync.ts\n' > "$FAKE/pr-size"; }
 large_pr() { printf '250 50 3\nworker/domain/sync.ts\napp/pages/Calendar.tsx\nshared/types.ts\n' > "$FAKE/pr-size"; }
@@ -203,6 +202,9 @@ BEFORE="$(git -C "$W/approvalprep" rev-parse HEAD)"
 run_land approvalprep
 check "rc 0 (was: STOPPED: could not sync main, rc 1)" [ "$RC" -eq 0 ]
 check "main watched to success" has "completed success"
+# 22 Nov 2026 hostile review F1: main's run is read once per poll through one api GET (1 REST request, 0 on a
+# 304), never through `run view` (2 requests, and it was two of them per poll) or `run watch` (every 3 s)
+check "main's run 900 was read once, by one api GET, never run view or run watch" eval '[ "$(grep -c "^api repos/{owner}/{repo}/actions/runs/900" "$FAKE/calls")" -eq 1 ] && ! grep -qE "^run (view|watch) 900" "$FAKE/calls"'
 check "her dirty file is byte-for-byte hers" [ "$(cat "$W/approvalprep/artifacts/a.json")" = '{"v":"hers"}' ]
 check "her local main was not moved" [ "$(git -C "$W/approvalprep" rev-parse HEAD)" = "$BEFORE" ]
 # #138 review: ~/bin/gh must not sleep past the whole land's 65-min wait (one owner of waiting).
@@ -221,6 +223,9 @@ echo 'Bad "Name"' > "$FAKE/pr-workflow"
 run_land approvalprep
 check "rc 0" [ "$RC" -eq 0 ]
 check "main watched to success" has "completed success"
+# 22 Nov 2026 hostile review F1: main's run is read once per poll through one api GET (1 REST request, 0 on a
+# 304), never through `run view` (2 requests, and it was two of them per poll) or `run watch` (every 3 s)
+check "main's run 900 was read once, by one api GET, never run view or run watch" eval '[ "$(grep -c "^api repos/{owner}/{repo}/actions/runs/900" "$FAKE/calls")" -eq 1 ] && ! grep -qE "^run (view|watch) 900" "$FAKE/calls"'
 check "the quoted name never reached the run list" eval '! grep -q "^run list --branch main .*Bad" "$FAKE/calls"'
 
 echo "=== 1c. an already-merged PR skipped step 1, so its checks are read for the workflow ==="
@@ -347,7 +352,7 @@ fixture build-first-fixture promote
 run_promote build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
 check "says it is waiting on run 777" has "promote run 777 in flight for ${ORIGIN_MAIN:0:7}"
-check "waited to the run's conclusion (3 reads: two pending, one success)" [ "$(grep -c '^run view 777' "$FAKE/calls")" -eq 3 ]
+check "waited to the run's conclusion (3 reads: two pending, one success)" [ "$(grep -c '^api repos/{owner}/{repo}/actions/runs/777' "$FAKE/calls")" -eq 3 ]
 check "read production AFTER the run (deployment record answered)" has "promote run 777 finished: success"
 check "NOTHING TO PROMOTE — the run shipped that sha" has "NOTHING TO PROMOTE"
 check "no deploy ran on top of it" [ ! -f "$FAKE/npm-ran" ]
@@ -377,7 +382,7 @@ fixture build-first-fixture promote
 : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
 run_promote build-first-fixture --run-e2e
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
-check "waited for the in-flight e2e run 800, did not dispatch" [ "$(grep -c '^run view 800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
+check "waited for the in-flight e2e run 800, did not dispatch" [ "$(grep -c '^api repos/{owner}/{repo}/actions/runs/800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
 check "then waited for the promote run it triggered" has "promote run 777 in flight"
 check "NOTHING TO PROMOTE — promote.yml shipped the head" has "shipped main's head ${ORIGIN_MAIN:0:7}"
 check "no deploy from this side" [ ! -f "$FAKE/npm-ran" ]
@@ -396,7 +401,7 @@ run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "says why: 300 lines ≥ 200" has "LARGE CHANGE — 300 lines changed (+250/-50) ≥ 200"
 check "staging deployed first, from the merge sha" grep -qx "head=$ORIGIN_MAIN" "$FAKE/npm-ran"
-check "waited for the in-flight e2e run 800 (adopted, not doubled)" [ "$(grep -c '^run view 800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
+check "waited for the in-flight e2e run 800 (adopted, not doubled)" [ "$(grep -c '^api repos/{owner}/{repo}/actions/runs/800' "$FAKE/calls")" -ge 1 ] && ! grep -q '^workflow run' "$FAKE/calls"
 check "then waited for the promote run the green fired" has "promote run 777 in flight"
 check "LANDED — promote.yml shipped it" has "LANDED" && has "promote.yml shipped it to production"
 check "never WAITING" eval '! has "WAITING"'
@@ -421,7 +426,7 @@ check "the production deployment is recorded at that sha" grep -q "\"ref\":\"$OR
 check "…carrying the reason" grep -qF "land #7, $SMALL_REASON" "$FAKE/deploy-record"
 check "LANDED — staging and production" has "LANDED — #7 is merged, main is green, staging and production run ${ORIGIN_MAIN:0:7}"
 check "the plan line says production, not waiting" has "${ORIGIN_MAIN:0:7}: staging production (e2e on this sha: no completed run)"
-check "…but --run-e2e forces the suite for any size" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land build-first-fixture --run-e2e; has "LARGE CHANGE — --run-e2e given" && has "LANDED" && grep -q "^run view 800" "$FAKE/calls"'
+check "…but --run-e2e forces the suite for any size" eval 'rm -f "$FAKE/calls"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; run_land build-first-fixture --run-e2e; has "LARGE CHANGE — --run-e2e given" && has "LANDED" && grep -q "^api repos/{owner}/{repo}/actions/runs/800" "$FAKE/calls"'
 
 echo "=== 16b. a small PR, the last e2e verdict on main is green: ships ==="
 fixture build-first-fixture promote
@@ -519,7 +524,7 @@ small_pr; echo "$BASE" > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "
 run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "names the unproven commit and why it is large" has "LARGE CHANGE — main carries ${BIG:0:7} (big unproven change) past production ${BASE:0:7}, large and not yet proven: 250 lines changed (+250/-0) ≥ 200"
-check "the suite ran (run 800 adopted)" grep -q '^run view 800' "$FAKE/calls"
+check "the suite ran (run 800 adopted)" grep -q '^api repos/{owner}/{repo}/actions/runs/800' "$FAKE/calls"
 check "never shipped as a small change" eval '! has "SMALL CHANGE"'
 check "LANDED on the green suite" has "LANDED"
 
@@ -529,7 +534,7 @@ MERGESHA="$ORIGIN_MAIN" ; export MERGESHA
 small_pr; echo tls > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
 run_land build-first-fixture
 check "says so" has "LARGE CHANGE — what production runs could not be read"
-check "the suite ran" grep -q '^run view 800' "$FAKE/calls"
+check "the suite ran" grep -q '^api repos/{owner}/{repo}/actions/runs/800' "$FAKE/calls"
 check "never shipped as a small change" eval '! has "SMALL CHANGE"'
 
 echo "=== 18d. landing a merged PR that production already runs (or has passed): nothing deployed, never backwards ==="
@@ -645,7 +650,7 @@ check "the broken copy differs" eval '! cmp -s "$LAND" "$BROKEN"'
 history build-first-fixture
 small_pr; echo "$BASE" > "$FAKE/prod-state"; : > "$FAKE/e2e-pending"; echo 1 > "$FAKE/promote-ticks"
 LAND="$BROKEN" run_land build-first-fixture
-check "the broken land shipped the 250-line change as 'small', suite never run (18b catches it)" eval 'has "SMALL CHANGE" && ! grep -q "^run view 800" "$FAKE/calls" && npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
+check "the broken land shipped the 250-line change as 'small', suite never run (18b catches it)" eval 'has "SMALL CHANGE" && ! grep -q "^api repos/{owner}/{repo}/actions/runs/800" "$FAKE/calls" && npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
 
 echo "=== negative proof: a boss-os route that does not name deploy.yml races it ==="
 BROKEN="$W/land-boss-race"; sed 's/ ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;/ ; E2E_WF="e2e" ;;/' "$LAND" > "$BROKEN"
@@ -683,7 +688,7 @@ fixture build-first-fixture promote
 : > "$FAKE/promote-inflight"; echo 2 > "$FAKE/promote-ticks"; mkdir "$W/build-first-fixture/node_modules"
 LAND="$BROKEN" run_promote build-first-fixture
 check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
-check "…without ever watching run 777" eval '! grep -q "^run view 777" "$FAKE/calls"'
+check "…without ever watching run 777" eval '! grep -q "^api repos/{owner}/{repo}/actions/runs/777" "$FAKE/calls"'
 
 echo "=== 21. her bypass files ONE engineering check on Open Loops after a green land, never blocks it ==="
 cat > "$W/stub.mjs" <<'JS'

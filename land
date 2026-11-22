@@ -580,18 +580,31 @@ smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to s
   echo "     smoke FAILED: $1 -> ${body:-no answer}"
   return 1
 }
+# --- run_conclusion begin (tests/test-land-queue.sh evals this block verbatim) ---
+# ONE READ PER POLL, A MINUTE APART (22 Nov 2026 hostile review F1): every wait here read the run twice
+# (`gh run view --json conclusion` then `--json status`, 2 REST requests each) every 20 s, after a
+# `gh run watch` that polled every 3 s, so one e2e wait of up to 58 min cost ~700 of the account's 5,000
+# REST calls an hour. A run's conclusion comes from one `gh api …/actions/runs/<id>` GET (1 request, and 0
+# when ~/bin/gh revalidates it with its ETag and GitHub answers 304), every POLL_SECS (60: e2e and CI here
+# take 10-58 min, so a minute late is nothing). Empty = still running, or not read (the callers' own
+# deadlines turn a run that is never read into a named stop, never a pass).
+POLL_SECS="${LAND_POLL_SECS:-60}"
+run_conclusion() { # $1 run id -> its conclusion, empty while it runs or when unreadable
+  gh api "repos/{owner}/{repo}/actions/runs/$1" --jq '.conclusion // ""' 2>/dev/null
+}
+# --- run_conclusion end ---
 # Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
 # duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
 wait_run_bounded() { # $1 run id  $2 ceiling seconds
   local rid="$1" deadline=$(( $(date +%s) + $2 )) conc=""
   while :; do
-    conc="$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+    conc="$(run_conclusion "$rid")"
     [ -n "$conc" ] && break
     if [ "$(date +%s)" -ge "$deadline" ]; then
       gh run cancel "$rid" >/dev/null 2>&1 || true
       echo "cancelled-at-ceiling"; return 1
     fi
-    sleep 20
+    sleep "$POLL_SECS"
   done
   echo "$conc"
 }
@@ -829,17 +842,17 @@ queue_inflight() { # -> "<run id>\t<workflow>\t<sha>" of the first post-merge ru
   return 0
 }
 queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 one ran past its ceiling (named on stdout)
-  local row rid wf sha ceil deadline
+  local row rid wf sha ceil deadline conc
   while row="$(queue_inflight)"; [ -n "$row" ]; do
     IFS=$'\t' read -r rid wf sha <<<"$row"
     ceil=$(( $(last_duration "$wf") * 3 / 2 )); [ "$ceil" -ge 600 ] || ceil=600
     echo "     queue: $wf run $rid on main ${sha:0:7} is still running — waiting for it before merging (ceiling $((ceil / 60)) min)"
     deadline=$(( $(date +%s) + ceil ))
-    while [ -z "$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)" ]; do
+    while conc="$(run_conclusion "$rid")"; [ -z "$conc" ]; do
       [ "$(date +%s)" -lt "$deadline" ] || { echo "NAMED STOP [QUEUE_RUN_PAST_CEILING] $wf run $rid on main ran past $((ceil / 60)) min; nothing was merged. Read it: gh run view $rid"; return 1; }
-      sleep 20
+      sleep "$POLL_SECS"
     done
-    echo "     queue: $wf run $rid finished: $(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+    echo "     queue: $wf run $rid finished: $conc"
   done
   return 0
 }
@@ -876,7 +889,7 @@ gate_lines() { # $1 jq path into land-surfaces.json -> its patterns joined into 
   jq -er "[$1] | flatten | map(select(type == \"string\")) | join(\"|\")" "$LAND_SURFACES" 2>/dev/null
 }
 surface_re() { # stdin: every path on main -> one ERE of what people see in this repo
-  local tree types t detect surf re
+  local tree types detect surf re
   tree="$(cat)"; re="$(gate_lines '.everywhere')" || return 1
   types="$(jq -r '.types[] | "\(.detect)\t\(.surfaces | join("|"))"' "$LAND_SURFACES")" || return 1
   while IFS=$'\t' read -r detect surf; do
@@ -1340,17 +1353,17 @@ fi
 # A transient API error must not end the wait either — that is the same "silence looks like
 # failure" trap one layer down. Read errors are tolerated for a while and only become an answer
 # if they persist to the deadline.
-gh run watch "$RID" >/dev/null 2>&1 || true
-CONC=""; STAT=""
+# (One read per poll, a minute apart: run_conclusion, above. The `gh run watch` that came first polled
+# every 3 s and was dropped, 22 Nov 2026.)
+CONC=""
 DEADLINE=$(( $(date +%s) + 2700 ))   # 45 min: CI here runs ~14 min, twice over is ample
 while :; do
-  CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
-  STAT="$(gh run view "$RID" --json status -q '.status' 2>/dev/null)"
+  CONC="$(run_conclusion "$RID")"
   [ -n "$CONC" ] && break
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
-  sleep 20
+  sleep "$POLL_SECS"
 done
-echo "     ${STAT:-unknown} ${CONC:-unreadable}"
+echo "     ${CONC:+completed }${CONC:-unreadable}"
 case "$CONC" in
   success) : ;;
   "")
@@ -1371,13 +1384,12 @@ case "$CONC" in
       say "     cancelled with NO later commit on main — nothing superseded it. Re-running $RID."
       gh run rerun "$RID" >/dev/null 2>&1 || die "could not re-run $RID. #$PR IS MERGED and NOT deployed; main has no green run for $MSHA. Re-run it by hand: gh run rerun $RID"
       sleep 15
-      gh run watch "$RID" >/dev/null 2>&1 || true
       CONC=""; DEADLINE=$(( $(date +%s) + 2700 ))
       while :; do
-        CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
+        CONC="$(run_conclusion "$RID")"
         [ -n "$CONC" ] && [ "$CONC" != "cancelled" ] && break
         [ "$(date +%s)" -ge "$DEADLINE" ] && break
-        sleep 20
+        sleep "$POLL_SECS"
       done
       echo "     re-run: ${CONC:-unreadable}"
       case "$CONC" in

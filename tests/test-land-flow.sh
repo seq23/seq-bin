@@ -66,6 +66,9 @@ answer() { # mode-file default
     tls) echo 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout' >&2; exit 1 ;;
     tls-once) if [ -f "$FAKE_DIR/$1.failed" ]; then echo "$2"; exit 0; fi
               : > "$FAKE_DIR/$1.failed"; echo 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout' >&2; exit 1 ;;
+    ratelimit) echo 'HTTP 403: API rate limit exceeded for user ID 1.' >&2; exit 1 ;;
+    ratelimit-once) if [ -f "$FAKE_DIR/$1.failed" ]; then echo "$2"; exit 0; fi
+              : > "$FAKE_DIR/$1.failed"; echo 'HTTP 403: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include the request ID' >&2; exit 1 ;;
     401) echo 'HTTP 401: Requires authentication (https://api.github.com/graphql)' >&2; echo 'Try authenticating with:  gh auth login' >&2; exit 1 ;;
     *) echo "$m"; exit 0 ;;
   esac
@@ -75,13 +78,22 @@ case "$a" in
   # the merge queue (test-land-queue.sh covers it): nothing in flight, no recent land, in every case here.
   "run list --workflow "*"--status in_progress"*|"run list --workflow "*"--status queued"*|"pr list --state merged"*) exit 0 ;;
   "pr view "*"state,mergeCommit"*) merged && echo "MERGED/$MERGESHA" || echo "OPEN/"; exit 0 ;;
-  "pr checks "*) answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
+  # pending-reads N: the next N checks reads answer pending (a queued run), then the normal answer.
+  "pr checks "*) n="$(cat "$FAKE_DIR/pending-reads" 2>/dev/null || echo 0)"
+    if [ "$n" = forever ] || [ "$n" -gt 0 ] 2>/dev/null; then
+      [ "$n" = forever ] || echo $((n - 1)) > "$FAKE_DIR/pending-reads"
+      echo "[{\"name\":\"test\",\"bucket\":\"pending\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"}$(cat "$FAKE_DIR/pending-also" 2>/dev/null)]"; exit 0
+    fi
+    answer checks "[{\"name\":\"test\",\"bucket\":\"pass\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"},{\"name\":\"Cloudflare Pages\",\"bucket\":\"pass\",\"link\":\"https://dash.cloudflare.com/x/fe13d725-4827-bc619\"}]" ;;
+  "pr view "*baseRefName*) answer base main ;;
+  # the allowance GitHub reports (land reads it with --jq): spent, back in 3 s.
+  "api rate_limit"*) echo $(( $(date +%s) + 3 )); exit 0 ;;
   "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # pr-meta = the PR's files/body/comments JSON (case 1d); absent = one non-screen file, no body.
   # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
   "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
-  "pr view "*"files,body,comments"*) cat "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
+  "pr view "*"files,body,comments"*) sed "s/@HEAD@/${HEADSHA:0:8}/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
@@ -90,6 +102,7 @@ case "$a" in
   "pr merge "*) case "$(cat "$FAKE_DIR/merge" 2>/dev/null)" in
       graphql500) echo 'GraphQL: Something went wrong while executing your query on 2026-10-30T14:26:18Z. Please include `F1A0:283603:182C90:4E979C:6AE4A908` when reporting this issue.' >&2; exit 1 ;;
       refused) echo 'GraphQL: Pull Request is not mergeable (mergePullRequest)' >&2; exit 1 ;;
+      ratelimit-once) if [ ! -f "$FAKE_DIR/merge.failed" ]; then : > "$FAKE_DIR/merge.failed"; echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2; exit 1; fi ;;
     esac; : > "$FAKE_DIR/merged"; exit 0 ;;
   "pr view "*"--json state "*) merged && echo MERGED || echo OPEN; exit 0 ;;
   "pr view "*mergeCommit*) echo "$MERGESHA"; exit 0 ;;
@@ -171,6 +184,10 @@ fixture() {
   git clone -q "$W/origin.git" "$W/$name"
   echo '{"v":2}' > "$W/pusher/artifacts/a.json"; git -C "$W/pusher" commit -qam "the merged PR"; git -C "$W/pusher" push -q origin HEAD:main
   ORIGIN_MAIN="$(git -C "$W/pusher" rev-parse HEAD)"; export ORIGIN_MAIN
+  # the PR's head: a real commit at refs/pull/7/head, so the STALE_PASS gate can read its history.
+  git -C "$W/pusher" checkout -q -b pr HEAD~1; echo pr > "$W/pusher/pr.txt"; git -C "$W/pusher" add pr.txt
+  git -C "$W/pusher" commit -qm "the PR"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+  git -C "$W/pusher" push -q origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
 }
 run_land() { # name [flags...] -> sets OUT, RC
   local name="$1"; shift
@@ -243,17 +260,17 @@ run_land approvalprep
 check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "Ship-ready: PASS — "'
 check "…and nothing was merged" eval '! merge_called'
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px at @HEAD@; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "with a Clicked through comment and a fresh Ship-ready PASS: rc 0" [ "$RC" -eq 0 ]
 check "…and it was merged" merge_called
 check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px at @HEAD@; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "a capitalised \"Looked at\" sign-off is accepted (21 Nov 2026: PBS #74 was refused for the capital L): rc 0" [ "$RC" -eq 0 ]
 fixture approvalprep
-echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px at @HEAD@; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
 
@@ -333,6 +350,46 @@ check "exit 1" [ "$RC" -eq 1 ]
 check "says not green — test: fail" has "not green — test: fail"
 check "a single read, no retry of a real answer" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
 check "not merged" eval '! merge_called'
+
+echo "=== 10b. pending checks are waited for, bounded (22 Nov 2026: land stopped at once on a queued check) ==="
+fixture approvalprep; echo 2 > "$FAKE/pending-reads"
+run_land approvalprep
+check "pending twice, then green: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…after 3 reads of the checks (two pending, one green)" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 3 ]
+check "…and it said what it waited for" has "waiting for 1 pending check(s): test"
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_PENDING_WAIT=0 bash "$LAND" 7 2>&1)"; RC=$?
+check "pending past the bound: rc 1, NAMED STOP [CHECKS_PENDING]" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [CHECKS_PENDING]"'
+check "…and nothing was merged" eval '! merge_called'
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+echo ',{"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/2"}' > "$FAKE/pending-also"
+LAND_PENDING_WAIT=2 run_land approvalprep   # bounded: a land that ignored the failure would wait, then stop as pending
+check "a failure beside a pending check stops at once: rc 1, not green — lint: fail" eval '[ "$RC" -eq 1 ] && has "lint: fail"'
+check "…after one read, no waiting" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
+check "…and nothing was merged" eval '! merge_called'
+
+echo "=== 10d. a spent allowance is waited out, then the land carries on (22 Nov 2026, #134 died at 09:35 CT) ==="
+fixture approvalprep; echo ratelimit-once > "$FAKE/checks"
+run_land approvalprep
+check "checks read rate-limited once: rc 0, merged (was: exit 75, could not verify (auth))" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…it asked GitHub when the allowance resets, and said it was waiting" eval 'grep -q "^api rate_limit" "$FAKE/calls" && has "allowance is spent; waiting"'
+check "…and never called it an auth failure" eval '! has "could not verify (auth)"'
+fixture approvalprep; echo ratelimit-once > "$FAKE/merge"
+run_land approvalprep
+check "the merge call rate-limited once: waited, merged on the second call, rc 0" eval '[ "$RC" -eq 0 ] && [ "$(grep -c "^pr merge" "$FAKE/calls")" -eq 2 ]'
+fixture approvalprep; echo ratelimit > "$FAKE/checks"
+OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=1 bash "$LAND" 7 2>&1)"; RC=$?
+check "a reset past the bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
+
+echo "=== 10c. a stacked PR (base is not main) is refused (22 Nov 2026, westpeek-live #122) ==="
+fixture approvalprep; echo work/random-role-codes > "$FAKE/base"
+run_land approvalprep
+check "base work/random-role-codes: rc 1, NAMED STOP [STACKED_PR] naming the base" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [STACKED_PR]" && has "work/random-role-codes"'
+check "…with the way out" has "gh pr edit 7 --base main"
+check "…and nothing was merged" eval '! merge_called'
+fixture approvalprep; echo tls > "$FAKE/base"
+run_land approvalprep
+check "the base unreadable: exit 75, could not verify, nothing merged" eval '[ "$RC" -eq 75 ] && ! merge_called'
 
 # --- land --promote against a repo that promotes itself (promote.yml) — 26 Sep 2026 ----------------
 # build-first-fixture's promote.yml deploys production on a green e2e. A person's `land --promote`

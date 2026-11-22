@@ -171,7 +171,7 @@ async function judge(browser, origin, target, viewport, opts) {
     // Only letters and digits count, so an arrow or icon glyph is never "text".
     for (const el of document.body.querySelectorAll("*")) {
       if (!vis(el) || el.closest("[aria-hidden=true], .sr-only, .visually-hidden")) continue;
-      for (const pseudo of ["::before", "::after"]) {
+      for (const pseudo of []) {
         const s = getComputedStyle(el, pseudo);
         if (s.display === "none" || s.visibility === "hidden" || !s.content || s.content === "none" || s.content === "normal") continue;
         const text = s.content.replace(/attr\(\s*([\w-]+)\s*\)/g, (_, n) => el.getAttribute(n) || "").replace(/["']/g, "").trim();

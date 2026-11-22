@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # brief-gate: every refusal and every pass, each proven (weekend post-mortem 22 Nov 2026).
-set -u; cd "$(dirname "$0")/.."; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; fail=0
+set -u; cd "$(dirname "$0")/.." || exit 1; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; fail=0
 mkdir -p "$T/tasks" "$T/s/subagents"
 printf 'STATUS: FAIL seq23/boss-os#539 abc 2026-11-22\n' > "$T/tasks/job.md"
 printf 'STATUS: PASS seq23/boss-os#540 abc 2026-11-22\n' > "$T/tasks/ok.md"

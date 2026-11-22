@@ -387,7 +387,7 @@ check "a failure beside a pending check stops at once: rc 1, not green — lint:
 check "…after one read, no waiting" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
 check "…and nothing was merged" eval '! merge_called'
 
-echo "=== 10e. no checks on a conflicted PR is named a merge conflict (22 Nov 2026, boss-os #539) ==="
+echo "=== 10f. no checks on a conflicted PR is named a merge conflict (22 Nov 2026, boss-os #539) ==="
 fixture approvalprep; touch "$FAKE/no-checks"; echo CONFLICTING > "$FAKE/mergeable"
 run_land approvalprep
 check "conflicted, no checks: rc 1, NAMED STOP [MERGE_CONFLICT]" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [MERGE_CONFLICT]"'

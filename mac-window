@@ -43,7 +43,8 @@ HEAVY_SLOTS_BUSY and lets its next tick try. The same label already running pass
   mac-window --self-test
 
 Test overrides (tests/test-mac-window.sh only): MAC_WINDOW_NOW=HH:MM, MAC_WINDOW_STATE, LAUNCHCTL,
-MAC_WINDOW_AGENTS, MAC_WINDOW_STOP_IN (seconds to the hard stop), MAC_WINDOW_WAIT_POLL (seconds).
+MAC_WINDOW_AGENTS, MAC_WINDOW_STOP_IN (seconds to the hard stop), MAC_WINDOW_WAIT_POLL (seconds),
+MAC_WINDOW_STOP_WHEN (a file: the stop also waits until it exists, so a test stops a job only once it is ready).
 """
 import datetime as dt
 import json
@@ -300,6 +301,7 @@ def run(cls, label, cmd, no_wait):
             say("HEAVY_SAME_JOB %s already holds its slot; passing through (its own lock decides)" % label)
             return subprocess.call(cmd)
         poll = float(os.environ.get("MAC_WINDOW_WAIT_POLL", "60"))
+        waiting = False
         while True:
             ok, holders = take_slot(label, want)
             if ok:
@@ -314,6 +316,9 @@ def run(cls, label, cmd, no_wait):
                 say("HEAVY_SLOTS_BUSY %s: no free slot before 06:30 (held by %s); pending for 22:00"
                     % (label, ", ".join(holders)))
                 return 0
+            if not waiting:
+                waiting = True
+                say("HEAVY_WAITING %s: slots held by %s; it starts when one frees" % (label, ", ".join(holders)))
             time.sleep(poll)
     if clear_pending(label):
         say("PENDING_CLEARED %s: this run is the one it was owed" % label)
@@ -324,15 +329,18 @@ def run(cls, label, cmd, no_wait):
     return run_until_stop(label, cmd)
 
 
-def kill_group_but_me(sig):
-    """Signal every other process in this guard's group (the job's stragglers), never the guard."""
+def others_in_group():
+    """Every other live process in this guard's group (the job and its grandchildren), never the guard."""
     out = subprocess.run(["pgrep", "-g", str(os.getpgrp())], capture_output=True, text=True).stdout.split()
-    for pid in out:
-        if int(pid) != os.getpid():
-            try:
-                os.kill(int(pid), sig)
-            except OSError:
-                pass
+    return [int(p) for p in out if int(p) != os.getpid()]
+
+
+def kill_group_but_me(sig):
+    for pid in others_in_group():
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
 
 
 def run_until_stop(label, cmd):
@@ -352,21 +360,31 @@ def run_until_stop(label, cmd):
         pass
     child = subprocess.Popen(cmd)
     try:
+        ready = os.environ.get("MAC_WINDOW_STOP_WHEN")
         while child.poll() is None:
-            if time.time() >= stop_at:
+            if time.time() >= stop_at and (not ready or os.path.exists(ready)):
                 say("STOPPING_AT_0655 %s: TERM to its process group so it saves its place" % label)
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 os.killpg(os.getpgrp(), signal.SIGTERM)
+                # The whole group gets the same grace: a grandchild still saving its place when the job's
+                # own process exits is waited for, never KILLed mid-save; only what outlasts it is KILLed.
+                grace_end = time.time() + float(os.environ.get("MAC_WINDOW_KILL_AFTER", "180"))
                 try:
-                    child.wait(timeout=float(os.environ.get("MAC_WINDOW_KILL_AFTER", "180")))
-                    say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night"
-                        % (label, child.returncode))
-                    kill_group_but_me(signal.SIGKILL)   # a straggler that ignored the TERM never runs past 06:55
+                    child.wait(timeout=max(0.0, grace_end - time.time()))
                 except subprocess.TimeoutExpired:
                     kill_group_but_me(signal.SIGKILL)
                     child.wait()
                     say("NAMED STOP [KILLED_AT_WINDOW_END] %s ignored TERM for 3 minutes and was killed" % label)
                     return 75
+                while others_in_group() and time.time() < grace_end:
+                    time.sleep(0.05)
+                left = others_in_group()
+                kill_group_but_me(signal.SIGKILL)   # a straggler that ignored the TERM never runs past 06:55
+                if left:   # part of the job was KILLed, so it did not stop cleanly: the same named stop as above
+                    say("NAMED STOP [KILLED_AT_WINDOW_END] %s: %d process(es) it started ignored TERM past the grace and were killed (the job itself exited %s)"
+                        % (label, len(left), child.returncode))
+                    return 75
+                say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night" % (label, child.returncode))
                 return 0
             time.sleep(min(5.0, max(0.05, stop_at - time.time())))
         return child.returncode

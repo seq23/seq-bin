@@ -1,6 +1,6 @@
 #!/bin/bash
 # 21 Nov 2026 (the Mac's day, her ruling): the Mac is off 07:00-10:00 and heavy work runs at night, so the
-# run days moved to the night BEFORE Tue/Sat: Mon+Fri 22:15, retry 22:20, ahead of the PBS fill's 22:30 ramp.
+# run days (owner 22 Nov 2026): Tue+Sat 22:15, retry 22:20 (Mon+Fri 21-22 Nov after the Mac-day move).
 # CI sweep — Monday and Friday 22:15 CT, under launchd (launchd/com.seq.ci-sweep.plist
 # in this repo), with one automatic retry at 22:20 if that run does not end green
 # (launchd/com.seq.ci-sweep-retry.plist -> ci-sweep-retry-if-red.sh, which

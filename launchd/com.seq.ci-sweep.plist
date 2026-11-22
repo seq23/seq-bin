@@ -3,17 +3,17 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.seq.ci-sweep</string>
-  <!-- Monday and Friday, 22:15 local (CT). 16 Nov 2026, owner: Tue+Sat (Wed+Sat 13-16 Nov); 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00,
+  <!-- Tuesday and Saturday (owner, 22 Nov 2026; Mon+Fri 21-22 Nov), 22:15 local (CT). 16 Nov 2026, owner: Tue+Sat (Wed+Sat 13-16 Nov); 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00,
        first run Sat 14 Nov — replaces the daily cadence (her design 23 Sep
        2026 at 06:00, moved to 07:00 on 24 Sep 2026). Each run day: one
        progress-driven run with a 3h30 budget (done ~01:45) that parks what
        only she can clear, fixes and merges the rest, and sends one morning
        summary. If it does not end MAIN-GREEN, com.seq.ci-sweep-retry.plist
        tries it exactly once more at 22:20 the same night; a second non-green
-       ending waits for the next Mon/Fri 22:15 run, briefed with what both
+       ending waits for the next Tue/Sat 22:15 run, briefed with what both
        tries did. If the Mac is asleep at 22:15, launchd fires the missed run
        once at wake. Two calendar entries, one per weekday (launchd Weekday:
-       1 = Monday, 5 = Friday).
+       2 = Tuesday, 6 = Saturday).
        Versioned in seq23/seq-bin (launchd/com.seq.ci-sweep.plist); install with
        the steps in README.md. ci-sweep-selftest.sh asserts this schedule. -->
   <key>ProgramArguments</key>
@@ -24,8 +24,8 @@
   </array>
   <key>StartCalendarInterval</key>
   <array>
-    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
-    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
   </array>
   <key>StandardOutPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/launchd.log</string>
   <key>StandardErrorPath</key><string>/Users/sequoiataylor/Library/Logs/ci-sweep/launchd.err</string>

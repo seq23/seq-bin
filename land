@@ -1047,7 +1047,8 @@ open_loops_post() {
 file_bypass_check() {
   local slug body out poster="$OPEN_LOOPS_POSTER" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
-  body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
+  # Due tomorrow, her rule for the bypass (21 Nov 2026): the merged diff is checked the next day.
+  body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal", next_date: "tomorrow",
     title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",
     finish_line: "every automatic fail in engineering.md checked on the merged diff; fails fixed or dated",
     next_step: "Read the merged change against the automatic fails in engineering.md; fix each fail now or give it a dated row."}')"

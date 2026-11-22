@@ -81,6 +81,9 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   ok) sleep "${FAKE_LAND_SECS:-0}"; echo "1/5  verifying PR #$1 myself"; : > "$F/merged"; echo "LANDED"; exit 0 ;;
   nomerge) echo "1/5  verifying"; exit 0 ;;
   red) echo "4/5  e2e"; printf '\033[31mSTOPPED: NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 9 ended failure\033[0m\n'; exit 1 ;;
+  ratelimit-once) # GitHub's allowance spent on the first land only (22 Nov 2026: land stopped 4 PRs this way)
+    [ -f "$F/land-limited" ] || { : > "$F/land-limited"; printf '\033[31mSTOPPED: could not verify (auth) — the sha of green run 1 could not be read: HTTP 403: API rate limit exceeded\033[0m\n'; exit 1; }
+    echo "1/5  verifying PR #$1 myself"; : > "$F/merged"; echo "LANDED"; exit 0 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"
           echo "npm npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 google AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
@@ -158,6 +161,7 @@ reset; echo red > "$FAKE/land-mode"
 la 9 --task redjob; lockgone
 check "STATUS: FAIL names the failing step and the log" eval 'line1 "$T/redjob.md" | grep -q "^STATUS: FAIL t/fixture#9 .*E2E_RED_AFTER_LARGE_CHANGE.*log $T/logs/redjob-9.log"'
 check "…sheet stays open (not in done/)" eval '[ -f "$T/redjob.md" ] && [ ! -e "$T/done/redjob.md" ]'
+check "…due TODAY in Central (fixable now), never tomorrow by default" eval 'posts | jq -e --arg d "$(TZ=America/Chicago date +%F)" "select(.next_date == \$d)" >/dev/null'
 check "…one row, owner claude, stop LAND_AFTER_PR_9" eval '[ "$(posts | grep -c .)" -eq 1 ] && posts | jq -e "select(.owner == \"claude\" and .stop == \"LAND_AFTER_PR_9\" and .repo == \"t/fixture\")" >/dev/null'
 check "…next_step is one sentence naming the PR, the step and the sheet" eval 'posts | jq -r .next_step | grep -q "E2E_RED.*t/fixture#9.*$T/redjob.md"'
 check "…the sheet says the row was filed" grep -q 'Open Loops row LAND_AFTER_PR_9 filed' "$T/redjob.md"
@@ -165,11 +169,23 @@ check "…the sheet says the row was filed" grep -q 'Open Loops row LAND_AFTER_P
 reset; la 9 --task redjob; lockgone
 check "a later green try of the same PR: PASS and the row closed" eval 'line1 "$T/done/redjob.md" | grep -q "^STATUS: PASS" && posts | jq -e "select(.stop == \"LAND_AFTER_PR_9\" and .cleared == true)" >/dev/null'
 
+echo "=== the poster: every open row says which day it means ==="
+reset; node "$HERE/../open-loops.mjs" '{"repo":"t/x","stop":"NO_DAY","owner":"claude","business":"personal","title":"t"}' > "$W/out" 2>&1; RC=$?
+check "a row with no next_date: refused NAMED STOP [OPEN_LOOPS_NO_DAY] (rc 2), nothing posted" eval '[ "$RC" -eq 2 ] && has "OPEN_LOOPS_NO_DAY" && [ -z "$(posts)" ]'
+node "$HERE/../open-loops.mjs" '{"repo":"t/x","stop":"D","owner":"claude","business":"personal","title":"t","next_date":"tomorrow"}' >/dev/null 2>&1
+check "…\"tomorrow\" is resolved to tomorrow's date in Central" eval 'posts | jq -e --arg d "$(TZ=America/Chicago date -v+1d +%F 2>/dev/null || TZ=America/Chicago date -d tomorrow +%F)" "select(.stop == \"D\" and .next_date == \$d)" >/dev/null'
+node "$HERE/../open-loops.mjs" '{"repo":"t/x","stop":"D","cleared":true}' >/dev/null 2>&1
+check "…a closing post needs no day" eval 'posts | jq -e "select(.stop == \"D\" and .cleared == true)" >/dev/null'
+
 echo "=== outage: unknown, never PASS ==="
 reset; echo ratelimit > "$FAKE/checks-mode"; echo $(( $(date +%s) + 7200 )) > "$FAKE/reset-at"
-la 10 --task ratelimited; lockgone
-check "allowance spent with its reset after the wait ends: FAIL unknown naming the reset, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit: GitHub.s allowance resets in 12[01] min" && [ ! -f "$FAKE/land-ran" ]'
-check "…and it did not burn the wait asking again (one checks read)" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 1 ]'
+LAND_AFTER_RATE_HOLD_MAX_SECS=1 la 10 --task ratelimited; lockgone
+check "allowance spent past every wait: FAIL naming the rate limit, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit: GitHub.s allowance resets in" && [ ! -f "$FAKE/land-ran" ]'
+check "…a wait, not a failure: NO Open Loops row, the sheet says why and when to run again" eval '[ -z "$(posts)" ] && grep -q "no Open Loops row (a wait, not a failure)" "$T/ratelimited.md"'
+check "…started over after each reset wait, 3 starts in all, one checks read each (never burning the wait)" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 3 ] && [ "$(grep -c "starting over" "$T/logs/ratelimited-10.log")" -eq 2 ]'
+reset; echo ratelimit-once > "$FAKE/land-mode"; echo $(( $(date +%s) + 1 )) > "$FAKE/reset-at"
+LAND_AFTER_RATE_HOLD_MAX_SECS=10 la 31 --task landlimited; lockgone
+check "land stopped by a spent allowance (the 22 Nov 403): waits for the reset, lands again, PASS, no row" eval 'line1 "$T/done/landlimited.md" | grep -q "^STATUS: PASS" && [ "$(grep -c . "$FAKE/land-log")" -eq 2 ] && [ -z "$(posts | jq -c "select(.cleared != true)")" ]'
 reset; echo flaky > "$FAKE/checks-mode"
 LAND_AFTER_READ_PATIENCE_SECS=10 la 23 --task flaky; lockgone   # 1+2 s of backoff; 10 s so a slow second never gives up early
 check "F2: two network failures reading checks are asked again with backoff, then PASS" eval 'line1 "$T/done/flaky.md" | grep -q "^STATUS: PASS" && grep -q "asking again in" "$T/logs/flaky-23.log"'

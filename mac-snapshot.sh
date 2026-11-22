@@ -56,7 +56,7 @@ notify() {  # $1 = ok|stop  $2 = one line  $3 = what to do (stop only)  $4 = own
   if [ "$1" = ok ]; then
     body=$(node -e 'console.log(JSON.stringify({repo:"seq23/seq-bin",business:"personal",owner:"claude",stop:"MAC_SNAPSHOT",cleared:true,title:process.argv[1],finish_line:"a verified encrypted snapshot is on sequoialtaylor'"'"'s Drive"}))' "$2")
   else
-    body=$(node -e 'console.log(JSON.stringify({repo:"seq23/seq-bin",business:"personal",owner:process.argv[3],stop:"MAC_SNAPSHOT",title:process.argv[1],next_step:process.argv[2].slice(0,400),finish_line:"a verified encrypted snapshot is on sequoialtaylor'"'"'s Drive"}))' "$2" "$3" "$4")
+    body=$(node -e 'console.log(JSON.stringify({repo:"seq23/seq-bin",business:"personal",owner:process.argv[3],stop:"MAC_SNAPSHOT",next_date:"today",title:process.argv[1],next_step:process.argv[2].slice(0,400),finish_line:"a verified encrypted snapshot is on sequoialtaylor'"'"'s Drive"}))' "$2" "$3" "$4")
   fi
   if [ "${MAC_SNAPSHOT_NO_NOTIFY:-}" = 1 ]; then log "NOTIFY (test, not sent) $body"; return 0; fi
   osascript -e "display notification \"${2//\"/}\" with title \"Mac snapshot\"" >/dev/null 2>&1 || true

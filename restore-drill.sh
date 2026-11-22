@@ -57,7 +57,7 @@ trap cleanup EXIT
 notify() {  # $1 = ok|stop  $2 = one line
   local body
   # shellcheck disable=SC2016  # a JavaScript template literal, not a shell expansion
-  body=$(node -e 'const [s,l]=process.argv.slice(1);const b={repo:"seq23/seq-bin",business:"personal",owner:"claude",stop:"RESTORE_DRILL",title:l,finish_line:"every backup restores and reads (~/bin/restore-drill.sh exits 0)"};if(s==="ok")b.cleared=true;else b.next_step=`Read ${process.argv[3]}, fix the backup or the drill at the root, then run ~/bin/restore-drill.sh`;console.log(JSON.stringify(b))' "$1" "$2" "$LOG")
+  body=$(node -e 'const [s,l]=process.argv.slice(1);const b={repo:"seq23/seq-bin",business:"personal",owner:"claude",stop:"RESTORE_DRILL",title:l,finish_line:"every backup restores and reads (~/bin/restore-drill.sh exits 0)"};if(s==="ok")b.cleared=true;else b.next_date="today",b.next_step=`Read ${process.argv[3]}, fix the backup or the drill at the root, then run ~/bin/restore-drill.sh`;console.log(JSON.stringify(b))' "$1" "$2" "$LOG")
   if [ "${DRILL_NO_NOTIFY:-}" = 1 ]; then log "NOTIFY (test, not sent) $body"; return 0; fi
   osascript -e "display notification \"${2//\"/}\" with title \"Restore drill\"" >/dev/null 2>&1 || true
   (cd "$VR" && npm run -s vault:run -- node "$BIN/open-loops.mjs" "$body") >>"$LOG" 2>&1 \

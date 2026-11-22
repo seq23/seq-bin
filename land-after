@@ -28,7 +28,9 @@
 # PR and each sheet (two atomic locks). The PASS line may stand in the body or in a comment by the repo's
 # owner account (land's review_text). Never PASS on a guess: a GitHub read that does not answer is asked
 # again with backoff for LAND_AFTER_READ_PATIENCE_SECS (10 min), and a spent allowance is waited out to its
-# reset when that falls inside the wait; only then is it `FAIL unknown: <reason>`. land exiting 0 with the
+# reset when that falls inside the wait; only then is it `FAIL unknown: <reason>`. A spent allowance past the
+# wait is never a failure row: the worker waits for the reset and starts over (3 starts), filing nothing.
+# A failure row is due today in Central (it can be fixed now). land exiting 0 with the
 # PR not merged is `FAIL NAMED STOP [LAND_MERGED_NOTHING]` (Rule 0).
 # Every run deletes files older than 14 days in done/ and logs/ only, never a log an open sheet names.
 # Open sheets are never deleted.
@@ -47,6 +49,9 @@ APPEAR_MAX="${LAND_AFTER_APPEAR_SECS:-300}"         # 5 min for checks to show u
 RETRY="${LAND_AFTER_RETRY_SECS:-2}"                # first backoff step; doubles to 60 s
 PATIENCE="${LAND_AFTER_READ_PATIENCE_SECS:-600}"    # how long one unanswered GitHub read is asked again
 START_WAIT="${LAND_AFTER_START_WAIT_SECS:-15}"      # how long the starter waits to see its worker running
+RATE_TRIES="${LAND_AFTER_RATE_TRIES:-3}"            # starts in all, across GitHub allowance resets (no row filed)
+RATE_HOLD="${LAND_AFTER_RATE_HOLD_SECS:-900}"       # the wait when the reset time cannot be read
+RATE_HOLD_MAX="${LAND_AFTER_RATE_HOLD_MAX_SECS:-3700}"  # never longer than one hourly reset
 KEEP_MIN=$((14 * 1440)); STALE_LANDING_MIN=90; STALE_OPEN_MIN=$((7 * 1440))
 
 say() { printf 'land-after: %s\n' "$*"; }
@@ -123,7 +128,7 @@ move_done() { # $1 slug -> done/<slug>.md (an older done copy of the same slug i
 file_fail_row() { # $1 repo $2 pr $3 slug $4 reason $5 log
   local stop="LAND_AFTER_PR_$2" body out msg
   body="$(jq -nc --arg repo "$1" --arg stop "$stop" --arg pr "$2" --arg reason "$4" --arg log "$5" --arg sheet "$TASKS/$3.md" --arg slug "$3" \
-    '{repo: $repo, stop: $stop, owner: "claude", business: "personal",
+    '{repo: $repo, stop: $stop, owner: "claude", business: "personal", next_date: "today",
       title: "Land of \($repo)#\($pr) failed: \($reason | .[0:90])",
       finish_line: "\($repo)#\($pr) merged and deployed green, or closed with a reason",
       next_step: "Read \($log), fix the failing step (\($reason | .[0:120])) on \($repo)#\($pr), then run land-after \($pr) --task \($slug) again (sheet \($sheet))."}')"
@@ -184,7 +189,7 @@ status() {
 # ============================== worker (detached) ==============================
 worker() {
   local DIR="$1" REPO="$2" PR="$3" SLUG="$4" LOG="$5" LOCK="$6" SLOCK="$7" HEADSHA="$8"
-  local THENS=() FINISHED="" ERRF LANDOUT c
+  local THENS=() FINISHED="" ERRF LANDOUT c WORKER_ARGS=("$@") BEFORE_MERGE=1
   # The --then commands come in a file only this user can read, never on the command line (where ps shows them).
   if [ -f "$LOCK/then" ]; then while IFS= read -r -d '' c; do THENS+=("$c"); done < "$LOCK/then"; fi
   SHEET_REPO="$REPO"; SHEET_PR="$PR"; SHEET_TITLE="(sheet recreated at finish)"
@@ -199,6 +204,26 @@ worker() {
     FINISHED=1
     local reason
     reason="$(printf '%s' "$1" | tr '\n' ' ' | redact | cut -c1-220)"
+    # A spent GitHub allowance is a wait, not a failure (22 Nov 2026): until the merge is confirmed (land resumes
+    # a PR already merged, so starting over never merges twice), the worker waits for the reset and starts over, up to RATE_TRIES times, and files no Open Loops row. Out of
+    # tries, line 1 says FAIL (rate limit) for the next reader; still no row, nothing is broken.
+    if grep -qiE 'rate limit|abuse detection' <<<"$reason"; then
+      local try="${LAND_AFTER_RATE_TRY:-1}" reset left
+      if [ -n "$BEFORE_MERGE" ] && [ "$try" -lt "$RATE_TRIES" ]; then
+        reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(.reset) | max // empty' 2>/dev/null)"
+        left="$RATE_HOLD"; [[ "$reset" =~ ^[0-9]+$ ]] && left=$(( reset + 5 - $(date +%s) ))
+        [ "$left" -ge 1 ] || left=1; [ "$left" -le "$RATE_HOLD_MAX" ] || left="$RATE_HOLD_MAX"
+        set_status "$SLUG" "STATUS: landing $REPO#$PR $HEADSHA $(now) — GitHub's allowance is spent; landing again in $(( (left + 59) / 60 )) min (try $((try + 1)) of $RATE_TRIES); log $LOG"
+        echo "=== rate limit ($reason): waiting ${left}s for GitHub's reset, then starting over (try $((try + 1)) of $RATE_TRIES); no Open Loops row"
+        sleep "$left"
+        rm -f "$ERRF" "$LANDOUT"
+        LAND_AFTER_RATE_TRY=$((try + 1)) exec "$SELF" --worker "${WORKER_ARGS[@]}"
+      fi
+      set_status "$SLUG" "STATUS: FAIL $REPO#$PR ${MERGE_SHA:-$HEADSHA} $(now) — $reason; log $LOG"
+      add_note "$SLUG" "GitHub's allowance stayed spent through $try tries; no Open Loops row (a wait, not a failure). Run land-after $PR --task $SLUG again after the reset."
+      echo "OUTPUT land-after $REPO#$PR FAIL — $reason (rate limit: no Open Loops row)"
+      exit 1
+    fi
     set_status "$SLUG" "STATUS: FAIL $REPO#$PR ${MERGE_SHA:-$HEADSHA} $(now) — $reason; log $LOG"
     file_fail_row "$REPO" "$PR" "$SLUG" "$reason" "$LOG"
     echo "OUTPUT land-after $REPO#$PR FAIL — $reason"
@@ -280,6 +305,7 @@ worker() {
     || fail "unknown: land exited 0 but the merge could not be confirmed ($(head -1 "$ERRF"))"
   local state; state="$(jq -r '.state' <<<"$view")"; MERGE_SHA="$(jq -r '.mergeCommit.oid // empty' <<<"$view")"
   { [ "$state" = MERGED ] && [ -n "$MERGE_SHA" ]; } || fail "NAMED STOP [LAND_MERGED_NOTHING] land exited 0 but $REPO#$PR is $state with no merge commit"
+  BEFORE_MERGE=""   # a start-over now would run the --then steps twice (land itself resumes a merged PR safely)
 
   # 4. each --then, in order; the first failure is the FAIL.
   local cmd

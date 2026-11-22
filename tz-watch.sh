@@ -128,7 +128,7 @@ done < <(installers)
 if [ -z "${TZ_WATCH_INSTALLERS:-}" ]; then "$BIN/launchd-reload" --pending | sed 's/^/  /'; fi
 if [ -n "$failed" ]; then
   if [ "$(cat "$STATE/open-row" 2>/dev/null)" != "$failed" ]; then
-    body=$(printf '{"repo":"seq23/seq-bin","owner":"claude","business":"personal","stop":"TZ_WATCH_INSTALL_FAILED","title":"Jobs not moved to the Mac'"'"'s new time zone (%s)","finish_line":"every installer reinstalled for %s","next_step":"Read ~/Library/Logs/tz-watch.log, fix the failing installer(s):%s. tz-watch retries every hour."}' "$zone" "$zone" "$failed")
+    body=$(printf '{"repo":"seq23/seq-bin","owner":"claude","business":"personal","stop":"TZ_WATCH_INSTALL_FAILED","next_date":"today","title":"Jobs not moved to the Mac'"'"'s new time zone (%s)","finish_line":"every installer reinstalled for %s","next_step":"Read ~/Library/Logs/tz-watch.log, fix the failing installer(s):%s. tz-watch retries every hour."}' "$zone" "$zone" "$failed")
     if post_row "$body"; then echo "$failed" > "$STATE/open-row"; else say "NAMED STOP [OPEN_LOOPS_POST_FAILED] the Open Loops row could not be posted; the log line above stands."; fi
   fi
   exit 1

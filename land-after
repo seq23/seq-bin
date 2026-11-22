@@ -94,7 +94,7 @@ load_land_blocks() {
   block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p; /^# --- open_loops begin/,/^# --- open_loops end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  declare -F review_text pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in open_loops_post >/dev/null
+  declare -F review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in open_loops_post >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -351,8 +351,10 @@ main() {
   review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
   if ! owner_override <<<"$body"; then
+    local why
     reviewer="$(signoff Ship-ready <<<"$review")" \
-      || refuse "$REPO#$PR has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"
+      || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"
+           refuse "$REPO#$PR has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"; }
     pass_line Ship-ready <<<"$review" | covers_engineering \
       || refuse "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
     is_builder "$reviewer" "$(builders <<<"$VIEW")" \

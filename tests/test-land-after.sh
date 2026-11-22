@@ -294,6 +294,17 @@ reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "passerby"}, author
 la 34 --task strangercomment
 check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
 
+echo "=== a PASS voided by a later VERDICT: fail says so, and how to post it again (22 Nov 2026: 4 PRs refused 'no PASS') ==="
+FAILC='[{"authorAssociation": "OWNER", "createdAt": "2026-11-22T14:00:00Z", "body": "VERDICT: fail\n- F1 the cap is unbounded"}]'
+reset "$GOOD"; printf '%s' "$FAILC" > "$FAKE/comments"
+la 35 --task voided
+check "a PASS in the body before an owner VERDICT: fail: refused, nothing started (the newest verdict still wins)" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/voided.md" ]'
+check "…the refusal says the PASS is voided by the later fail, and when" eval 'has "PASS in the PR body does not count" && has "later VERDICT: fail comment (22 Nov 14:00 UTC) voids it"'
+check "…and gives the fix: the PASS again as a new comment, at the head" eval 'has "gh pr comment 35 -R t/fixture" && has " at ${HEADSHA:0:8}; Engineering: PASS"'
+reset "Fixes it."; jq -nc --arg b "$GOOD" '[{authorAssociation: "NONE", createdAt: "2026-11-22T13:00:00Z", body: $b}, {authorAssociation: "OWNER", createdAt: "2026-11-22T14:00:00Z", body: "VERDICT: fail"}]' > "$FAKE/comments"
+la 36 --task voided-stranger
+check "abuse: a stranger's PASS before an owner fail is never named as voided (it never counted): the plain refusal" eval '[ "$RC" -eq 1 ] && has "has no reviewer PASS line" && ! has "does not count" && ! has "session_rev123"'
+
 echo "=== F2 (review of #137): the PASS is for this head, checked before anything starts ==="
 SHALESS='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
 reset "$SHALESS"

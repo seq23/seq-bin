@@ -41,7 +41,9 @@ pr_head() { # leaves main pushed, then a PR commit on top -> PR_HEAD
 }
 meta() { # body [files json] [extra json] -> PR view JSON
   local f='[{"path":"src/sync.ts"}]'; [ -z "${2:-}" ] || f="$2"
-  local b="$1"; [ -n "${NOPROOF:-}" ] || b="$b"$'\n\n''## Mutation proof'$'\n''| alpha +1 back to +0 | tests/sync.test.ts alpha goes red |'
+  local b="$1"; [ -n "${NOPROOF:-}" ] || b="$b"$'\n\n''## Mutation proof'$'\n''- alpha +1 back to +0: tests/sync.test.ts alpha goes red'
+  # a code PR (the default files) carries a fresh reviewer's PASS too, unless NOREVIEW (22 Nov 2026: the gate is real for code)
+  [ -n "${2:-}" ] || [ -n "${NOREVIEW:-}" ] || b="$b"$'\n''Ship-ready: PASS — code reviewer session_01REVIEW looked at the diff and its tests at @HEAD@; Engineering: PASS'
   jq -n --arg b "$b" --argjson f "$f" \
     '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
@@ -101,6 +103,14 @@ check "an owner-account comment signed by the builder -> still refused as the bu
 two_comments() { jq --arg a "$2" --arg b "$3" '.comments = [{authorAssociation: "OWNER", body: $a}, {authorAssociation: "OWNER", body: $b}]' <<<"$1"; }
 gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" $'VERDICT: fail\n- F1 the page is blank at 390 px')"
 check "a later VERDICT: fail comment voids an earlier PASS comment -> refused (N9)" [ "$RC" -eq 1 ]
+check "…and says why: the PASS is voided by the later fail, post it again as a new comment" eval 'one_line && grep -q "PASS in an owner comment" <<<"$MSG" && grep -q "voids it" <<<"$MSG" && grep -q "NEW PR comment" <<<"$MSG"'
+gate "$(two_comments "$(meta "$GOOD" "$SITE")" $'VERDICT: fail\n- F1 blank' 'Thanks, fixing.')"
+check "a PASS in the body before an owner fail comment -> refused, naming the body as voided" eval '[ "$RC" -eq 1 ] && grep -q "PASS in the PR body does not count" <<<"$MSG"'
+gate "$(jq --arg c "$GOOD" '.comments = [{authorAssociation: "NONE", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail"}]' <<<"$(meta 'Tweaks the page.' "$SITE")")"
+check "abuse: a stranger's PASS before an owner fail is never called voided, never echoed" eval '[ "$RC" -eq 1 ] && ! grep -q "does not count" <<<"$MSG" && ! grep -q "session_01REVIEW" <<<"$MSG"'
+gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" $'VERDICT: fail\n- F1 blank' 'Thanks, fixing.')"
+check "a fail with no PASS before it -> the plain refusal (nothing to call voided)" eval '[ "$RC" -eq 1 ] && ! grep -q "does not count" <<<"$MSG" && grep -q "Ship-ready: PASS — " <<<"$MSG"'
+
 gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" $'VERDICT: fail\n- F1 blank' "$GOOD")"
 check "a PASS posted after the fail comment -> allowed (rc 0)" [ "$RC" -eq 0 ]
 echo "=== only a first-line VERDICT: fail voids a PASS (review R5) ==="
@@ -133,8 +143,27 @@ gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looke
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]
-gate "$(meta "" '[{"path":"worker/x.ts"},{"path":"tests/site/x.test.tsx"},{"path":"README.md"},{"path":"docs/a.html"}]')"
-check "server code, tests and docs need no line (rc 0)" [ "$RC" -eq 0 ]
+gate "$(meta "" '[{"path":"tests/site/x.test.tsx"},{"path":"README.md"},{"path":"docs/a.html"},{"path":"data/rows.json"}]')"
+check "tests, docs and data need no line (rc 0)" [ "$RC" -eq 0 ]
+
+echo "=== a reviewer's PASS on every code PR (22 Nov 2026, her words: make the reviewer gate real in land now) ==="
+CODE='[{"path":"worker/x.ts"},{"path":"README.md"}]'
+gate "$(meta "Adds the sync." "$CODE")"
+check "server code with no PASS -> refused in one line, naming the code and the line to post at the head" eval '[ "$RC" -eq 1 ] && one_line && grep -q "changes code (worker/x.ts" <<<"$MSG" && grep -q "Ship-ready: PASS — " <<<"$MSG" && grep -q "at $(sha_name "$PR_HEAD"); Engineering: PASS" <<<"$MSG"'
+gate "$(meta "$GOOD" "$CODE")"
+check "…with a fresh reviewer's PASS at the head -> allowed" [ "$RC" -eq 0 ]
+gate "$(meta 'Ship-ready: PASS — builder session_01BUILDER looked at the diff at @HEAD@; Engineering: PASS' "$CODE")"
+check "abuse: the builder's own session signs it -> refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
+gate "$(meta 'Ship-ready: PASS — me looked at the diff at @HEAD@; Engineering: PASS' "$CODE")"
+check "abuse: signed 'me' -> refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
+gate "$(with_comment "$(meta 'Adds the sync.' "$CODE")" "$GOOD" NONE)"
+check "abuse: the PASS in a stranger's comment -> refused" [ "$RC" -eq 1 ]
+gate "$(meta 'Ship-ready: PASS — reviewer session_01REVIEW looked at the diff at @HEAD@' "$CODE")"
+check "a PASS that does not cover engineering -> refused" eval '[ "$RC" -eq 1 ] && grep -q "Engineering: PASS" <<<"$MSG"'
+gate "$(meta "$GOOD" '[{"path":"worker/x.ts"},{"path":"wrangler.toml"}]')"
+check "code alone never needs Launch-ready (rc 0)" [ "$RC" -eq 0 ]
+gate "$(meta 'Owner override: "ship it, land it now" (22 Nov 2026 12:00 CT)' "$CODE")"
+check "her Owner override still skips it (rc 0)" [ "$RC" -eq 0 ]
 
 echo "=== launch-ready: something new goes public ==="
 gate "$(meta "$GOOD" '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
@@ -203,6 +232,8 @@ check "…no check suite on the commit (when it arrived is unknown) -> refused S
 : > "$W/suites-down"
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
 check "…GitHub not answering for the suites -> could not verify (rc 75), never a pass" eval '[ "$RC" -eq 75 ]'
+gate "$(at_comment "$(meta 'Adds the sync.' '[{"path":"worker/x.ts"}]')" 2026-01-03T00:00:00Z)"
+check "outage: a code PR whose PASS cannot be checked (GitHub not answering) -> could not verify (rc 75), never a pass" eval '[ "$RC" -eq 75 ]'
 rm -f "$W/suites-down"; pushed "$PR_HEAD" 2026-01-02T00:05:00Z
 gate "$(jq '.comments[0] |= del(.createdAt)' <<<"$(at_comment "$(meta 'Tweaks the page.' "$SITE")" x)")"
 check "…a comment whose time is missing -> refused STALE_PASS (unknown is never a pass)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
@@ -234,8 +265,8 @@ check "…a line naming another fix (#4, not #41) -> refused" [ "$RC" -eq 1 ]
 gate "$(meta "Changes alpha.")"; ask="$(sed -E 's/.*the line  //' <<<"$MSG")"
 gate "$(jq --arg c "${ask/<why a patch and not a rebuild of that design>/alpha is one line of arithmetic and the fix set the wrong constant}" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<"$(meta "Changes alpha.")")"
 check "…following the refusal's own words (an owner-account comment) -> allowed (R4)" [ "$RC" -eq 0 ]
-gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "OWNER", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail\n- F2 other"}]' <<<"$(meta "Changes alpha.")")"
-check "…a later fail verdict does not void the builder's Patch line (it is not a verdict)" [ "$RC" -eq 0 ]
+gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "OWNER", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail\n- F2 other"}, {authorAssociation: "OWNER", body: $p}]' --arg p "$GOOD" <<<"$(meta "Changes alpha.")")"
+check "…a later fail verdict does not void the builder's Patch line (it is not a verdict; the PASS after it stands)" [ "$RC" -eq 0 ]
 gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "NONE", body: $c}]' <<<"$(meta "Changes alpha.")")"
 check "…the same line from a non-owner account -> refused" [ "$RC" -eq 1 ]
 repo; LINE=6 TEXT='  return y * 3;' commit "fix(sync): beta triples (#42)"; pr_head 2 '  return x + 10;'
@@ -264,6 +295,34 @@ gate "$(NOPROOF=1 meta "Mutation proof: none — renames a local variable, no be
 check "…a reasoned none (6+ words) -> allowed" [ "$RC" -eq 0 ]
 gate "$(NOPROOF=1 meta "Mutation proof: none")"
 check "…a bare none -> refused" [ "$RC" -eq 1 ]
+echo "=== mutation proof by structure, on real PR bodies (review of #141: 3 of 8 real proofs were refused) ==="
+for f in seq-bin-139 seq-bin-138 boss-os-518; do
+  gate "$(NOPROOF=1 meta "$(cat "$HERE/tests/fixtures/proof/$f.md")")"
+  check "the real $f body, as its builder wrote it -> allowed" [ "$RC" -eq 0 ]
+done
+proof() { gate "$(NOPROOF=1 meta "Changes alpha."$'\n\n'"$1")"; }
+proof $'## Mutation proof\n| Fix undone | Red tests |\n|---|---|'
+check "a header-only table (any header words) -> refused" [ "$RC" -eq 1 ]
+proof $'## Mutation proof\n| Mutation | Red test |\n|---|---|\n| | |'
+check "a header and an empty row -> refused" [ "$RC" -eq 1 ]
+proof $'## Mutations\nNo tests exist.'
+check "'No tests exist.' -> refused" [ "$RC" -eq 1 ]
+proof $'## Mutation proof\n- [ ] each fix undone and its test seen red\n- cap check reverted: tests/cap.sh case 3 went red'
+check "an unticked [ ] box -> refused, even beside a real row" [ "$RC" -eq 1 ]
+proof 'Mutation proof: none — I did not have time'
+check "'none — I did not have time' -> refused" [ "$RC" -eq 1 ]
+proof $'**Mutations**\n- cap check reverted: tests/cap.sh case 3 went red'
+check "a bold **Mutations** opener -> allowed" [ "$RC" -eq 0 ]
+proof $'## Self-proof\n- cap check reverted: tests/cap.sh case 3 went red'
+check "a ## Self-proof heading -> allowed" [ "$RC" -eq 0 ]
+proof 'Mutation proof: reverted the cap, e2e/login.spec.ts went red'
+check "the proof on the heading line itself -> allowed" [ "$RC" -eq 0 ]
+proof $'## Mutation proof\n| Mutation | Red |\n|---|---|\n| `<=` to `<` in the cap | cap case 3 went red |'
+check "a row containing < -> allowed" [ "$RC" -eq 0 ]
+proof 'Mutation proof: none — a change to none of the logic paths, comments only'
+check "a reasoned none with a later 'none' in it -> allowed (the none sub is not greedy)" [ "$RC" -eq 0 ]
+proof $'## Mutation proof\nShip-ready: PASS — reviewer session_01REVIEW looked at the diff and its tests; Engineering: PASS'
+check "a reviewer's PASS line under the heading is not a proof row -> refused" [ "$RC" -eq 1 ]
 gate "$(NOPROOF=1 meta "Docs only." '[{"path":"README.md"},{"path":"tests/x.test.ts"}]')"
 check "docs and tests only need no proof (rc 0)" [ "$RC" -eq 0 ]
 gate "$(NOPROOF=1 meta 'Owner override: "ship it, land it now" (22 Nov 2026 12:00 CT)')"
@@ -290,7 +349,7 @@ neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering(
 neg "a PASS that is never checked against its commit" '/^fresh_pass()/a\
   return 0'
 neg "main's own commits counted as the PR's new code" 's/ --name-only "\$1\.\.\$2" --not origin\/main$/ --name-only "$1..$2"/; s/git rev-list --merges "\$1\.\.\$2" --not origin\/main/git rev-list --merges "$1..$2"/; s/--cc --name-only/-m --name-only/'
-neg "a quality gate that sees no surfaces" 's/^  \[ -n "\$files" \] || return 0$/  return 0/'
+neg "a quality gate that sees no surfaces or code" 's/^  \[ -n "\$files\$code" \] || return 0$/  return 0/'
 neg "a mutation gate that never reads the body" '/^proof_listed()/a\
   return 0'
 echo "test-land-gates: every gate refuses what it should and lets through what it should"

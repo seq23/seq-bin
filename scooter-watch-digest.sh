@@ -1,13 +1,14 @@
 #!/bin/bash
-# Partner-tail weekly digest — Monday 08:00 CT (launchd com.seq.scooter-watch-digest), 6 Oct 2026.
+# Partner-tail weekly digest — Monday 10:15 CT (launchd com.seq.scooter-watch-digest), 6 Oct 2026; moved from 08:00 on 21 Nov 2026
+# (the Mac is off 07:00-10:00).
 #
 # Compiles the last 7 days of state/mail-log.tsv (partner mail into the OS; mail from Scooter that
 # went around Porter) and state/fix-log.md (what the tail agents found and fixed) into one
 # plain-text email, sent through scooter-watch-report.mjs under the west-peek-os vault runner
 # (Resend, os@westpeek.ventures -> her westpeek.ventures mailbox (OWNER_ADDR)).
 #
-# RETRY: the plist also fires at 09:00 Monday (like the CI sweep's retry). launchd runs a missed
-# StartCalendarInterval at the next wake if the Mac was asleep at 08:00, so the 09:00 slot is the
+# RETRY: the plist also fires at 11:15 Monday (like the CI sweep's retry). launchd runs a missed
+# StartCalendarInterval at the next wake if the Mac was asleep at 10:15, so the 11:15 slot is the
 # belt to that brace; this script sends at most once per ISO week (state/digest-last-sent), so a
 # second firing after a successful send is a logged no-op.
 set -uo pipefail

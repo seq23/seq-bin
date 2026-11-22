@@ -52,7 +52,7 @@ for _ in $(seq 1 300); do [ -s "$T/port" ] && break; sleep 0.1; done  # up to 30
 [ -s "$T/port" ] || { echo "FAIL: stub intake did not start"; exit 1; }
 
 OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$T/port")/intake"
-export PATH="$T/stubbin:$PATH" OPEN_LOOPS_URL BOSS_OS_REPO="$BOSS" LAUNCHCTL="$T/stubbin/launchctl" LAUNCH_AGENTS_DIR="$T/agents" LAUNCHD_SRC="$T/src" \
+export LAUNCHD_RELOAD_STATE="$T/reload-state" PATH="$T/stubbin:$PATH" OPEN_LOOPS_URL BOSS_OS_REPO="$BOSS" LAUNCHCTL="$T/stubbin/launchctl" LAUNCH_AGENTS_DIR="$T/agents" LAUNCHD_SRC="$T/src" \
   TZ_WATCH_STATE="$T/state" TZ_WATCH_LOG="$T/tz.log" TZ_WATCH_NO_VAULT=1 BOSS_OPEN_LOOPS_TOKEN=olt_test
 INSTALL="seq-bin|$BIN/install-launchd.sh com.seq.drive-backup com.seq.ci-sweep"
 run(){ TZ_WATCH_ZONE="$1" TZ_WATCH_INSTALLERS="${2:-$INSTALL}" "$BIN/tz-watch.sh" > "$T/out" 2>&1; }
@@ -60,8 +60,8 @@ hour(){ tr -d '\n\t ' < "$T/agents/$1.plist" | grep -o '<key>Hour</key><integer>
 boots(){ grep -c bootstrap "$T/lctl.log" 2>/dev/null || echo 0; }
 
 run America/New_York || bad "first Eastern run exited non-zero: $(tail -8 "$T/out")"
-[ "$(hour com.seq.drive-backup)" = 2 ] || bad "Eastern: 01:40 Central should be Hour 2, got $(hour com.seq.drive-backup)"
-[ "$(hour com.seq.ci-sweep)" = 9 ] || bad "Eastern: Monday 08:00 Central should be Hour 9, got $(hour com.seq.ci-sweep)"
+[ "$(hour com.seq.drive-backup)" = 23 ] || bad "Eastern: 22:00 Central should be Hour 23, got $(hour com.seq.drive-backup)"
+[ "$(hour com.seq.ci-sweep)" = 23 ] || bad "Eastern: Monday 22:15 Central should be Hour 23, got $(hour com.seq.ci-sweep)"
 [ "$(cat "$T/state/seq-bin")" = "America/New_York 1" ] || bad "zone not recorded: $(cat "$T/state/seq-bin" 2>/dev/null)"
 b=$(boots); sum=$(cat "$T"/agents/*.plist | cksum)
 
@@ -71,17 +71,17 @@ run America/New_York || bad "unchanged zone exited non-zero"
 grep -q "in step" "$T/out" || bad "unchanged zone did not say it was in step"
 
 run America/Chicago || bad "Central run exited non-zero"
-[ "$(hour com.seq.drive-backup)" = 1 ] || bad "Central: drive-backup should be Hour 1, got $(hour com.seq.drive-backup)"
-[ "$(hour com.seq.ci-sweep)" = 8 ] || bad "Central: ci-sweep should be Hour 8, got $(hour com.seq.ci-sweep)"
+[ "$(hour com.seq.drive-backup)" = 22 ] || bad "Central: drive-backup should be Hour 22, got $(hour com.seq.drive-backup)"
+[ "$(hour com.seq.ci-sweep)" = 22 ] || bad "Central: ci-sweep should be Hour 22, got $(hour com.seq.ci-sweep)"
 
 echo com.seq.drive-backup > "$T/busy"; b=$(boots)
 run America/New_York || bad "deferred run exited non-zero"
 grep -q "TZ_WATCH_DEFERRED" "$T/out" || bad "a running job did not defer the reinstall"
-[ "$(boots)" = "$b" ] && [ "$(hour com.seq.drive-backup)" = 1 ] || bad "reinstalled under a running job"
+[ "$(boots)" = "$b" ] && [ "$(hour com.seq.drive-backup)" = 22 ] || bad "reinstalled under a running job"
 rm -f "$T/busy"
 run America/New_York || bad "back-to-Eastern run exited non-zero"
-[ "$(hour com.seq.drive-backup)" = 2 ] || bad "back to Eastern: drive-backup should be Hour 2 again, got $(hour com.seq.drive-backup)"
-[ "$(hour com.seq.ci-sweep)" = 9 ] || bad "back to Eastern: ci-sweep should be Hour 9 again"
+[ "$(hour com.seq.drive-backup)" = 23 ] || bad "back to Eastern: drive-backup should be Hour 23 again, got $(hour com.seq.drive-backup)"
+[ "$(hour com.seq.ci-sweep)" = 23 ] || bad "back to Eastern: ci-sweep should be Hour 23 again"
 
 run America/Chicago "broken|exit 7" && bad "a failing installer exited 0"
 grep -q "NAMED STOP \[TZ_WATCH_INSTALL_FAILED\] broken" "$T/out" || bad "a failing installer was not a named stop"

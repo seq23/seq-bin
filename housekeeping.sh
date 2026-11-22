@@ -1,5 +1,5 @@
 #!/bin/bash
-# Nightly Mac housekeeping (launchd com.seq.housekeeping, daily 03:30 Central, after the 01:40 CT
+# Nightly Mac housekeeping (launchd com.seq.housekeeping, daily 03:30 Central, after the 22:00 CT
 # drive backup). Approved 1 Nov 2026. The checks and the posts live in housekeeping.mjs; this wrapper
 # injects BOSS_OPEN_LOOPS_TOKEN from the Boss OS vault at run time (never echoed, one vault read) and
 # turns any failure into a named stop the log shows.

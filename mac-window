@@ -1,0 +1,405 @@
+#!/usr/bin/python3
+"""THE MAC'S DAY: the one time check every launchd job passes through (her ruling 21 Nov 2026, Central).
+
+Her words: "all the renderings that need the mac will work from 11pm to 7am and then ill let my mac
+rest from 7-10am and all other jobs need to begin at 10am onward", settled as "we can do 10-7", and
+"every day and wait instead of running" for this check. So:
+
+  class    may START                      stops
+  HEAVY    22:00-06:30                    TERM at 06:55 (the Mac goes off at 07:00), resumes next night
+  MORNING  any time but 07:00-09:59       before 07:00 by its schedule (morning email, briefs, grid)
+  LIGHT    10:00-21:59                    -
+  ANY      any time but 07:00-09:59       -   (pollers and the plumbing: runtime sync, tz watch, catch-up)
+
+07:00-09:59 the Mac is switched OFF, so nothing may need it then. Every day, weekends included.
+
+WAIT INSTEAD OF RUNNING. A job woken outside its window (a slot launchd replays after a sleep, a
+poller tick, a boot catch-up) never runs in the wrong window and never skips the day: it writes ONE
+pending record (~/.local/state/mac-window/pending/<label>) and prints a named line,
+`OUTSIDE_WINDOW <label> <class> ...`. `mac-window catch-up` (run by boss-os's slot catch-up at boot
+and every 30 minutes) starts each pending job ONCE when its window opens, with `launchctl kickstart`
+(which never restarts a running job). NO DOUBLE RUN: a guarded run that starts inside its window
+clears the record first, and catch-up leaves a record alone when the job's own next slot falls inside
+the window that is open now (that slot runs it). Paused jobs are never woken: a disabled label, or a
+YouTube job while the Peace Be Still fill holds the channels, stays pending.
+
+HEAVY SLOTS. At most 2 heavy jobs at once on this 8 GB Mac (CLAUDE.md). A heavy run takes
+MAC_WINDOW_SLOTS slots (default 1; the PBS fill's two lanes take 2). A calendar job waits for a free
+slot until 06:30, then becomes pending for the next night; an interval tick (--no-wait) just says
+HEAVY_SLOTS_BUSY and lets its next tick try. The same label already running passes straight through
+(its own lock decides).
+
+  mac-window check <CLASS> [HH:MM]                 exit 0 inside, 1 outside (pure; tests)
+  mac-window run <CLASS> <label> [--no-wait] -- <command...>
+  mac-window catch-up [--dry-run]
+  mac-window --self-test
+
+Test overrides (tests/test-mac-window.sh only): MAC_WINDOW_NOW=HH:MM, MAC_WINDOW_STATE, LAUNCHCTL,
+MAC_WINDOW_AGENTS, MAC_WINDOW_STOP_IN (seconds to the hard stop), MAC_WINDOW_WAIT_POLL (seconds).
+"""
+import datetime as dt
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+CENTRAL = "America/Chicago"
+CLASSES = ("HEAVY", "MORNING", "LIGHT", "ANY")
+REST = (7 * 60, 10 * 60)          # 07:00-09:59: the Mac is off
+HEAVY_START = (22 * 60, 6 * 60 + 30)
+HEAVY_STOP = 6 * 60 + 55
+DAY = (10 * 60, 22 * 60)
+MAX_HEAVY = 2
+YOUTUBE = ("com.howweknow.", "com.seq.shorts-arm", "com.seq.boss-comment-watch", "com.seq.oneshot.hwk-money")
+
+
+def now_central():
+    fake = os.environ.get("MAC_WINDOW_NOW")
+    if fake:
+        h, m = fake.split(":")
+        return dt.datetime(2026, 11, 23, int(h), int(m))   # a Monday; tests pass only the clock
+    os.environ["TZ"] = CENTRAL
+    time.tzset()
+    return dt.datetime.now()
+
+
+def minute(t):
+    return t.hour * 60 + t.minute
+
+
+def inside(cls, m):
+    """May a job of this class START at minute-of-day m (Central)? Pure."""
+    if cls == "HEAVY":
+        return m >= HEAVY_START[0] or m <= HEAVY_START[1]
+    if cls == "LIGHT":
+        return DAY[0] <= m < DAY[1]
+    return not (REST[0] <= m < REST[1])     # MORNING, ANY
+
+
+def opens(cls, m):
+    """The next minute-of-day the class may start, as HH:MM."""
+    o = {"HEAVY": HEAVY_START[0], "LIGHT": DAY[0]}.get(cls, REST[1])
+    return "%02d:%02d" % divmod(o, 60)
+
+
+def closes_in(cls, m):
+    """Minutes from m until this class's open window closes (only called inside)."""
+    if cls == "HEAVY":
+        end = HEAVY_START[1]
+    elif cls == "LIGHT":
+        end = DAY[1]
+    else:
+        end = REST[0]
+    return (end - m) % 1440 or 1440
+
+
+def state_dir(*p):
+    base = os.environ.get("MAC_WINDOW_STATE") or os.path.expanduser("~/.local/state/mac-window")
+    d = os.path.join(base, *p)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def say(line):
+    print("%s %s" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), line), flush=True)
+
+
+def lctl():
+    return os.environ.get("LAUNCHCTL", "launchctl")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# ─── heavy slots ────────────────────────────────────────────────────────────
+def held_slots(skip_label=None):
+    d = state_dir("heavy")
+    total, holders = 0, []
+    for name in os.listdir(d):
+        try:
+            rec = json.load(open(os.path.join(d, name)))
+        except (OSError, ValueError):
+            continue
+        if not alive(int(rec.get("pid", 0))):
+            try:
+                os.remove(os.path.join(d, name))
+            except OSError:
+                pass
+            continue
+        if name == skip_label:
+            continue
+        total += int(rec.get("slots", 1))
+        holders.append(name)
+    return total, holders
+
+
+def take_slot(label, want):
+    """Atomically take `want` slots for label. Returns (ok, holders)."""
+    lock = os.path.join(state_dir(), "heavy.lock")
+    for _ in range(100):
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            if time.time() - os.stat(lock).st_mtime > 30:
+                os.rmdir(lock)
+            time.sleep(0.1)
+    try:
+        used, holders = held_slots(skip_label=label)
+        if used + want > MAX_HEAVY:
+            return False, holders
+        with open(os.path.join(state_dir("heavy"), label), "w") as f:
+            json.dump({"pid": os.getpid(), "slots": want}, f)
+        return True, holders
+    finally:
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def own_slot_alive(label):
+    p = os.path.join(state_dir("heavy"), label)
+    try:
+        return alive(int(json.load(open(p)).get("pid", 0)))
+    except (OSError, ValueError):
+        return False
+
+
+# ─── pending ────────────────────────────────────────────────────────────────
+def pending_path(label):
+    return os.path.join(state_dir("pending"), label)
+
+
+def write_pending(label, cls, t, why):
+    p = pending_path(label)
+    first = not os.path.exists(p)
+    if first:
+        with open(p, "w") as f:
+            json.dump({"label": label, "class": cls, "woken": t.strftime("%Y-%m-%d %H:%M"), "why": why}, f)
+    return first
+
+
+def clear_pending(label):
+    p = pending_path(label)
+    if os.path.exists(p):
+        os.remove(p)
+        return True
+    return False
+
+
+# ─── run ────────────────────────────────────────────────────────────────────
+def run(cls, label, cmd, no_wait):
+    t = now_central()
+    m = minute(t)
+    if not inside(cls, m):
+        first = write_pending(label, cls, t, "outside")
+        say("OUTSIDE_WINDOW %s %s woken %02d:%02d; %s, runs once when its window opens at %s"
+            % (label, cls, t.hour, t.minute, "pending" if first else "already pending", opens(cls, m)))
+        return 0
+    if cls == "HEAVY":
+        want = int(os.environ.get("MAC_WINDOW_SLOTS", "1"))
+        if own_slot_alive(label):
+            say("HEAVY_SAME_JOB %s already holds its slot; passing through (its own lock decides)" % label)
+            return subprocess.call(cmd)
+        poll = float(os.environ.get("MAC_WINDOW_WAIT_POLL", "60"))
+        while True:
+            ok, holders = take_slot(label, want)
+            if ok:
+                break
+            if no_wait:
+                say("HEAVY_SLOTS_BUSY %s: %d heavy slot(s) held by %s; the next tick tries again"
+                    % (label, MAX_HEAVY, ", ".join(holders)))
+                return 0
+            m = minute(now_central())
+            if not inside("HEAVY", m):
+                write_pending(label, cls, now_central(), "slots busy until the start cutoff")
+                say("HEAVY_SLOTS_BUSY %s: no free slot before 06:30 (held by %s); pending for 22:00"
+                    % (label, ", ".join(holders)))
+                return 0
+            time.sleep(poll)
+    if clear_pending(label):
+        say("PENDING_CLEARED %s: this run is the one it was owed" % label)
+    if cls != "HEAVY":
+        os.execvp(cmd[0], cmd)
+    return run_until_stop(label, cmd)
+
+
+def run_until_stop(label, cmd):
+    """A heavy run, TERMed at 06:55 so it checkpoints before the 07:00 power-off."""
+    stop_in = os.environ.get("MAC_WINDOW_STOP_IN")
+    if stop_in is None:
+        t = now_central()
+        stop_in = ((HEAVY_STOP - minute(t)) % 1440) * 60 - t.second
+    stop_at = time.time() + float(stop_in)
+    child = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        while child.poll() is None:
+            if time.time() >= stop_at:
+                say("STOPPING_AT_0655 %s: TERM to its process group so it saves its place" % label)
+                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.wait(timeout=float(os.environ.get("MAC_WINDOW_KILL_AFTER", "180")))
+                    say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night"
+                        % (label, child.returncode))
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                    say("NAMED STOP [KILLED_AT_WINDOW_END] %s ignored TERM for 3 minutes and was killed" % label)
+                    return 75
+                return 0
+            time.sleep(min(5.0, max(0.05, stop_at - time.time())))
+        return child.returncode
+    finally:
+        try:
+            os.remove(os.path.join(state_dir("heavy"), label))
+        except OSError:
+            pass
+
+
+# ─── catch-up ───────────────────────────────────────────────────────────────
+def plist_json(label):
+    agents = os.environ.get("MAC_WINDOW_AGENTS") or os.path.expanduser("~/Library/LaunchAgents")
+    p = os.path.join(agents, label + ".plist")
+    try:
+        out = subprocess.run(["plutil", "-convert", "json", "-o", "-", p], capture_output=True, text=True)
+        return json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def next_own_slot_minutes(pl, t):
+    """Minutes from t to the job's next calendar slot (None when it has none); an interval or
+    KeepAlive job counts as 'soon' (0): its own tick runs it."""
+    if pl is None:
+        return None
+    if pl.get("StartInterval") or pl.get("KeepAlive"):
+        return 0
+    sci = pl.get("StartCalendarInterval")
+    if not sci:
+        return None
+    sci = sci if isinstance(sci, list) else [sci]
+    best = None
+    for add in range(0, 2):
+        day = t + dt.timedelta(days=add)
+        for s in sci:
+            if "Weekday" in s and int(s["Weekday"]) % 7 != (day.weekday() + 1) % 7:
+                continue
+            if "Day" in s and int(s["Day"]) != day.day:
+                continue
+            if "Month" in s and int(s["Month"]) != day.month:
+                continue
+            hours = [int(s["Hour"])] if "Hour" in s else range(24)
+            for h in hours:
+                at = day.replace(hour=h, minute=int(s.get("Minute", 0)), second=0, microsecond=0)
+                d = (at - t).total_seconds() / 60
+                if d > 0 and (best is None or d < best):
+                    best = d
+    return best
+
+
+def disabled_labels():
+    out = subprocess.run([lctl(), "print-disabled", "gui/%d" % os.getuid()], capture_output=True, text=True).stdout
+    dis = set()
+    for line in out.splitlines():
+        if "=> disabled" in line or "=> true" in line:
+            dis.add(line.split('"')[1] if '"' in line else line.split()[0])
+    return dis
+
+
+def youtube_paused(label):
+    fill = os.environ.get("PBS_FILL_FILE") or os.path.expanduser("~/.peace-be-still/library-fill.active")
+    return label.startswith(YOUTUBE) and os.path.exists(fill)
+
+
+def catch_up(dry):
+    t = now_central()
+    m = minute(t)
+    d = state_dir("pending")
+    names = sorted(os.listdir(d))
+    started = left = paused = waiting = 0
+    dis = disabled_labels() if names else set()
+    for label in names:
+        try:
+            rec = json.load(open(os.path.join(d, label)))
+        except (OSError, ValueError):
+            rec = {"class": "ANY"}
+        cls = rec.get("class", "ANY")
+        if not inside(cls, m):
+            waiting += 1
+            say("PENDING_WAITS %s %s: its window opens at %s" % (label, cls, opens(cls, m)))
+            continue
+        if label in dis or youtube_paused(label):
+            paused += 1
+            say("PENDING_PAUSED %s: %s; left pending, never woken while paused"
+                % (label, "disabled" if label in dis else "YouTube held for the PBS fill"))
+            continue
+        nxt = next_own_slot_minutes(plist_json(label), t)
+        if nxt is not None and nxt < closes_in(cls, m):
+            left += 1
+            say("PENDING_LEFT %s: its own slot in %d min runs it (no double run)" % (label, nxt))
+            continue
+        if dry:
+            say("WOULD_START %s %s" % (label, cls))
+            started += 1
+            continue
+        r = subprocess.run([lctl(), "kickstart", "gui/%d/%s" % (os.getuid(), label)], capture_output=True, text=True)
+        if r.returncode == 0:
+            started += 1
+            say("CAUGHT_UP %s %s: started once (woken %s)" % (label, cls, rec.get("woken", "?")))
+        else:
+            say("NAMED STOP [CATCHUP_FAILED] %s: kickstart said %s; left pending" % (label, (r.stderr or r.stdout).strip()[:120]))
+    say("OUTPUT mac-window catch-up: %d pending, %d started, %d left to their own slot, %d paused, %d waiting"
+        % (len(names), started, left, paused, waiting))
+    return 0
+
+
+def self_test():
+    cases = [("HEAVY", 22 * 60, True), ("HEAVY", 21 * 60 + 59, False), ("HEAVY", 6 * 60 + 30, True),
+             ("HEAVY", 6 * 60 + 59, False), ("LIGHT", 10 * 60, True), ("LIGHT", 9 * 60 + 59, False),
+             ("LIGHT", 22 * 60, False), ("MORNING", 6 * 60 + 59, True), ("MORNING", 7 * 60, False),
+             ("ANY", 10 * 60, True), ("ANY", 9 * 60 + 59, False)]
+    bad = [c for c in cases if inside(c[0], c[1]) != c[2]]
+    if bad:
+        print("SELF_TEST_FAILED %s" % bad)
+        return 1
+    print("OUTPUT mac-window self-test: %d boundary cases hold" % len(cases))
+    return 0
+
+
+def main(a):
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return 2
+    if a[0] == "--self-test":
+        return self_test()
+    if a[0] == "check" and len(a) >= 2 and a[1] in CLASSES:
+        if len(a) > 2:
+            os.environ["MAC_WINDOW_NOW"] = a[2]
+        m = minute(now_central())
+        ok = inside(a[1], m)
+        print("INSIDE" if ok else "OUTSIDE_WINDOW %s opens %s" % (a[1], opens(a[1], m)))
+        return 0 if ok else 1
+    if a[0] == "catch-up":
+        return catch_up("--dry-run" in a)
+    if a[0] == "run" and len(a) >= 5 and a[1] in CLASSES and "--" in a:
+        i = a.index("--")
+        flags, cmd = a[3:i], a[i + 1:]
+        if not cmd:
+            print("NAMED STOP [NO_COMMAND] mac-window run needs a command after --")
+            return 2
+        return run(a[1], a[2], cmd, "--no-wait" in flags)
+    print("NAMED STOP [BAD_USAGE] %s (classes: %s)" % (" ".join(a), ", ".join(CLASSES)))
+    return 2
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # a reader that stops early (grep -q) is not an error
+    sys.exit(main(sys.argv[1:]))

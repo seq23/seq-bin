@@ -204,3 +204,7 @@ jobs:
         run: ./tests/test-restore-drill.sh
       - name: the nightly drive-backup stays small and leaves nothing private on Drive
         run: zsh ./tests/test-drive-backup-guards.sh
+      - name: the Mac's day guard holds every class at the boundary, waits instead of running, never runs twice, stops heavy work at 06:55
+        run: ./tests/test-mac-window.sh
+      - name: a reload never unpauses, kills or loses a job, and a failed one keeps the old schedule
+        run: ./tests/test-launchd-reload.sh

@@ -407,7 +407,7 @@ PLIST="$BIN/launchd/com.seq.ci-sweep.plist"
 RETRY_PLIST="$BIN/launchd/com.seq.ci-sweep-retry.plist"
 RETRY_SCRIPT="$BIN/ci-sweep-retry-if-red.sh"
 SWEEP="$BIN/ci-sweep.sh"; PROMPT="$BIN/ci-sweep-prompt.md"; README="$BIN/README.md"
-NOTIFY="$BIN/ci-sweep-notify.sh"
+
 consistency=0
 read_schedule() {
   python3 - "$1" <<'PY'
@@ -435,17 +435,18 @@ print(" + ".join(parts)
       + (" ENVKNOBS" if "CI_SWEEP_" in args else ""))
 PY
 }
-WANT_PRIMARY="Tue 08:00 + Sat 08:00"
-WANT_RETRY="Tue 09:00 + Sat 09:00"
+# 21 Nov 2026 (the Mac's day): the night before each run day, ahead of the PBS fill's 22:30 ramp.
+WANT_PRIMARY="Mon 22:15 + Fri 22:15"
+WANT_RETRY="Mon 22:20 + Fri 22:20"
 if [ ! -f "$PLIST" ]; then
   bad "launchd/com.seq.ci-sweep.plist is missing — the schedule is not versioned"
 else
   consistency=$((consistency+1))
   sched="$(read_schedule "$PLIST")"
   if [ "$sched" = "$WANT_PRIMARY" ]; then
-    ok "the primary plist fires exactly Tuesday and Saturday at 08:00 — no other day, no other time, no interval, no env knobs, not at load"
+    ok "the primary plist fires exactly Monday and Friday at 22:15 — no other day, no other time, no interval, no env knobs, not at load"
   else
-    bad "the primary plist schedule is '$sched', expected exactly '$WANT_PRIMARY' (owner, 13 Nov 2026)"
+    bad "the primary plist schedule is '$sched', expected exactly '$WANT_PRIMARY' (the Mac's day, 21 Nov 2026)"
   fi
 fi
 if [ ! -f "$RETRY_PLIST" ]; then
@@ -454,9 +455,9 @@ else
   consistency=$((consistency+1))
   rsched="$(read_schedule "$RETRY_PLIST")"
   if [ "$rsched" = "$WANT_RETRY" ]; then
-    ok "the retry plist fires exactly Tuesday and Saturday at 09:00 — one hour after the primary, same two days, nothing else"
+    ok "the retry plist fires exactly Monday and Friday at 22:20 — five minutes after the primary (it waits for it), same two days, nothing else"
   else
-    bad "the retry plist schedule is '$rsched', expected exactly '$WANT_RETRY' (owner, 13 Nov 2026)"
+    bad "the retry plist schedule is '$rsched', expected exactly '$WANT_RETRY' (the Mac's day, 21 Nov 2026)"
   fi
   consistency=$((consistency+1))
   if grep -q 'ci-sweep-retry-if-red.sh' "$RETRY_PLIST"; then
@@ -475,34 +476,8 @@ else
     bad "ci-sweep-retry-if-red.sh no longer reads outcomes.tsv — what caps it at one retry?"
   fi
 fi
-if [ -f "$PLIST" ] && [ -f "$RETRY_PLIST" ]; then
-  # Each description must name the two days AND the primary hour together
-  # ("Tuesday and Saturday at 08:00", "Tue+Sat 08:00"), and the 09:00 retry.
-  DAYS_RE='Tue(sday)?[^.|]{0,40}Sat(urday)?[^.|]{0,40}08:00'
-  for f in "$README" "$SWEEP" "$PROMPT" "$NOTIFY" "$RETRY_SCRIPT"; do
-    consistency=$((consistency+1))
-    if grep -qE "$DAYS_RE" "$f"; then ok "$(basename "$f") states the Tue+Sat 08:00 primary schedule"
-    else bad "$(basename "$f") does not state Tue+Sat 08:00 — the docs have drifted from the plist"; fi
-    consistency=$((consistency+1))
-    if grep -q '09:00' "$f"; then ok "$(basename "$f") states the 09:00 retry"
-    else bad "$(basename "$f") does not state 09:00 — the retry has drifted out of the docs"; fi
-  done
-  consistency=$((consistency+1))
-  row="$(grep -E '^\| `ci-sweep\.sh` \|' "$README")"
-  if printf '%s' "$row" | grep -qE "$DAYS_RE" && printf '%s' "$row" | grep -q '09:00' \
-     && ! printf '%s' "$row" | grep -qE ':07:|:37|10:00|22:00|every 30|07:00|daily|tomorrow'; then
-    ok "the README row for ci-sweep.sh names Tue+Sat 08:00 and the 09:00 retry, and nothing older"
-  else
-    bad "the README row for ci-sweep.sh does not correctly describe Tue+Sat 08:00 + the 09:00 retry"
-  fi
-  # The daily cadence must not survive as a current-tense description anywhere
-  # the sweep speaks from: these phrases were what the 07:00/08:00 design said.
-  consistency=$((consistency+1))
-  stale_cadence="$(grep -nE "tomorrow's 07:00|07:00 tomorrow|07:00 daily|once a day at 07:00|today's 08:00 retry|08:00 today, once|fired once a day|runs at 07:00" \
-                   "$SWEEP" "$PROMPT" "$README" "$NOTIFY" "$RETRY_SCRIPT" "$PLIST" "$RETRY_PLIST" 2>/dev/null)"
-  if [ -z "$stale_cadence" ]; then ok "no current-tense daily-cadence phrase survives (07:00 tomorrow, today's 08:00 retry, …)"
-  else bad "the daily cadence is still described as current: $(printf '%s' "$stale_cadence" | head -3 | tr '\n' ' ')"; fi
-fi
+# The prose checks that stood here (every doc must say "Tue+Sat 08:00") were wording pins and are
+# gone (21 Nov 2026, CLAUDE.md: tests prove behaviour, never wording); the plist reads above are the truth.
 # RESUME ON WAKE (12 Oct 2026): a third plist, read the same way — label, a 300 s
 # StartInterval and NOTHING else (no calendar, not at load, no env knobs), invoking
 # ci-sweep-resume-on-wake.sh, never ci-sweep.sh directly. Proven negatively on 12 Oct

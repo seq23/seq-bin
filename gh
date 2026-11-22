@@ -172,8 +172,13 @@ bump() { printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$DIR/gen.$$" && mv 
 KIND="$(classify "$@")"
 
 case "$KIND" in
-  free|graphql)
-    log "$KIND" "${1:-} ${2:-}"
+  free)
+    log free "${1:-} ${2:-}"
+    exec "$REAL" "$@" ;;
+  graphql)
+    # never cached (a query may be a mutation), but held at the GraphQL floor like any pr read
+    [ -t 1 ] || wait_for_reset pr
+    log graphql "${1:-} ${2:-}"
     exec "$REAL" "$@" ;;
   write)
     # A write changes what the reads would say (a merge makes the PR MERGED, a dispatch adds a run), so
@@ -205,7 +210,8 @@ esac
 repo_hint=""
 has_flag -R "$@" || has_flag --repo "$@" || repo_hint="$(git config --get remote.origin.url 2>/dev/null)"
 # the branch always counts (with -R too: `gh pr view -R o/r` with no number still means this branch's PR)
-branch="$(git symbolic-ref -q HEAD 2>/dev/null || git rev-parse -q HEAD 2>/dev/null)"
+# and the checkout's commit: a push from here changes the answer, so it never reuses one from before it
+branch="$(git symbolic-ref -q HEAD 2>/dev/null) $(git rev-parse -q HEAD 2>/dev/null)"
 key="$(printf '%s\0' "$@" "${GH_REPO:-}" "${GH_HOST:-}" "$repo_hint" "$branch" | shasum -a 256 2>/dev/null | cut -c1-40)"
 [ -n "$key" ] || exec "$REAL" "$@"
 cache="$DIR/resp/$key"

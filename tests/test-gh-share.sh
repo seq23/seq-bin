@@ -151,4 +151,20 @@ grep -qx "answer-[0-9]* for pr view 16 --json state" "$T/slow" || fail "the read
 [ "$(real_calls)" = 3 ] || fail "a read that straddled a merge was kept and served after it ($(real_calls) calls, want 3)"
 pass=$((pass + 1))
 
+# 17. a new commit in this checkout (a push) is a new key: the answer from before it is never reused
+fresh; git init -q "$T/c17"; git -C "$T/c17" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+(cd "$T/c17" && gh pr checks >/dev/null)
+git -C "$T/c17" -c user.email=t@t -c user.name=t commit -q --allow-empty -m two
+(cd "$T/c17" && gh pr checks >/dev/null)
+[ "$(real_calls)" = 2 ] || fail "checks after a new commit were answered from before it ($(real_calls) calls, want 2)"
+pass=$((pass + 1))
+
+# 18. gh api graphql is held at a spent GraphQL budget like any pr read (never cached)
+fresh; export FAKE_GQL_REM=0 FAKE_GQL_RESET=$(( $(date +%s) + 3000 )) GH_SHARE_MAX_WAIT=60
+out="$(timeout 10 "$GH_UNDER_TEST" api graphql -f query='{viewer{login}}' </dev/null 2>"$T/err")"; rc=$?
+[ "$rc" = 75 ] && grep -q 'GH_ALLOWANCE_SPENT' "$T/err" || fail "api graphql at a spent GraphQL budget: rc $rc, want 75"
+fresh; gh api graphql -f query=q >/dev/null; gh api graphql -f query=q >/dev/null
+[ "$(real_calls)" = 2 ] || fail "api graphql was cached ($(real_calls) calls, want 2)"
+pass=$((pass + 1))
+
 echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers back off, a share per poller"

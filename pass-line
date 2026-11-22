@@ -22,6 +22,14 @@ else
   echo "REFUSED, nothing posted: land cannot read this as a sign-off (it needs \"<Ship-ready|Launch-ready>: PASS — <who> looked at <what>\"). Shape: $SHAPE"
   exit 1
 fi
+# land also needs the head the reviewer looked at (fresh_pass): the line must name the PR's current head.
+HEADSHA="$(gh pr view "$PR" -R "$REPO" --json headRefOid -q .headRefOid 2>/dev/null)"
+[[ "$HEADSHA" =~ ^[0-9a-f]{40}$ ]] || { echo "pass-line: could not read $REPO#$PR's head; nothing posted"; exit 75; }
+named=""
+for t in $(tr -cs '[:alnum:]' '\n' <<<"$LINE" | tr '[:upper:]' '[:lower:]' | grep -E '^[0-9a-f]{7,40}$' | grep '[a-f]'); do
+  [ "${HEADSHA:0:${#t}}" = "$t" ] && named=1
+done
+[ -n "$named" ] || { echo "REFUSED, nothing posted: the line must name the head it passed (${HEADSHA:0:8}); a PASS on an older head is STALE_PASS at land. Shape: $SHAPE"; exit 1; }
 if [ "${PASS_LINE_DRY:-}" = 1 ]; then echo "OK: land will read this line (dry run, not posted)"; exit 0; fi
 gh pr comment "$PR" -R "$REPO" --body "$LINE" || { echo "pass-line: the line is valid but posting failed; nothing was posted"; exit 1; }
 echo "OK: posted to $REPO#$PR, and land will read it"

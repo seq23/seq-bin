@@ -46,13 +46,35 @@ meta() { # body [files json] [extra json] -> PR view JSON
     '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
 }
+# gh, for the one read the gates make: when a commit reached GitHub (its earliest check suite, review F5 of #137).
+# $W/suites/<sha> holds that epoch; none is a commit with no suite; $W/suites-down is GitHub not answering.
+mkdir -p "$W/bin" "$W/suites"
+cat > "$W/bin/gh" <<SH
+#!/bin/bash
+case "\$*" in
+  "api repos/{owner}/{repo}/commits/"*"/check-suites"*)
+    [ -f "$W/suites-down" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    c="\${2#repos/\{owner\}/\{repo\}/commits/}"; c="\${c%%/*}"; cat "$W/suites/\$c" 2>/dev/null; exit 0 ;;
+esac
+echo "unexpected gh call: \$*" >&2; exit 1
+SH
+chmod +x "$W/bin/gh"
+pushed() { jq -rn --arg t "$2" '$t | fromdateiso8601' > "$W/suites/$1" || exit 1; }   # sha, when GitHub first saw it (jq: BSD and GNU date differ, and CI is Linux)
+# A short sha the gate can read: land takes 7-40 hex characters with at least one a-f (a bare number is a size, not a
+# commit), so a prefix that happens to be all digits (8 chars: about 1 in 40 commits) is lengthened, never a flake.
+eval "$(grep '^sha_name() ' "$LAND")"   # land's own helper, never a copy
 gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "$1")"; RC=$?
+  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
+check "sha_name: an all-digit 8-char prefix is lengthened to its first a-f (12345678901b…) -> 12345678901b" [ "$(sha_name 12345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 12345678901b ]
+check "sha_name: a prefix with a letter stays 8 characters" [ "$(sha_name 1a345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 1a345678 ]
+no_bare8() { ! grep -qE '[$][{][a-zA-Z0-9]+:0:8[}]' "$LAND"; }
+check "land never prints a bare 8-char sha for a reviewer to post (every one goes through sha_name)" no_bare8
 SITE='[{"path":"site/index.html"}]'
-GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px; Engineering: PASS'
+# @HEAD@ is the PR head's short sha, filled in by gate(): a PASS names the commit it looked at (STALE_PASS).
+GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px at @HEAD@; Engineering: PASS'
 
 run_cases() {
 echo "=== ship-ready: a PR that changes what people see ==="
@@ -107,7 +129,7 @@ gate "$(meta "$(printf 'Owner override: <her words> (date)')" "$SITE")"
 check "a placeholder override is not her words -> refused" [ "$RC" -eq 1 ]
 gate "$(meta "$(printf 'Owner override: ok')" "$SITE")"
 check "a one-word override is refused" [ "$RC" -eq 1 ]
-gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px; engineering: pass')" '[{"path":"src/mail/welcome.ts"}]')"
+gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px at @HEAD@; engineering: pass')" '[{"path":"src/mail/welcome.ts"}]')"
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]
@@ -117,13 +139,80 @@ check "server code, tests and docs need no line (rc 0)" [ "$RC" -eq 0 ]
 echo "=== launch-ready: something new goes public ==="
 gate "$(meta "$GOOD" '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "a new site (wrangler.toml added) with only Ship-ready -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "Launch-ready: PASS — " <<<"$MSG"'
-gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — launch reviewer session_01LAUNCH looked at logo, banner, bio, links, starter posts, 404' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
+gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — launch reviewer session_01LAUNCH looked at logo, banner, bio, links, starter posts, 404 at @HEAD@' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "…with a fresh Launch-ready PASS -> allowed" [ "$RC" -eq 0 ]
 gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — builder looked at the 404' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "…signed by the builder -> refused" [ "$RC" -eq 1 ]
 rm -f "$W/r/site/index.html"; git -C "$W/r" commit -qam "no pages"; git -C "$W/r" push -q origin HEAD:main
 gate "$(meta "$GOOD" '[{"path":"app/screens/Home.tsx"}]')"
 check "the repo's first surface ever needs Launch-ready" eval '[ "$RC" -eq 1 ] && grep -q "first surface" <<<"$MSG"'
+
+echo "=== a PASS is for the commit it names: STALE_PASS (22 Nov 2026) ==="
+# stale_pr: main pushed; the PR's commit A changes the page and is what the reviewer passed (PASSED).
+stale_pr() {
+  repo; git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q -b pr
+  echo '<h1>reviewed</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the page"; PASSED="$(git -C "$W/r" rev-parse HEAD)"
+}
+publish_pr() { PR_HEAD="$(git -C "$W/r" rev-parse HEAD)"; git -C "$W/r" push -q -f origin "HEAD:refs/pull/9/head"; git -C "$W/r" checkout -q main; git -C "$W/r" branch -q -D pr; }
+passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "$(sha_name "$PASSED")"; }
+stale_pr; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "a PASS naming the head -> allowed (rc 0)" [ "$RC" -eq 0 ]
+stale_pr; echo '<h1>changed after the review</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "after the PASS"; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "new code after the PASS -> refused STALE_PASS (rc 1)" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "site/index.html" <<<"$MSG"'
+stale_pr; git -C "$W/r" checkout -q main; echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"
+git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "a main merge after the PASS -> allowed, the PASS survives (rc 0)" [ "$RC" -eq 0 ]
+stale_pr; git -C "$W/r" checkout -q main; echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"
+git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-commit main
+echo '<h1>slipped into the merge</h1>' > "$W/r/site/index.html"; git -C "$W/r" add -A; git -C "$W/r" commit -qm "merge main"; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "new lines inside a merge commit -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+stale_pr; publish_pr
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS' "$SITE")"
+check "a PASS that names no commit -> refused STALE_PASS, with the head to name" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "names no commit" <<<"$MSG" && grep -q " at $(sha_name "$PR_HEAD"); Engineering: PASS" <<<"$MSG"'
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at deadbeef1; Engineering: PASS' "$SITE")"
+check "a PASS naming a commit not on the PR -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "names no commit" <<<"$MSG"'
+# Review F1 of #137: a re-check line names the old commit first ("the diff A..B", "diff since A … at B").
+stale_pr; echo '<h1>fixed after the fail</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the fix"; publish_pr
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff $(sha_name "$PASSED")..$(sha_name "$PR_HEAD") at 390 px; Engineering: PASS" "$SITE")"
+check "a re-check PASS on 'the diff <old>..<head>' -> allowed (the newest commit it names)" [ "$RC" -eq 0 ]
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(sha_name "$PASSED"), tests at $(sha_name "$PR_HEAD"); Engineering: PASS" "$SITE")"
+check "a re-check PASS on 'diff since <old> … at <head>' -> allowed" [ "$RC" -eq 0 ]
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(sha_name "$PASSED"); Engineering: PASS" "$SITE")"
+check "…naming only the old commit, with work after it -> still STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+# Review F2 of #137: the reviewer template's line names no commit; its time decides, where it is known.
+SHALESS='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS'
+at_comment() { jq --arg c "$SHALESS" --arg at "$2" '.comments = [{authorAssociation: "OWNER", createdAt: $at, body: $c}]' <<<"$1"; }
+stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-02T00:00:00Z; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
+pushed "$PR_HEAD" 2026-01-02T00:05:00Z
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "a PASS naming no commit, in an owner comment posted after the PR's last commit reached GitHub -> allowed" [ "$RC" -eq 0 ]
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-01T12:00:00Z)"
+check "…posted before it reached GitHub -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before its last commit reached GitHub" <<<"$MSG"'
+# Review F5 of #137: the commit's date is the builder's. Committed 10:00, PASS 10:10 (on the older head), pushed 10:20.
+stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-03T10:00:00Z; GIT_COMMITTER_DATE=2026-01-03T10:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
+pushed "$PR_HEAD" 2026-01-03T10:20:00Z
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T10:10:00Z)"
+check "committed 10:00, PASS 10:10, pushed 10:20 -> refused STALE_PASS (the push time decides, not the commit date)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before its last commit reached GitHub" <<<"$MSG"'
+rm -f "$W/suites/$PR_HEAD"
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…no check suite on the commit (when it arrived is unknown) -> refused STALE_PASS, never a pass" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "unknown (no check suite)" <<<"$MSG"'
+: > "$W/suites-down"
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…GitHub not answering for the suites -> could not verify (rc 75), never a pass" eval '[ "$RC" -eq 75 ]'
+rm -f "$W/suites-down"; pushed "$PR_HEAD" 2026-01-02T00:05:00Z
+gate "$(jq '.comments[0] |= del(.createdAt)' <<<"$(at_comment "$(meta 'Tweaks the page.' "$SITE")" x)")"
+check "…a comment whose time is missing -> refused STALE_PASS (unknown is never a pass)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+stale_pr; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; git -C "$W/r" checkout -q main
+echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"; git -C "$W/r" push -q origin HEAD:main
+OWN="$(git -C "$W/r" rev-parse pr)"; pushed "$OWN" 2026-01-02T00:05:00Z
+git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+pushed "$PR_HEAD" 2026-01-04T00:00:00Z   # the main merge reached GitHub after the comment: it is not the PR's own work
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…a main merge after that comment -> still allowed (the PASS survives updates)" [ "$RC" -eq 0 ]
 
 echo "=== ship-ready-baseline (row 18 hook) ==="
 eval "$BLOCK"
@@ -198,6 +287,9 @@ neg "a patch check that never reads history" '/^patch_fixes()/a\
   return 0'
 neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering()/a\
   return 0'
+neg "a PASS that is never checked against its commit" '/^fresh_pass()/a\
+  return 0'
+neg "main's own commits counted as the PR's new code" 's/ --name-only "\$1\.\.\$2" --not origin\/main$/ --name-only "$1..$2"/; s/git rev-list --merges "\$1\.\.\$2" --not origin\/main/git rev-list --merges "$1..$2"/; s/--cc --name-only/-m --name-only/'
 neg "a quality gate that sees no surfaces" 's/^  \[ -n "\$files" \] || return 0$/  return 0/'
 neg "a mutation gate that never reads the body" '/^proof_listed()/a\
   return 0'

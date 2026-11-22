@@ -48,16 +48,20 @@ F="$FAKE_DIR"; echo "$*" >> "$F/gh-log"
 [ "$1 $2" = "pr checks" ] && echo "${GH_SHARE_UNTIL:-none}" > "$F/checks-until"   # the deadline ~/bin/gh is given
 mode() { cat "$F/$1" 2>/dev/null; }
 case "$1 $2" in
+  "api repos/{owner}/{repo}/commits/"*) # when the PR's commit reached GitHub (its earliest check suite): $F/suite-at
+    jq -rn --arg t "$(cat "$F/suite-at" 2>/dev/null || echo 2026-11-22T12:05:00Z)" '$t | fromdateiso8601'; exit 0 ;;   # jq: CI is Linux, BSD date -j is not there
   "api rate_limit") # the allowance GitHub reports: spent with a reset at $F/reset-at while rate limited
     if [ -f "$F/reset-at" ]; then jq -n --argjson r "$(cat "$F/reset-at")" '{resources: {core: {remaining: 0, reset: $r}, graphql: {remaining: 5000, reset: $r}}}' | jq -r "${4:-.}"
     else echo 0 | jq -r '.'; fi; exit 0 ;;
   "pr view")
+    [ "$(mode view-mode)" = ratelimit-until ] && [ "$(date +%s)" -lt "$(cat "$F/reset-at")" ] \
+      && { echo "GraphQL: API rate limit exceeded for user ID 1." >&2; exit 1; }
     { [ "$(mode view-mode)" = down ] || { [ "$(mode view-mode)" = down-after-land ] && [ -f "$F/land-ran" ]; }; } \
       && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
     cm="$(cat "$F/comments" 2>/dev/null || echo '[]')"
-    jq -n --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
-      '{state: $st, body: $body, comments: $cm, headRefOid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", headRefName: "feat", title: "A change",
+    jq -n --arg head "$HEADSHA" --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
+      '{state: $st, body: $body, comments: $cm, headRefOid: $head, headRefName: "feat", title: "A change",
         url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}' ;;
   "pr checks")
     case "$(mode checks-mode)" in
@@ -90,8 +94,16 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
 esac
 SH
 chmod +x "$BIN/gh" "$W/fake-land"
-git init -q "$W/repo" && git -C "$W/repo" remote add origin https://github.com/t/fixture.git && git -C "$W/repo" commit -q --allow-empty -m init
-GOOD='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
+# The checkout: its origin is a real local repo at a path that reads as github.com/t/fixture, so land-after's
+# fresh_pass reads real commits: main, then the PR's one commit on top (HEADSHA, the head the fake gh reports).
+git init -q --bare -b main "$W/github.com/t/fixture.git"
+git init -q -b main "$W/repo" && git -C "$W/repo" remote add origin "$W/github.com/t/fixture.git" && git -C "$W/repo" commit -q --allow-empty -m init
+git -C "$W/repo" push -q origin main && git -C "$W/repo" fetch -q origin
+GIT_COMMITTER_DATE="2026-11-22T12:00:00Z" git -C "$W/repo" commit -q --allow-empty -m "the PR's work"
+HEADSHA="$(git -C "$W/repo" rev-parse HEAD)"; export HEADSHA; git -C "$W/repo" reset -q --hard origin/main
+# land reads 7-40 hex characters with at least one a-f as a commit: an all-digit prefix is lengthened, never a flake.
+eval "$(grep '^sha_name() ' "$(dirname "$LA")/land")"   # land's own helper, never a copy
+GOOD="Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land at $(sha_name "$HEADSHA"); Engineering: PASS"
 reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; rm -f "$W/api/down"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
 la() { (cd "$W/repo" && "$LA" "$@") > "$W/out" 2>&1; RC=$?; }
 lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(find "$T/locks" -name '*.lock' 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }
@@ -133,7 +145,7 @@ AGENT=$!
 for _ in $(seq 1 100); do [ -s "$W/rc" ] && break; sleep 0.1; done
 kill -KILL -- "-$AGENT" 2>/dev/null; wait "$AGENT" 2>/dev/null
 check "starter exited 0 at once with one line naming pid and log" eval '[ "$(cat "$W/rc")" = 0 ] && [ "$(grep -c . "$W/out")" -eq 1 ] && has "pid " && has "logs/job1-7.log"'
-check "…the sheet said landing while land ran" eval 'line1 "$T/job1.md" | grep -q "^STATUS: landing t/fixture#7 aaaaaaa" || [ -f "$T/done/job1.md" ]'
+check "…the sheet said landing while land ran" eval 'line1 "$T/job1.md" | grep -q "^STATUS: landing t/fixture#7 ${HEADSHA:0:7}" || [ -f "$T/done/job1.md" ]'
 check "…the worker finished after its starter's process group was killed" lockgone
 check "…PASS with the merge sha on line 1, moved to done/" eval 'line1 "$T/done/job1.md" | grep -q "^STATUS: PASS t/fixture#7 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " && [ ! -e "$T/job1.md" ]'
 check "…the rest of the sheet kept" grep -q 'built (abc123)' "$T/done/job1.md"
@@ -178,6 +190,9 @@ check "F2: two network failures reading checks are asked again with backoff, the
 reset; echo ratelimit-until > "$FAKE/checks-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
 LAND_AFTER_READ_PATIENCE_SECS=1 la 24 --task waitreset; lockgone
 check "F2: allowance spent, resetting inside the wait: one sleep to the reset (past the 1 s patience), then PASS" eval 'line1 "$T/done/waitreset.md" | grep -q "^STATUS: PASS" && grep -q "waiting [0-9]*s for its reset" "$T/logs/waitreset-24.log"'
+reset; echo ratelimit-until > "$FAKE/view-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
+la 25 --task ratelaunch; lockgone
+check "allowance spent when land-after starts (22 Nov 2026, #134): waits for the reset, then lands; no FAIL, no row" eval 'line1 "$T/done/ratelaunch.md" | grep -q "^STATUS: PASS" && [ -f "$FAKE/land-ran" ] && ! posts | jq -e "select(.cleared != true)" >/dev/null'
 reset; echo unverified > "$FAKE/land-mode"
 la 11 --task netdown; lockgone
 check "land exit 75 (network down mid-land): FAIL unknown" eval 'line1 "$T/netdown.md" | grep -q "^STATUS: FAIL .*unknown: STOPPED: could not verify"'
@@ -278,6 +293,26 @@ check "the reviewer's PASS in an owner-account comment: lands" eval 'line1 "$T/d
 reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "passerby"}, authorAssociation: "NONE", body: $b}]' > "$FAKE/comments"
 la 34 --task strangercomment
 check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
+
+echo "=== F2 (review of #137): the PASS is for this head, checked before anything starts ==="
+SHALESS='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
+reset "$SHALESS"
+la 40 --task shaless-body
+check "a PASS naming no commit, in the body (time unknown): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "nothing started" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-body.md" ]'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
+la 41 --task shaless-after; lockgone
+check "the same line in an owner comment posted after the PR's last commit (12:00 -> 13:00): lands" eval 'line1 "$T/done/shaless-after.md" | grep -q "^STATUS: PASS"'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T11:00:00Z", body: $b}]' > "$FAKE/comments"
+la 42 --task shaless-before
+check "…posted before the PR's last commit (11:00 < 12:00): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-before.md" ]'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
+echo 2026-11-22T13:30:00Z > "$FAKE/suite-at"
+la 44 --task shaless-pushedlater
+check "committed 12:00, PASS 13:00, reached GitHub 13:30 (review F5): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "reached GitHub" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-pushedlater.md" ]'
+rm -f "$FAKE/suite-at"
+reset "Ship-ready: PASS — reviewer session_rev123 looked at it at 0123456789ab; Engineering: PASS"
+la 43 --task notonpr
+check "a PASS naming a commit that is not on the PR: refused STALE_PASS before the CI wait" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'
 
 echo "=== N1: a worker that never starts is reported, the sheet put back ==="
 reset; printf 'STATUS: review\nGoal: kept\n' > "$T/nostart.md"

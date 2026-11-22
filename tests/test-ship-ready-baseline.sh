@@ -51,6 +51,53 @@ case_ "Spanish \"todo\" is not a placeholder" '<p lang="es">Para todo el mundo</
 case_ "a page's /api call is server code, not a broken asset" '<p>Hi</p><script>fetch("/api/track-event", { method: "POST" })</script>' 0 "OUTPUT PASS"
 d="$W/allow"; page "$d/site" '<p>App coming soon. TODO</p>'; echo '{ "kind": "site", "serve": "site", "pages": ["/"], "allow": { "coming soon": "the app is not in the stores yet" } }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'placeholder text: "TODO"' "$d/log" && ! grep -q '"coming soon"' "$d/log"; } && ok "an allowed phrase (with its reason) passes; the TODO beside it still fails" || bad "allow (rc $rc)"
+# live_origin: the site's own API on another host answers CORS for the live origin only. Without live_origin the
+# local render is refused (a console error); with it the page passes; naming an origin the API refuses still fails.
+API_PORT=$((20000 + RANDOM % 20000))
+node -e 'require("http").createServer((q,r)=>{r.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"https://x.test"});r.end("{\"left\":7}")}).listen(+process.argv[1],"127.0.0.1")' "$API_PORT" & API_PID=$!
+for _ in $(seq 1 50); do curl -s "http://127.0.0.1:$API_PORT/" >/dev/null && break; sleep 0.1; done
+API_BODY="<p id=n>Places left</p><script>fetch('http://127.0.0.1:$API_PORT/count').then(r=>r.json()).then(j=>{document.getElementById('n').textContent=j.left+' places left'})</script>"
+for want in none https://x.test https://other.test; do
+  d="$W/live-${want//[^a-z]/}"; page "$d/site" "$API_BODY"
+  [ "$want" = none ] || echo "{ \"kind\": \"site\", \"serve\": \"site\", \"pages\": [\"/\"], \"live_origin\": \"$want\" }" > "$d/ship-ready.json"
+  rc=$(judge "$d")
+  case "$want" in
+    https://x.test) { [ "$rc" = 0 ] && grep -q 'OUTPUT PASS' "$d/log"; } && ok "live_origin: the API that allows the live origin answers the render" || bad "live_origin allowed (rc $rc): $(grep -E '^- ' "$d/log" | head -2 | tr '\n' ' ')" ;;
+    *) { [ "$rc" = 1 ] && grep -q 'console error' "$d/log"; } && ok "live_origin $want: a CORS refusal still fails" || bad "live_origin $want (rc $rc)" ;;
+  esac
+done
+kill "$API_PID" 2>/dev/null
+d="$W/badlive"; mkdir -p "$d"; echo '{ "kind": "site", "serve": ".", "live_origin": "http://x.test" }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'live_origin must be an https origin' "$d/log"; } && ok "a non-https live_origin is a named stop" || bad "bad live_origin (rc $rc)"
+# A signed-in console (kind web-app): a server that shows the app only with the session cookie, and
+# a sign-in command that writes a Playwright storageState with the cookie it is given.
+console_() { # dir cookie-value -> a console fixture whose sign-in writes that cookie
+  mkdir -p "$1"; local port=$((20000 + RANDOM % 20000))
+  cat > "$1/server.mjs" <<'JS'
+import { createServer } from "node:http";
+createServer((req, res) => {
+  const inn = /(^|;\s*)s=ok(;|$)/.test(req.headers.cookie || "");
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Studio</title></head><body style="font:16px sans-serif;color:#111;background:#fff">${inn ? '<nav aria-label="Main" style="display:none"><a href="/">Desktop</a></nav><nav aria-label="Main"><a href="/">Home</a></nav><h1>Your clips</h1>' : '<nav aria-label="Main" style="display:none"><a href="/">Hidden</a></nav><h1>Sign in</h1><p>Type your email.</p>'}</body></html>`);
+}).listen(Number(process.argv[2]), "127.0.0.1");
+JS
+  printf 'const u = new URL(process.env.SHIP_READY_BASE_URL); require("fs").writeFileSync(process.env.SHIP_READY_STATE, JSON.stringify({ cookies: [{ name: "s", value: process.argv[2], domain: u.hostname, path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }], origins: [] }));\n' > "$1/sign-in.cjs"
+  printf '{ "kind": "web-app", "serve": "node server.mjs %s", "base_url": "http://127.0.0.1:%s", "pages": ["/", "/review"], "sign_in": { "cmd": "node sign-in.cjs %s", "signed_in": "nav[aria-label=Main]" } }' "$port" "$port" "$2" > "$1/ship-ready.json"
+}
+d="$W/webapp"; console_ "$d" ok; rc=$(judge "$d")
+{ [ "$rc" = 0 ] && grep -q 'OUTPUT PASS rendered=4' "$d/log" && ! find "$d/out" -name 'session.json' | grep -q .; } && ok "a signed-in console renders each page with its session at 390 and 1280 px (the session never in the artifact)" || bad "web-app signed in (rc $rc): $(grep -E '^- |OUTPUT|STOP' "$d/log" | head -4 | tr '\n' ' ')"
+d="$W/webapp-out"; console_ "$d" wrong; rc=$(judge "$d")
+{ [ "$rc" = 1 ] && grep -q '/review did not render signed in' "$d/log"; } && ok "a console page that shows the login screen fails by name" || bad "web-app signed out (rc $rc)"
+d="$W/webapp-nosess"; console_ "$d" ok; sed -i.bak 's#"cmd": "node sign-in.cjs ok"#"cmd": "true"#' "$d/ship-ready.json"; rc=$(judge "$d")
+{ [ "$rc" = 1 ] && grep -q 'wrote no session' "$d/log" && grep -q 'ZERO pages rendered' "$d/log"; } && ok "a sign-in that writes no session fails and judges nothing signed out" || bad "web-app no session (rc $rc)"
+d="$W/webapp-cmdfail"; console_ "$d" ok; sed -i.bak 's#"cmd": "node sign-in.cjs ok"#"cmd": "node sign-in.cjs ok; exit 3"#' "$d/ship-ready.json"; rc=$(judge "$d")
+{ [ "$rc" = 1 ] && grep -q 'the sign-in command failed (exit 3)' "$d/log" && grep -q 'ZERO pages rendered' "$d/log"; } && ok "a sign-in command that fails is red even when it wrote a session, and judges nothing" || bad "web-app sign-in exit 3 (rc $rc)"
+for half in '{ "cmd": "true" }' '{ "cmd": "true", "signed_in": " " }' '{ "signed_in": "nav" }'; do
+  d="$W/webapp-half$RANDOM"; mkdir -p "$d"; printf '{ "kind": "web-app", "serve": "x", "base_url": "http://127.0.0.1:1", "sign_in": %s }' "$half" > "$d/ship-ready.json"; rc=$(judge "$d")
+  { [ "$rc" = 2 ] && grep -q 'sign_in needs cmd' "$d/log"; } && ok "a half-filled sign_in $half is a named stop (exit 2)" || bad "half sign_in $half (rc $rc)"
+done
+d="$W/webapp-nosignin"; mkdir -p "$d"; echo '{ "kind": "web-app", "serve": "x", "base_url": "http://127.0.0.1:1" }' > "$d/ship-ready.json"; rc=$(judge "$d")
+{ [ "$rc" = 2 ] && grep -q 'web-app needs sign_in' "$d/log"; } && ok "a web-app with no sign_in is a named stop (exit 2)" || bad "web-app no sign_in (rc $rc)"
 d="$W/badcfg"; mkdir -p "$d"; echo '{ "kind": "poster" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'SHIP_READY_CONFIG' "$d/log"; } && ok "a bad config is a named stop (exit 2)" || bad "bad config (rc $rc)"
 [ "$fails" = 0 ] && echo "test-ship-ready-baseline: every automatic fail is caught and a clean page passes" || exit 1

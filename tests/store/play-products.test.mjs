@@ -107,6 +107,19 @@ test('--apply writes nothing to Play while RevenueCat still holds a Play product
   assert.equal(dry.code, 3, 'the dry run still plans');
 });
 
+test('the order guard is on by default: without a RevenueCat catalog --apply stops and writes nothing; an outage there is FAILED, exit 1', async () => {
+  const play = fakePlay();
+  const lines = [];
+  const code = await run(catalog([product('kit_a', 14.99)]), { argv: ['--apply'], getToken: async () => 'token', fetchFn: play.fetchFn, log: l => lines.push(l) });
+  assert.equal(code, 2, lines.join('\n'));
+  assert.match(lines.at(-1), /NAMED STOP \[RC_CATALOG_MISSING\].*nothing written to Play/);
+  assert.ok(play.calls.every(x => x.startsWith('GET')), play.calls.join('\n'));
+  const down = await go(catalog([product('kit_a', 14.99)]), play, ['--apply'], undefined, async () => ({ ok: false, code: 1, why: 'FAILED RC_UNAVAILABLE RevenueCat unavailable GET /projects: 503 down' }));
+  assert.equal(down.code, 1);
+  assert.match(down.out, /FAILED RC_UNAVAILABLE.*nothing written to Play/);
+  assert.equal(play.db.size, 0);
+});
+
 test('apply creates and activates every product, reads back, and a second dry run exits 0', async () => {
   const play = fakePlay();
   const r = await go(catalog(), play, ['--apply']);

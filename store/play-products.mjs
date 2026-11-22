@@ -286,7 +286,7 @@ export async function run(c, { argv = process.argv.slice(2), getToken, fetchFn =
     return finish(`dry run on ${c.packageName}: ${counts(pl)}${work(pl) ? ' (Play lacks these: --apply writes them)' : ''}`, code);
   }
   const rc = await rcReady(c);
-  if (!rc.ok) return finish(`${rc.why}; nothing written to Play`, 2);
+  if (!rc.ok) return finish(`${rc.why}; nothing written to Play`, rc.code ?? 2);
 
   const n = { created: 0, activated: 0, appeared: 0, offersCreated: 0, offersActivated: 0 };
   const conversions = new Map();

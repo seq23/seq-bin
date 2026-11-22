@@ -145,25 +145,26 @@ async function readLive(P, list) {
 /**
  * For play-products, before it writes to Play: is every catalog product on RevenueCat's play_store app,
  * with the code's type? Until it is, a Play sale could be consumed (one_time) or unknown to the app.
- * Returns { ok: true } or { ok: false, why }. Read-only.
+ * Returns { ok: true } or { ok: false, why, code }: code 1 = RevenueCat could not be read (FAILED, an outage),
+ * 2 = a NAMED STOP, 3 = a key only the owner can change. Read-only.
  */
 export async function playTypesReady(c) {
-  if (!c?.secretEnv || !c?.products?.length) return { ok: false, why: 'NAMED STOP [RC_CATALOG_MISSING] the Play catalog names no RevenueCat catalog (catalog.revenuecat)' };
+  if (!c?.secretEnv || !c?.products?.length) return { ok: false, code: 2, why: 'NAMED STOP [RC_CATALOG_MISSING] the Play catalog names no RevenueCat catalog (catalog.revenuecat)' };
   const key = process.env[c.secretEnv];
-  if (!key) return { ok: false, why: `NAMED STOP [REVENUECAT_SECRET_MISSING] ${c.secretEnv} is not in the vault` };
+  if (!key) return { ok: false, code: 2, why: `NAMED STOP [REVENUECAT_SECRET_MISSING] ${c.secretEnv} is not in the vault` };
   try {
     const { list } = client(c, key);
     const P = await openProject(c, list);
     const play = (await list(`${P}/apps`)).filter(a => a.type === 'play_store');
-    if (play.length !== 1) return { ok: false, why: `NAMED STOP [RC_TYPES_NOT_READY] RevenueCat has ${play.length} Play apps, want 1` };
+    if (play.length !== 1) return { ok: false, code: 2, why: `NAMED STOP [RC_TYPES_NOT_READY] RevenueCat has ${play.length} Play apps, want 1` };
     const products = (await list(`${P}/products`)).filter(x => x.app_id === play[0].id);
     const wrong = c.products.flatMap(p => {
       const x = products.find(x => x.store_identifier === p.id);
       return !x ? [`${p.id} missing`] : x.type !== storeType('play_store', p.kind) ? [`${p.id} is ${x.type}, code says ${p.kind}`] : [];
     });
-    return wrong.length ? { ok: false, why: `NAMED STOP [RC_TYPES_NOT_READY] RevenueCat's Play products do not match the code yet (run ~/bin/revenuecat-setup first): ${wrong.join('; ')}` } : { ok: true };
+    return wrong.length ? { ok: false, code: 2, why: `NAMED STOP [RC_TYPES_NOT_READY] RevenueCat's Play products do not match the code yet (run ~/bin/revenuecat-setup first): ${wrong.join('; ')}` } : { ok: true };
   } catch (e) {
-    if (e instanceof Halt) return { ok: false, why: `NAMED STOP [RC_TYPES_NOT_READY] could not confirm RevenueCat's Play product types: ${e.line}` };
+    if (e instanceof Halt) return { ok: false, code: e.code, why: e.code === 1 ? `${e.line} (could not confirm RevenueCat's Play product types)` : e.line };
     throw e;
   }
 }

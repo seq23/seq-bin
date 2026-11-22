@@ -167,3 +167,27 @@ test('the Play order guard is ready only when every Play product has the code ty
   assert.equal(down.code.ok, false, 'an unreadable RevenueCat is never ready');
   assert.equal((await playTypesReady(undefined)).ok, false);
 });
+
+test('a key that cannot read is NAMED STOP RC_KEY_DENIED naming the key, exit 3, nothing written', async () => {
+  const rc = fakeRc({ fault: (m, p) => (m === 'GET' && p === '/projects/proj/products' ? { status: 403, body: { message: 'no read access' } } : null) });
+  const r = await withRc(rc, () => run(catalog, []));
+  assert.equal(r.code, 3, r.lines.join('\n'));
+  assert.match(r.lines.join('\n'), /NAMED STOP \[RC_KEY_DENIED\] EXAMPLE_RC_TEST_KEY cannot read/);
+  assert.match(r.lines.at(-1), /nothing changed$/);
+});
+
+test('the guard stops by name without a key, and an outage inside it is FAILED with code 1, never a named stop', async () => {
+  const saved = process.env.EXAMPLE_RC_TEST_KEY;
+  delete process.env.EXAMPLE_RC_TEST_KEY;
+  try {
+    const r = await playTypesReady(catalog);
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 2);
+    assert.match(r.why, /NAMED STOP \[REVENUECAT_SECRET_MISSING\] EXAMPLE_RC_TEST_KEY/);
+  } finally { if (saved !== undefined) process.env.EXAMPLE_RC_TEST_KEY = saved; }
+  const down = await withRc(fakeRc({ fault: (m, p) => (p === '/projects' ? { status: 503, body: 'down' } : null) }), () => playTypesReady(catalog));
+  assert.equal(down.code.code, 1);
+  assert.match(down.code.why, /^FAILED RC_UNAVAILABLE RevenueCat unavailable/);
+  assert.doesNotMatch(down.code.why, /NAMED STOP/);
+});
+

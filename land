@@ -1348,10 +1348,17 @@ BASE="$(gh_read '^[^[:space:]]+$' pr view "$PR" --json baseRefName -q .baseRefNa
 # PENDING IS A WAIT, NOT A STOP (22 Nov 2026: land stopped at once on a queued check, and every caller grew
 # its own wait). While any check is pending or queued, land waits, bounded by LAND_PENDING_WAIT (30 min);
 # a failure among them stops at once, and past the bound it is a named stop.
+# NO CHECKS ON A CONFLICTED PR IS A CONFLICT, NOT A MYSTERY (22 Nov 2026, boss-os #539: GitHub runs no
+# pull_request CI on a PR that cannot merge, and "no checks at all" read as stuck for an hour).
+no_checks_stop() {
+  local m; m="$(gh_read '^[A-Z_]+$' pr view "$PR" --json mergeable -q .mergeable 2>/dev/null)" || m=""
+  [ "$m" = CONFLICTING ] && die "NAMED STOP [MERGE_CONFLICT] PR #$PR conflicts with main, so GitHub runs no CI on it. Merge origin/main into the branch, resolve, push, then land $PR again."
+  die "PR #$PR has no checks at all — green cannot be verified"
+}
 PENDING_UNTIL=$(( $(date +%s) + ${LAND_PENDING_WAIT:-1800} ))
 while :; do
   if ! CHECKS="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)"; then
-    grep -qi 'no checks reported' <<<"$(gh_err)" && die "PR #$PR has no checks at all — green cannot be verified"
+    grep -qi 'no checks reported' <<<"$(gh_err)" && no_checks_stop
     unverified "$(gh_kind "$(gh_err)")" "the checks on PR #$PR could not be read: $(gh_err)"
   fi
   PENDING="$(jq -r '.[] | select(.bucket == "pending") | .name' <<<"$CHECKS")"
@@ -1363,7 +1370,7 @@ while :; do
   sleep "${LAND_PENDING_POLL:-30}"
 done
 jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
-[ "$(jq 'length' <<<"$CHECKS")" -gt 0 ] || die "PR #$PR has no checks at all — green cannot be verified"
+[ "$(jq 'length' <<<"$CHECKS")" -gt 0 ] || no_checks_stop
 # EVERY BUCKET, NOT THE EXIT CODE. 21 Sep 2026, boss-os #35: the Playwright job had been CANCELLED
 # at its 30-minute cap, `gh pr checks` printed it as "fail" and still exited 0, and this script
 # merged a PR whose merge state read UNSTABLE. A cancelled, skipped-by-failure or failing check is

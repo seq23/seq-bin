@@ -59,9 +59,12 @@ esac
 echo "unexpected gh call: \$*" >&2; exit 1
 SH
 chmod +x "$W/bin/gh"
-pushed() { date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$2" +%s > "$W/suites/$1"; }   # sha, when GitHub first saw it
+pushed() { jq -rn --arg t "$2" '$t | fromdateiso8601' > "$W/suites/$1" || exit 1; }   # sha, when GitHub first saw it (jq: BSD and GNU date differ, and CI is Linux)
+# A short sha the gate can read: land takes 7-40 hex characters with at least one a-f (a bare number is a size, not a
+# commit), so a prefix that happens to be all digits (8 chars: about 1 in 40 commits) is lengthened, never a flake.
+short() { local n="${2:-7}"; while [ "$n" -lt 40 ] && [[ ! "${1:0:$n}" =~ [a-f] ]]; do n=$((n + 1)); done; printf '%s' "${1:0:$n}"; }
 gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/${PR_HEAD:0:8}}")"; RC=$?
+  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/$(short "$PR_HEAD" 8)}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
@@ -147,7 +150,7 @@ stale_pr() {
   echo '<h1>reviewed</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the page"; PASSED="$(git -C "$W/r" rev-parse HEAD)"
 }
 publish_pr() { PR_HEAD="$(git -C "$W/r" rev-parse HEAD)"; git -C "$W/r" push -q -f origin "HEAD:refs/pull/9/head"; git -C "$W/r" checkout -q main; git -C "$W/r" branch -q -D pr; }
-passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "${PASSED:0:9}"; }
+passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "$(short "$PASSED" 9)"; }
 stale_pr; publish_pr
 gate "$(meta "$(passed_at)" "$SITE")"
 check "a PASS naming the head -> allowed (rc 0)" [ "$RC" -eq 0 ]
@@ -170,11 +173,11 @@ gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked 
 check "a PASS naming a commit not on the PR -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "names no commit" <<<"$MSG"'
 # Review F1 of #137: a re-check line names the old commit first ("the diff A..B", "diff since A … at B").
 stale_pr; echo '<h1>fixed after the fail</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the fix"; publish_pr
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff ${PASSED:0:8}..${PR_HEAD:0:8} at 390 px; Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff $(short "$PASSED" 8)..$(short "$PR_HEAD" 8) at 390 px; Engineering: PASS" "$SITE")"
 check "a re-check PASS on 'the diff <old>..<head>' -> allowed (the newest commit it names)" [ "$RC" -eq 0 ]
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since ${PASSED:0:8}, tests at ${PR_HEAD:0:8}; Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(short "$PASSED" 8), tests at $(short "$PR_HEAD" 8); Engineering: PASS" "$SITE")"
 check "a re-check PASS on 'diff since <old> … at <head>' -> allowed" [ "$RC" -eq 0 ]
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since ${PASSED:0:8}; Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(short "$PASSED" 8); Engineering: PASS" "$SITE")"
 check "…naming only the old commit, with work after it -> still STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
 # Review F2 of #137: the reviewer template's line names no commit; its time decides, where it is known.
 SHALESS='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS'
@@ -189,7 +192,7 @@ check "…posted before it reached GitHub -> refused STALE_PASS" eval '[ "$RC" -
 stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-03T10:00:00Z; GIT_COMMITTER_DATE=2026-01-03T10:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
 pushed "$PR_HEAD" 2026-01-03T10:20:00Z
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T10:10:00Z)"
-check "committed 10:00, PASS 10:10, pushed 10:20 -> refused STALE_PASS (the push time decides, not the commit date)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "reached GitHub" <<<"$MSG"'
+check "committed 10:00, PASS 10:10, pushed 10:20 -> refused STALE_PASS (the push time decides, not the commit date)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before its last commit reached GitHub" <<<"$MSG"'
 rm -f "$W/suites/$PR_HEAD"
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
 check "…no check suite on the commit (when it arrived is unknown) -> refused STALE_PASS, never a pass" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "unknown (no check suite)" <<<"$MSG"'

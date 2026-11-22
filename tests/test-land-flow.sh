@@ -94,7 +94,7 @@ case "$a" in
   # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
   "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
-  "pr view "*"files,body,comments"*) sed "s/@HEAD@/${HEADSHA:0:8}/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
+  "pr view "*"files,body,comments"*) n=8; while [ "$n" -lt 40 ] && [[ ! "${HEADSHA:0:$n}" =~ [a-f] ]]; do n=$((n + 1)); done; sed "s/@HEAD@/${HEADSHA:0:$n}/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;

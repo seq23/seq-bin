@@ -1,0 +1,27 @@
+#!/bin/bash
+# pass-line <owner/repo> <pr> "<sign-off line>": posts a reviewer's sign-off ONLY when land will read it.
+# 22 Nov 2026: westpeek-live #127 and #130 sat for hours on PASS lines without "looked at" that land
+# refused at merge time. This runs land's own parser (pass_line, covers_engineering) before posting,
+# so a line land cannot read is refused here with the exact shape, and never posted.
+#   PASS_LINE_DRY=1  check only, post nothing.
+set -uo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+LAND_FILE="${PASS_LINE_LAND:-$DIR/land}"
+eval "$(sed -n '/^pass_line() {/,/^}/p; /^covers_engineering() {/,/^}/p' "$LAND_FILE")"
+declare -F pass_line >/dev/null && declare -F covers_engineering >/dev/null \
+  || { echo "NAMED STOP [NO_PARSER] could not read land's PASS parser from $LAND_FILE; nothing posted"; exit 2; }
+[ $# -eq 3 ] || { echo "usage: pass-line <owner/repo> <pr> \"Ship-ready: PASS — <who> looked at <what>; Engineering: PASS\""; exit 2; }
+REPO="$1" PR="$2" LINE="$3"
+case "$PR" in ''|*[!0-9]*) echo "pass-line: PR must be a number, got '$PR'"; exit 2 ;; esac
+SHAPE='Ship-ready: PASS — <who: session or run id> looked at <the real output> at <head sha>; Engineering: PASS'
+if pass_line Ship-ready <<<"$LINE" >/dev/null; then
+  covers_engineering <<<"$LINE" || { echo "REFUSED, nothing posted: land needs \"; Engineering: PASS\" on the same Ship-ready line. Shape: $SHAPE"; exit 1; }
+elif pass_line Launch-ready <<<"$LINE" >/dev/null; then
+  :
+else
+  echo "REFUSED, nothing posted: land cannot read this as a sign-off (it needs \"<Ship-ready|Launch-ready>: PASS — <who> looked at <what>\"). Shape: $SHAPE"
+  exit 1
+fi
+if [ "${PASS_LINE_DRY:-}" = 1 ]; then echo "OK: land will read this line (dry run, not posted)"; exit 0; fi
+gh pr comment "$PR" -R "$REPO" --body "$LINE" || { echo "pass-line: the line is valid but posting failed; nothing was posted"; exit 1; }
+echo "OK: posted to $REPO#$PR, and land will read it"

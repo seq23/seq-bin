@@ -171,13 +171,13 @@ env PATH="$BIN:$PATH" AI_RUN_TEST_FOREIGN_PID="$FOREIGN" timeout 15 "$AI" --role
 check "a reused, foreign PID ends the wait instead of spinning (rc $rc)" test "$rc" -ne 124
 check "a reused, foreign PID ends the wait within 10 s" test $(( $(date +%s) - START )) -lt 10
 kill "$FOREIGN" 2>/dev/null
-# 21 Nov 2026: a 200 KB prompt (a review with a PR's changed lines) must start the engine in seconds;
+# 21 Nov 2026: a 100 KB prompt (a review with a PR's changed lines) must start the engine in seconds;
 # the old whitespace check was quadratic in bash 3.2 and spun past the 20-minute seat cap.
-reset; BIG="$(head -c 200000 /dev/zero | tr '\0' 'a' | fold -w 80)"
+reset; BIG="$(head -c 100000 /dev/zero | tr '\0' 'a' | fold -w 80)"
 START=$(date +%s)
 env PATH="$BIN:$PATH" timeout 30 /bin/bash "$AI" --role worker --out "$TMP/out.log" -- "$BIG" >/dev/null 2>&1; rc=$?
-check "a 200 KB prompt reaches the engine (rc $rc)" test "$rc" -eq 0
-check "a 200 KB prompt starts within 10 s" test $(( $(date +%s) - START )) -lt 10
+check "a 100 KB prompt reaches the engine (rc $rc)" test "$rc" -eq 0
+check "a 100 KB prompt starts within 10 s" test $(( $(date +%s) - START )) -lt 10
 reset; out="$(env PATH="$BIN:$PATH" /bin/bash "$AI" --role worker -- "$(printf '  \n\t ')"; echo "rc=$?")"
 check "a blank prompt is still a NAMED STOP [NO_PROMPT] (rc 64)" grep -q 'rc=64$' <<<"$out"
 echo

@@ -397,7 +397,7 @@ echo "=== 8. the docs cannot drift from the code ============================"
 # as the primary always has.
 #
 # 16 Nov 2026, owner: Tue+Sat (Wed+Sat 13-16 Nov); 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00, first run Sat 14 Nov. Daily is gone. The
-# primary fires Monday and Friday at 22:15 (the Mac's day, 21 Nov 2026), the retry Monday and Friday
+# primary fires Tuesday and Saturday at 22:15 (owner 22 Nov 2026; Mon+Fri 21-22 Nov), the retry Tuesday and Saturday
 # at 22:20, and NOTHING else: read_schedule prints the full calendar as one
 # canonical line (every entry, every key) so that a third weekday, a stray
 # Day/Month key, a second time, a StartInterval or an env knob changes the
@@ -436,15 +436,15 @@ print(" + ".join(parts)
 PY
 }
 # 21 Nov 2026 (the Mac's day): the night before each run day, ahead of the PBS fill's 22:30 ramp.
-WANT_PRIMARY="Mon 22:15 + Fri 22:15"
-WANT_RETRY="Mon 22:20 + Fri 22:20"
+WANT_PRIMARY="Tue 22:15 + Sat 22:15"
+WANT_RETRY="Tue 22:20 + Sat 22:20"
 if [ ! -f "$PLIST" ]; then
   bad "launchd/com.seq.ci-sweep.plist is missing — the schedule is not versioned"
 else
   consistency=$((consistency+1))
   sched="$(read_schedule "$PLIST")"
   if [ "$sched" = "$WANT_PRIMARY" ]; then
-    ok "the primary plist fires exactly Monday and Friday at 22:15 — no other day, no other time, no interval, no env knobs, not at load"
+    ok "the primary plist fires exactly Tuesday and Saturday at 22:15 — no other day, no other time, no interval, no env knobs, not at load"
   else
     bad "the primary plist schedule is '$sched', expected exactly '$WANT_PRIMARY' (the Mac's day, 21 Nov 2026)"
   fi
@@ -455,7 +455,7 @@ else
   consistency=$((consistency+1))
   rsched="$(read_schedule "$RETRY_PLIST")"
   if [ "$rsched" = "$WANT_RETRY" ]; then
-    ok "the retry plist fires exactly Monday and Friday at 22:20 — five minutes after the primary (it waits for it), same two days, nothing else"
+    ok "the retry plist fires exactly Tuesday and Saturday at 22:20 — five minutes after the primary (it waits for it), same two days, nothing else"
   else
     bad "the retry plist schedule is '$rsched', expected exactly '$WANT_RETRY' (the Mac's day, 21 Nov 2026)"
   fi

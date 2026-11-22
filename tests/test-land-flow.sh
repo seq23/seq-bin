@@ -708,7 +708,7 @@ check "a changed screen with no review, under --owner: rc 0, merged" eval '[ "$R
 check "…her words went on the PR" eval 'jq -r .body "$FAKE/pr-meta" | grep -q "^Owner override: \"the important thing is our rules"'
 check "…ONE row was posted, with the token" eval '[ "$(posts | grep -c .)" -eq 1 ] && posts | jq -e "select(.auth == \"Bearer olt_test\")" >/dev/null'
 check "…titled for the repo and PR, owner claude, due tomorrow (Central)" eval 'posts | jq -e --arg d "$TOMORROW" "select(.body.title == \"Engineering check of seq23/approvalprep#7 (landed under her bypass)\" and .body.owner == \"claude\" and .body.next_date == \$d and .body.stop == \"OWNER_BYPASS_PR_7\")" >/dev/null'
-check "…with the finish line" eval 'posts | jq -e "select(.body.finish_line == \"engineering.md 1–6 checked on the merged diff; fails fixed or dated\")" >/dev/null'
+check "…with the finish line" eval 'posts | jq -e "select(.body.finish_line == \"every automatic fail in engineering.md checked on the merged diff; fails fixed or dated\")" >/dev/null'
 check "…and land says it filed it" has "engineering check of seq23/approvalprep#7 filed on Open Loops for tomorrow"
 : > "$W/api/posts.jsonl"; fixture approvalprep
 run_land approvalprep

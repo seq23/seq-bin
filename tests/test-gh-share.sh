@@ -111,6 +111,16 @@ fresh; export GH_SHARE_PER_CALLER=2 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
 grep -q 'its share is 2' "$T/err" || fail "the third read of a 2-call share was not held"
 pass=$((pass + 1))
 
+# 8b. the share is REST requests, not gh calls: run view costs 2 (measured), so a 3-request share holds
+#     the second run view while three 1-request api reads fit
+fresh; export GH_SHARE_PER_CALLER=3 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
+( gh api a >/dev/null; gh api b >/dev/null; gh api c >/dev/null 2>"$T/err" )
+! grep -q 'its share is' "$T/err" || fail "three 1-request reads were held by a 3-request share"
+fresh; export GH_SHARE_PER_CALLER=3 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
+( gh run view 1 >/dev/null; gh run view 2 >/dev/null 2>"$T/err" )
+grep -q 'its share is 3' "$T/err" || fail "two run views (4 requests) passed a 3-request share: the share counts calls, not REST cost"
+pass=$((pass + 1))
+
 # 9. fail toward working: no cache dir -> plain pass-through; GH_SHARE_OFF=1 -> plain pass-through
 fresh; mkdir -p "$T/ro"; chmod 500 "$T/ro"; export GH_SHARE_DIR="$T/ro/share"
 gh run view 1 >/dev/null && gh run view 1 >/dev/null; chmod 700 "$T/ro"

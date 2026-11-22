@@ -32,8 +32,9 @@
 #      deadline, an epoch: land and land-after set it), is not slept: exit 75 at once with "rate limit: …"
 #      on stderr, so the caller's own rate-limit handling (and its one deadline) decides. One owner of waiting.
 #   4. NO POLLER TAKES MORE THAN ITS SHARE. Each caller (its process group: one agent's Bash call, one
-#      land run) may send GH_SHARE_PER_CALLER (500, a tenth of the hour) reads to GitHub in any hour;
-#      over that it waits until its oldest call in the window is an hour old. Cache hits are free.
+#      land run) may spend GH_SHARE_PER_CALLER (500, a tenth of the hour) REST requests in any hour,
+#      priced by rest_cost (run view/list = 2: one gh call is not one request); over that it waits until
+#      its oldest call in the window is an hour old. Cache hits are free.
 # Every call is logged (the last 48 h are kept), one line, to ~/.cache/gh-share/calls.log (epoch, caller, kind, subcommand), so
 # calls per hour are measured, not guessed:
 #   awk -v c="$(( $(date +%s) - 3600 ))" '$1 > c {n[$3]++} END {for (k in n) print k, n[k]}' ~/.cache/gh-share/calls.log
@@ -165,18 +166,31 @@ wait_for_reset() { # holds a read while the allowance is at or under the floor (
   sleep "$secs"
   rm -f "$DIR/rate"; NOW="$(date +%s)"
 }
-hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
-  local f="$DIR/callers/$CALLER" n oldest secs
+# What one real call costs GitHub's REST core allowance, in requests: THE ONE TABLE. Measured with
+# GH_DEBUG=api on gh 2.86 (22 Nov 2026): run view and run list send 2 requests each (the run, then its
+# attempt/jobs or the workflow), --log/--log-failed 3, workflow view/list 2, gh api GET 1, pr diff 1.
+# pr/issue/repo/release reads are GraphQL (0 REST) and cost 1 here so a GraphQL poller is still bounded.
+rest_cost() {
+  case "${1:-} ${2:-}" in
+    "run view") if has_flag --log "$@" || has_flag --log-failed "$@"; then echo 3; else echo 2; fi ;;
+    "run list"|"workflow view"|"workflow list") echo 2 ;;
+    *) echo 1 ;;
+  esac
+}
+hold_share() { # one caller may spend PER_CALLER of the REST allowance in any hour (args: the call)
+  local f="$DIR/callers/$CALLER" n oldest secs cost
+  cost="$(rest_cost "$@")"
   [ -f "$f" ] && awk -v c=$(( NOW - 3600 )) '$1 > c' "$f" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f"
-  n=0; [ -f "$f" ] && n="$(wc -l < "$f" | tr -d ' ')"
-  if [ "$n" -ge "$PER_CALLER" ]; then
-    oldest="$(head -1 "$f")"; secs=$(( oldest + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
-    too_long "$secs" "this caller has sent $n GitHub reads this hour (its share is $PER_CALLER); its next read"
-    echo "gh-share: this caller has sent $n GitHub reads this hour (its share is $PER_CALLER); waiting ${secs}s — poll less often or wait in one bounded call" >&2
+  # each line is "epoch cost" (a line with no cost, from before 22 Nov, counts 1)
+  n=0; [ -f "$f" ] && n="$(awk '{n += ($2 == "" ? 1 : $2)} END {print n + 0}' "$f")"
+  if [ $(( n + cost )) -gt "$PER_CALLER" ]; then
+    oldest="$(head -1 "$f" | cut -d' ' -f1)"; secs=$(( oldest + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
+    too_long "$secs" "this caller has spent $n GitHub requests this hour (its share is $PER_CALLER); its next read"
+    echo "gh-share: this caller has spent $n GitHub requests this hour (its share is $PER_CALLER); waiting ${secs}s — poll less often or wait in one bounded call" >&2
     log share "$secs"
     sleep "$secs"; NOW="$(date +%s)"
   fi
-  echo "$NOW" >> "$f"
+  echo "$NOW $cost" >> "$f"
   # callers gone for an hour are forgotten
   find "$DIR/callers" -type f -mmin +60 -delete 2>/dev/null || true
 }
@@ -267,7 +281,7 @@ if [ -f "$cache" ] && [ $(( NOW - $(mtime "$cache") )) -lt "$TTL" ]; then
   { IFS= read -r crc; cat; } < "$cache"; exit "${crc:-0}"
 fi
 wait_for_reset "$@"
-hold_share
+hold_share "$@"
 log miss "${1:-} ${2:-}"
 g0="$(gen)"
 tmp="$DIR/tmp/$key.$$"   # outside resp/: a write clearing resp/ must not take an answer in flight

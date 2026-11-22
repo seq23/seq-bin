@@ -292,6 +292,15 @@ reset; chmod 555 "$T"   # the sheet folder read-only: the status line cannot be 
 la 36 --task unwritable; chmod 755 "$T"
 check "set_status fails: refused, and neither lock is left behind" eval '[ "$RC" -eq 1 ] && has "could not write" && [ -z "$(find "$T/locks" -name "*.lock")" ] && [ ! -f "$FAKE/land-ran" ]'
 
+echo "=== R3: a worker that ends inside the starter's poll leaves no lock behind ==="
+reset; printf 'STATUS: review t/fixture#37 x 2026-11-22\nGoal: g\n' > "$T/fastjob.md"
+LAND_AFTER_TEST_CLEANUP_DELAY=1.5 la 37 --task fastjob   # the worker (instant land) is done before the starter cleans up
+check "a fast worker: started, and no lock is left once it ends" eval '[ "$RC" -eq 0 ] && lockgone'
+check "…no backup is left beside the locks" eval '[ -z "$(find "$T/locks" -name "*.sheet.before")" ]'
+reset; la 37 --task fastjob
+check "…the same sheet can be landed again at once (not held as 'starting')" eval '[ "$RC" -eq 0 ] && lockgone'
+rm -f "$T/fastjob.md" "$T/done/fastjob.md"
+
 echo "=== N6: a log an open FAIL sheet names is kept past 14 days ==="
 printf 'STATUS: FAIL t/fixture#9 x 2026-11-01 — red; log %s\n' "$T/logs/evidence-9.log" > "$T/evidence.md"
 echo x > "$T/logs/evidence-9.log"; old 20 "$T/logs/evidence-9.log"; echo x > "$T/logs/orphan.log"; old 20 "$T/logs/orphan.log"

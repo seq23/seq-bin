@@ -895,7 +895,7 @@ review_text() { # stdin: PR view JSON -> where a reviewer's PASS line may stand:
   # The newest verdict wins: from the last text that says `VERDICT: fail` on, so a later fail comment voids an
   # earlier PASS (review N9); a PASS posted after that fail still counts.
   jq -r '[(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))]
-    | ([to_entries[] | select(.value | test("verdict: *fail"; "i")) | .key] | last // 0) as $from
+    | ([to_entries[] | select(.value | test("verdict:\\W*fail"; "i")) | .key] | last // 0) as $from
     | .[$from:][]' 2>/dev/null
 }
 covers_engineering() { # stdin: one PASS line -> 0 when it also passes every automatic fail in engineering.md
@@ -937,7 +937,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   [ -n "$files" ] || return 0
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add to the PR body the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
+    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
@@ -947,7 +947,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
   [ -n "$launch" ] || return 0
   reviewer="$(signoff Launch-ready <<<"$body")" \
-    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add to the PR body the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
+    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
   return 0
@@ -995,7 +995,7 @@ gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body -> rc 1 with one plain line
   [ -n "$fixes" ] || return 0
   missing="$(cut -f1 <<<"$fixes" | while IFS= read -r ref; do patch_answered "$4" "$ref" || printf '%s ' "$ref"; done)"
   [ -n "$missing" ] || return 0
-  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add to the PR body the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
+  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
   return 1
 }
 # OWNER OVERRIDE (her ruling 21 Nov 2026: "if i ask for one aspect of something to be added quickly and

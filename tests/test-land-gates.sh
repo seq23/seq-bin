@@ -58,7 +58,7 @@ echo "=== ship-ready: a PR that changes what people see ==="
 repo; pr_head 2 '  return x + 2;'
 gate "$(meta 'Tweaks the page.' "$SITE")"
 check "no PASS line -> refused (rc 1)" [ "$RC" -eq 1 ]
-check "…in one plain line that says what to add" eval 'one_line && grep -q "add to the PR body the line  Ship-ready: PASS — " <<<"$MSG"'
+check "…in one plain line that says what to add" eval 'one_line && grep -q "add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS — " <<<"$MSG"'
 for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent session_01BUILDER' '<reviewer>'; do
   gate "$(meta "Ship-ready: PASS — $who looked at the home page at 390 px" "$SITE")"
   check "PASS signed by the builder ($who) -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "signed by the builder" <<<"$MSG"'
@@ -71,7 +71,7 @@ gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" OWNER)"
 check "a fresh reviewer's PASS in a comment by the owner account -> allowed (rc 0)" [ "$RC" -eq 0 ]
 for who in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR COLLABORATOR; do
   gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" "$who")"
-  check "the same PASS in a comment by a $who account -> refused" eval '[ "$RC" -eq 1 ] && grep -q "add to the PR body the line  Ship-ready: PASS" <<<"$MSG"'
+  check "the same PASS in a comment by a $who account -> refused" eval '[ "$RC" -eq 1 ] && grep -q "add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS" <<<"$MSG"'
 done
 gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" 'Ship-ready: PASS — builder looked at the page; Engineering: PASS' OWNER)"
 check "an owner-account comment signed by the builder -> still refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'

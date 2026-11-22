@@ -240,7 +240,7 @@ check "nothing was merged" eval '! merge_called'
 fixture approvalprep
 echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "add to the PR body the line  Ship-ready: PASS — "'
+check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS — "'
 check "…and nothing was merged" eval '! merge_called'
 fixture approvalprep
 echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"

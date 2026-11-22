@@ -645,13 +645,17 @@ POLL_SECS="${LAND_POLL_SECS:-60}"
 run_conclusion() { # $1 run id -> its conclusion, empty while it runs or when unreadable
   gh api "repos/{owner}/{repo}/actions/runs/$1" --jq '.conclusion // ""' 2>/dev/null
 }
-# --- run_conclusion end ---
 # Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
 # duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
-wait_run_bounded() { # $1 run id  $2 ceiling seconds
+# A REFUSED READ IS NOT "STILL RUNNING" (22 Nov 2026): the read swallowed its errors, so a 403 or a
+# 502 looked like a run in progress until the ceiling, and then land cancelled a healthy run it had
+# never seen. It reads through queue_gh (one wait for a spent rate allowance, one more ask): still
+# refused, it prints "unreadable" with NAMED STOP [RUN_UNREADABLE] and returns 75, cancelling nothing.
+wait_run_bounded() { # $1 run id  $2 ceiling seconds -> conclusion | cancelled-at-ceiling (rc 1) | unreadable (rc 75)
   local rid="$1" deadline=$(( $(date +%s) + $2 )) conc=""
   while :; do
-    conc="$(run_conclusion "$rid")"
+    conc="$(UNREADABLE_STOP=RUN_UNREADABLE UNREADABLE_WHY="the result of run $rid is unknown, so it was not cancelled and nothing was decided on it" \
+            queue_gh api "repos/{owner}/{repo}/actions/runs/$rid" --jq '.conclusion // ""')" || { echo unreadable; return 75; }
     [ -n "$conc" ] && break
     if [ "$(date +%s)" -ge "$deadline" ]; then
       gh run cancel "$rid" >/dev/null 2>&1 || true
@@ -661,6 +665,7 @@ wait_run_bounded() { # $1 run id  $2 ceiling seconds
   done
   echo "$conc"
 }
+# --- run_conclusion end ---
 # Measured from the newest SUCCESSFUL run (1 Nov 2026): a failed or cancelled run ends early, and once
 # a load-error run of 2 min set e2e's ceiling to the 10-min floor, so a healthy 12-min run was cut off.
 # The LONGEST of the last 5 successful runs (6 Nov 2026): one quick 6-min dailystory deploy set a 9-min
@@ -806,6 +811,7 @@ promote_wait_inflight() {
   ceil=$(( $(last_duration "$PROMOTE_WF") * 3 / 2 )); [ "$ceil" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || ceil=${LAND_WAIT_FLOOR_SECS:-360}
   echo "     promote run $rid in flight for ${sha:0:7} ($st) — waiting (ceiling $((ceil / 60)) min, 1.5x its last completed run)"
   conc="$(wait_run_bounded "$rid" "$ceil")" || true
+  [ "$conc" != unreadable ] || die "NAMED STOP [RUN_UNREADABLE] $PROMOTE_WF run $rid on ${sha:0:7} could not be read, so nothing was deployed on top of it: read the run (gh run view $rid), then land --promote $NAME again."
   [ "$conc" != cancelled-at-ceiling ] || die "NAMED STOP [PROMOTE_RUN_PAST_CEILING] $PROMOTE_WF run $rid on ${sha:0:7} ran past $((ceil / 60)) min and was cancelled. Nothing deployed on top of it: read the run (gh run view $rid), then land --promote $NAME again."
   echo "     promote run $rid finished: $conc — reading production again"
 }
@@ -898,7 +904,8 @@ queue_gh() { # gh args -> its stdout | rc 75 with one NAMED STOP line on stderr
   rm -f "$ef"
   local reset=""
   is_rate_limit "$err" 2>/dev/null && reset="; its allowance resets at $(when $(( $(date +%s) + $(rate_reset_in) )) 2>/dev/null || echo "an unknown time")"
-  echo "NAMED STOP [QUEUE_UNREADABLE] GitHub refused gh $1 $2 ($err)$reset: main's post-merge run is unknown, so nothing was merged" >&2
+  local why="${UNREADABLE_WHY:-}"; [ -n "$why" ] || why="main's post-merge run is unknown, so nothing was merged" # the caller names its stop and its consequence
+  echo "NAMED STOP [${UNREADABLE_STOP:-QUEUE_UNREADABLE}] GitHub refused gh $1 $2 ($err)$reset: $why" >&2
   return 75
 }
 queue_workflows() { printf '%s\n' "$E2E_WF" "$DEPLOY_WF" "$( [ -n "$E2E_WF" ] && printf '%s' "$PROMOTE_WF")" | grep -v '^$' | sort -u; }
@@ -1959,7 +1966,7 @@ if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -
   case "$DCONC" in
     success) if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR IS MERGED and $DEPLOY_WF run $DRID finished green, but the production smoke check failed. Read that run: gh run view $DRID"; fi
              say "LANDED — #$PR is merged, main is green, and $DEPLOY_WF run $DRID shipped ${DMSHA:0:7} to production."; exit 0 ;;
-    "")      die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
+    ""|unreadable) die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
     *)       die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID finished $DCONC. Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
   esac
 fi

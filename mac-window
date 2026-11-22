@@ -267,6 +267,8 @@ def run_morning(label, cmd, m):
                 json.dump({"since": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": label,
                            "clears": "after the last morning job finishing at or after 06:14; swept from 06:55 or after 3 h"}, fh)
             say("MORNING_BLOCK_ON %s by %s: the PBS fill runs one lane until the morning jobs are done" % (f, label))
+        else:
+            os.utime(f)   # each morning job refreshes it, so a long block is never read as stale (3 h)
     try:
         rc = subprocess.call(cmd)
     finally:

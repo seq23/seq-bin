@@ -213,5 +213,9 @@ touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=06:56 "$MW" run ANY com.seq.bos
 touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true >/dev/null; [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag swept inside the morning block"
 touch -t "$(date -v-3H -v-10M +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 3 h is removed"
 
+# every morning job refreshes the flag, so a block longer than 3 h is never read as stale
+mkdir -p "$(dirname "$MAC_WINDOW_MORNING_FLAG")"; echo '{}' > "$MAC_WINDOW_MORNING_FLAG"; touch -t "$(date -v-2H +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"
+MAC_WINDOW_NOW=05:50 "$MW" run MORNING com.seq.boss-scorecard -- true >/dev/null
+if [ -n "$(find "$MAC_WINDOW_MORNING_FLAG" -mmin -5 2>/dev/null)" ]; then ok; else no "a morning job did not refresh the flag"; fi
 echo "test-mac-window: $pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 74 ]
+[ "$fail" = 0 ] && [ "$pass" -ge 75 ]

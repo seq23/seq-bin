@@ -63,7 +63,10 @@ while [ $# -gt 0 ]; do
 done
 case "$ROLE" in worker|brain) ;; *) echo "ai-run: --role must be worker or brain (got '${ROLE}')" >&2; usage ;; esac
 [ "$HAVE_PROMPT" -eq 1 ] || PROMPT="$(cat)"
-[ -n "${PROMPT//[[:space:]]/}" ] || { echo "NAMED STOP [NO_PROMPT] ai-run was given an empty prompt." ; exit 64; }
+# A regex test, never ${PROMPT//[[:space:]]/}: macOS /bin/bash 3.2 runs that substitution in quadratic
+# time, so a review prompt carrying a PR's changed lines (tens of KB) spun at 100% CPU past the
+# 20-minute seat cap before the engine ever started (21 Nov 2026: every p-n-p #223 review NO_REVIEWER).
+[[ "$PROMPT" =~ [^[:space:]] ]] || { echo "NAMED STOP [NO_PROMPT] ai-run was given an empty prompt." ; exit 64; }
 if [ -n "$CWD" ]; then
   [ -d "$CWD" ] || { echo "NAMED STOP [NO_CWD] $CWD is not a directory."; exit 64; }
   CWD="$(cd "$CWD" && pwd)"

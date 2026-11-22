@@ -8,20 +8,23 @@
 #
 # This file sits first on PATH (~/bin) and stands in front of the real gh, so EVERY caller (agents, land,
 # land-after, ci-sweep, scripts) shares one allowance without changing a line of theirs:
-#   1. ONE SHARED CACHE. A read (gh api GET, run view/list, pr view/list/checks, issue/workflow/repo/
-#      release view/list) with the same words, in the same repo, inside GH_SHARE_TTL seconds (20) is
-#      answered from ~/.cache/gh-share, so ten agents watching one PR cost one call, not ten. "The same
-#      repo" includes the checkout's branch (a bare `gh pr view` means "this branch's PR"), so sibling
-#      worktrees never get each other's answers. A write bumps a generation; a read that was in flight
-#      across a write is returned to its caller but not kept. Only a
-#      successful answer is kept, and never past its TTL: an expired entry is fetched again, and if that
-#      fetch fails the failure is returned, never the old answer ("green" is never served stale).
+#   1. ONE SHARED CACHE, NEVER STALE, MOSTLY FREE. A read (gh api GET, run view/list, pr view/list/checks,
+#      issue/workflow/repo/release view/list) with the same words, in the same repo, inside GH_SHARE_TTL
+#      seconds (5) is answered from ~/.cache/gh-share, so ten agents watching one run cost one call. The
+#      key is the question: the checkout's branch and HEAD join it only when the read names no target (a
+#      bare `gh pr view`, `pr status`, `{branch}`), so `run view 123 -R o/r` is one answer for every
+#      worktree. After the TTL an api GET is asked again WITH ITS ETag (If-None-Match): GitHub answers 304
+#      "unchanged" without charging the allowance (measured 22 Nov 2026), and the kept body is served; a
+#      changed answer is a normal 200. A write bumps a generation: every answer older than it counts as
+#      expired (its ETag is kept, so the re-ask is still free), and a read in flight across a write is
+#      returned to its caller but not kept. Only a successful answer is kept; a failed fetch returns the
+#      failure, never the old answer ("green" is never served stale).
 #   2. WATCHERS POLL THROUGH HERE. `gh run watch` and `gh pr checks --watch` never reach the real gh: each
-#      becomes a loop of ordinary reads of this file (`run view --json status`, `pr checks`), so every poll
-#      is shared, logged, held at the floor and charged to its caller, no faster than every
-#      GH_SHARE_WATCH_SECS (30) seconds (a shorter --interval is raised to it). Exit codes are gh's:
-#      `pr checks` 0 passed / 1 failed (--fail-fast stops at the first fail), `run watch --exit-status` 1 on
-#      a failed run.
+#      becomes a loop of ordinary reads of this file (`api repos/<o>/<r>/actions/runs/<id>`, one request
+#      and free while unchanged; `pr checks`), so every poll is shared, logged, held at the floor and
+#      charged to its caller, no faster than every GH_SHARE_WATCH_SECS (30) seconds (a shorter --interval
+#      is raised to it). Exit codes are gh's: `pr checks` 0 passed / 1 failed (--fail-fast stops at the
+#      first fail), `run watch --exit-status` 1 on a failed run.
 #   3. LOW ALLOWANCE WAITS, IT DOES NOT FAIL. Before a read reaches GitHub, the allowance left (from
 #      GitHub's free rate_limit endpoint, re-read every 30 s and shared) is checked; at or under
 #      GH_SHARE_FLOOR (300) the read waits for the reset in ONE bounded sleep, then runs. The floor is
@@ -34,11 +37,14 @@
 #   4. NO POLLER TAKES MORE THAN ITS SHARE. Each caller (its process group: one agent's Bash call, one
 #      land run) may spend GH_SHARE_PER_CALLER (500, a tenth of the hour) REST requests in any hour,
 #      priced by rest_cost (run view/list = 2: one gh call is not one request); over that it waits until
-#      its oldest call in the window is an hour old. Cache hits are free.
+#      its oldest call in the window is an hour old. Cache hits and 304s are free. The share file is
+#      append only (one "epoch cost" line per charged call, so parallel siblings never lose a line); the
+#      hourly sweep deletes a caller's file an hour after its last call.
 # Every call is logged (the last 48 h are kept), one line, to ~/.cache/gh-share/calls.log (epoch, caller, kind, subcommand), so
 # calls per hour are measured, not guessed:
 #   awk -v c="$(( $(date +%s) - 3600 ))" '$1 > c {n[$3]++} END {for (k in n) print k, n[k]}' ~/.cache/gh-share/calls.log
-# (miss, write, watch and graphql reached GitHub; hit was answered here; wait/share/stop are holds).
+# (miss, write, watch and graphql reached GitHub; 304 asked GitHub and was free; hit was answered here;
+# wait/share/stop are holds).
 #
 # AN UNREADABLE ALLOWANCE IS A STOP, never a blind call: when rate_limit fails twice, a read exits 75 with
 # "rate limit: NAMED STOP [GH_ALLOWANCE_UNKNOWN]" and is not sent (writes are never held).
@@ -67,7 +73,7 @@ REAL="$(real_gh)"
 
 DIR="${GH_SHARE_DIR:-$HOME/.cache/gh-share}"
 mkdir -p "$DIR/resp" "$DIR/callers" "$DIR/tmp" 2>/dev/null && [ -w "$DIR" ] || exec "$REAL" "$@"
-TTL="${GH_SHARE_TTL:-20}"
+TTL="${GH_SHARE_TTL:-5}"
 WATCH_SECS="${GH_SHARE_WATCH_SECS:-30}"
 FLOOR="${GH_SHARE_FLOOR:-300}"
 MAX_WAIT="${GH_SHARE_MAX_WAIT:-3700}"
@@ -177,23 +183,22 @@ rest_cost() {
     *) echo 1 ;;
   esac
 }
-hold_share() { # one caller may spend PER_CALLER of the REST allowance in any hour (args: the call)
-  local f="$DIR/callers/$CALLER" n oldest secs cost
-  cost="$(rest_cost "$@")"
-  [ -f "$f" ] && awk -v c=$(( NOW - 3600 )) '$1 > c' "$f" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f"
-  # each line is "epoch cost" (a line with no cost, from before 22 Nov, counts 1)
-  n=0; [ -f "$f" ] && n="$(awk '{n += ($2 == "" ? 1 : $2)} END {print n + 0}' "$f")"
-  if [ $(( n + cost )) -gt "$PER_CALLER" ]; then
-    oldest="$(head -1 "$f" | cut -d' ' -f1)"; secs=$(( oldest + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
+# APPEND ONLY (22 Nov 2026 hostile review F5): the share file was rewritten (awk + mv) on every call
+# while sibling calls in the same process group appended to it, so lines were lost and the share was
+# undercounted. Now a call only appends one line; lines over an hour old are skipped when counting, and a
+# file nobody has appended to for an hour is deleted in the sweep. Nothing ever rewrites it.
+share_check() { # $1 cost: holds (bounded) while this caller's last hour plus this call would pass its share
+  local f="$DIR/callers/$CALLER" n oldest secs
+  read -r n oldest <<<"$(awk -v c=$(( NOW - 3600 )) '$1 > c {n += ($2 == "" ? 1 : $2); if (o == "") o = $1} END {print n + 0, o + 0}' "$f" 2>/dev/null)"
+  if [ $(( ${n:-0} + $1 )) -gt "$PER_CALLER" ]; then
+    secs=$(( ${oldest:-0} + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
     too_long "$secs" "this caller has spent $n GitHub requests this hour (its share is $PER_CALLER); its next read"
     echo "gh-share: this caller has spent $n GitHub requests this hour (its share is $PER_CALLER); waiting ${secs}s — poll less often or wait in one bounded call" >&2
     log share "$secs"
     sleep "$secs"; NOW="$(date +%s)"
   fi
-  echo "$NOW $cost" >> "$f"
-  # callers gone for an hour are forgotten
-  find "$DIR/callers" -type f -mmin +60 -delete 2>/dev/null || true
 }
+share_charge() { echo "$NOW $1" >> "$DIR/callers/$CALLER"; }   # $1 cost; one small append (atomic)
 
 # the generation: any write moves it (a unique token, so two writes at once still both move it)
 gen() { cat "$DIR/gen" 2>/dev/null; }
@@ -216,10 +221,23 @@ watch_loop() { # gh run watch <id> [...] | gh pr checks [<pr>] --watch [...]
     esac
     shift
   done
+  local run_id="" run_repo="{owner}/{repo}" i
+  for ((i = 0; i < ${#rest[@]}; i++)); do
+    case "${rest[$i]}" in
+      -R|--repo) run_repo="${rest[$((i + 1))]:-}"; run_repo="${run_repo#https://github.com/}"; i=$((i + 1)) ;;
+      --repo=*) run_repo="${rest[$i]#--repo=}" ;;
+      [0-9]*) run_id="${rest[$i]}" ;;
+    esac
+  done
+  if [ "$sub" = run ] && [ -z "$run_id" ]; then   # no run named: gh's own picker in a terminal, else gh's own error
+    [ -t 0 ] && [ -t 1 ] && exec "$REAL" run watch "${rest[@]}"
+    echo "run ID required when not running interactively" >&2; exit 1
+  fi
   log watch "$sub $iv"
   while :; do
     if [ "$sub" = run ]; then
-      out="$("$SELF" run view "${rest[@]}" --json status,conclusion -q '.status+" "+.conclusion')"; rc=$?
+      # one api GET of the run (1 REST request, 0 on a 304), not `run view --json` (2)
+      out="$("$SELF" api "repos/$run_repo/actions/runs/$run_id" --jq '.status+" "+(.conclusion // "")')"; rc=$?
       [ "$rc" -eq 0 ] || exit "$rc"
       case "$out" in
         completed*)
@@ -249,13 +267,14 @@ case "$KIND" in
     log graphql "${1:-} ${2:-}"
     exec "$REAL" "$@" ;;
   write)
-    # A write changes what the reads would say (a merge makes the PR MERGED, a dispatch adds a run), so
-    # every kept answer is dropped before it and again after it: a read that ran during the write is not
-    # kept either, and land's own "did it merge?" read after the merge always reaches GitHub.
+    # A write changes what the reads would say (a merge makes the PR MERGED, a dispatch adds a run), so the
+    # generation moves before it and again after it: every answer kept before the second move is stale (a
+    # read that ran during the write is not kept either), and land's own "did it merge?" read after the
+    # merge always reaches GitHub. The answers stay on disk with their ETags, so an api read after a write
+    # revalidates (a 304 is free) instead of paying again. (mtimes are whole seconds, so an answer kept in the
+    # same second as the move counts as before it: one extra read, never a stale one.)
     log write "${1:-} ${2:-}"
-    bump; rm -f "$DIR"/resp/* 2>/dev/null
-    "$REAL" "$@"; rc=$?
-    bump; rm -f "$DIR"/resp/* 2>/dev/null
+    bump; "$REAL" "$@"; rc=$?; bump
     exit "$rc" ;;
   watch)
     # A watcher polls THROUGH this wrapper (22 Nov 2026: an exec'd `gh run watch` / `pr checks --watch`
@@ -267,36 +286,95 @@ esac
 
 # --- a read ----------------------------------------------------------------------------------------------
 [ -t 1 ] && { wait_for_reset "$@"; log read-tty "${1:-} ${2:-}"; exec "$REAL" "$@"; }
+# THE KEY NAMES THE QUESTION, NOT THE ASKER (22 Nov 2026 hostile review F3: branch and HEAD were in every
+# key, so lands in different worktrees never shared `run view 123` and 9% of reads were hits). The
+# checkout's branch and commit count only when the answer depends on them: a pr read that names no PR
+# ("this branch's PR"; a push changes it) or a {branch} placeholder. The checkout's repo counts unless -R
+# names one (`gh api repos/{owner}/{repo}/…` and a bare `gh run list` mean this checkout's repo).
+needs_branch() {
+  local a skip=0
+  case " $* " in *"{branch}"*) return 0 ;; esac
+  [ "${1:-}" = pr ] || return 1
+  case "${2:-}" in status) return 0 ;; view|checks|diff) ;; *) return 1 ;; esac
+  shift 2
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      -R|--repo|--json|-q|--jq|-t|--template|--color|-i|--interval) skip=1 ;;
+      -*) ;;
+      *) return 1 ;;   # a PR number, URL or branch: an explicit target
+    esac
+  done
+  return 0
+}
 repo_hint=""
 has_flag -R "$@" || has_flag --repo "$@" || repo_hint="$(git config --get remote.origin.url 2>/dev/null)"
-# the branch always counts (with -R too: `gh pr view -R o/r` with no number still means this branch's PR)
-# and the checkout's commit: a push from here changes the answer, so it never reuses one from before it
-branch="$(git symbolic-ref -q HEAD 2>/dev/null) $(git rev-parse -q HEAD 2>/dev/null)"
+branch=""
+needs_branch "$@" && branch="$(git symbolic-ref -q HEAD 2>/dev/null) $(git rev-parse -q HEAD 2>/dev/null)"
 key="$(printf '%s\0' "$@" "${GH_REPO:-}" "${GH_HOST:-}" "$repo_hint" "$branch" | shasum -a 256 2>/dev/null | cut -c1-40)"
 [ -n "$key" ] || exec "$REAL" "$@"
 cache="$DIR/resp/$key"
-if [ -f "$cache" ] && [ $(( NOW - $(mtime "$cache") )) -lt "$TTL" ]; then
+# Fresh = younger than the TTL AND kept after the last write (a write moves the generation file; it no
+# longer deletes answers, so their ETags survive it and the next read revalidates for free).
+if [ -f "$cache" ] && [ $(( NOW - $(mtime "$cache") )) -lt "$TTL" ] && [ "$(mtime "$cache")" -gt "$(mtime "$DIR/gen")" ]; then
   log hit "${1:-} ${2:-}"
   # the first line is the exit code the answer came with; the rest is its stdout, byte for byte
   { IFS= read -r crc; cat; } < "$cache"; exit "${crc:-0}"
 fi
+# A 304 IS FREE (22 Nov 2026 hostile review F2, measured live: a GET with If-None-Match came back HTTP 304
+# and core did not move). Every `gh api` GET keeps its ETag beside its answer; once the answer is past
+# its TTL (or a write), it is asked again WITH that ETag, and a 304 refreshes it and serves it: never
+# stale (GitHub just said nothing changed) and charged to nobody. A changed answer is a normal 200.
+etag_ok=0
+if [ "${1:-}" = api ] && ! has_flag -i "$@" && ! has_flag --include "$@" && ! has_flag --paginate "$@" && ! has_flag --silent "$@" && ! has_flag --verbose "$@"; then
+  case "$*" in *[Ii][Ff]-[Nn][Oo][Nn][Ee]-[Mm][Aa][Tt][Cc][Hh]*) ;; *) etag_ok=1 ;; esac
+fi
 wait_for_reset "$@"
-hold_share "$@"
-log miss "${1:-} ${2:-}"
+cost="$(rest_cost "$@")"
+share_check "$cost"
 g0="$(gen)"
-tmp="$DIR/tmp/$key.$$"   # outside resp/: a write clearing resp/ must not take an answer in flight
-"$REAL" "$@" > "$tmp"; rc=$?
+tmp="$DIR/tmp/$key.$$"   # outside resp/: nothing clearing resp/ may take an answer in flight
+cond=""
+# the old answer is copied first: a 304 is served from that copy, so a body swept away meanwhile can
+# never become an empty answer (no copy -> no ETag sent -> a full fetch)
+[ "$etag_ok" = 1 ] && [ -s "$cache.etag" ] && cp "$cache" "$tmp.old" 2>/dev/null && cond="$(cat "$cache.etag")"
+if [ "$etag_ok" = 1 ]; then
+  if [ -n "$cond" ]; then "$REAL" "$@" -i -H "If-None-Match: $cond" > "$tmp.raw" 2> "$tmp.err"; rc=$?
+  else "$REAL" "$@" -i > "$tmp.raw" 2> "$tmp.err"; rc=$?; fi
+  code="$(head -1 "$tmp.raw" 2>/dev/null | awk '$1 ~ /^HTTP\// {print $2}')"
+  if [ -n "$cond" ] && [ "$code" = 304 ]; then
+    log 304 "${1:-} ${2:-}"
+    if [ "$(gen)" = "$g0" ]; then cp "$tmp.old" "$tmp.k" && mv -f "$tmp.k" "$cache"; fi
+    { IFS= read -r crc; cat; } < "$tmp.old"; rm -f "$tmp.old" "$tmp.raw" "$tmp.err"; exit "${crc:-0}"
+  fi
+  share_charge "$cost"; log miss "${1:-} ${2:-}"
+  CR="$(printf '\r')"
+  if [[ "$code" =~ ^[0-9]{3}$ ]]; then
+    sed "1,/^${CR}*\$/d" "$tmp.raw" > "$tmp"
+    etag="$(sed -n "1,/^${CR}*\$/p" "$tmp.raw" | grep -i '^etag:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
+  else
+    mv -f "$tmp.raw" "$tmp"; etag=""; [ "$rc" -eq 0 ] && rc=1   # no status line: not an answer to keep
+  fi
+  cat "$tmp.err" >&2; rm -f "$tmp.raw" "$tmp.err" "$tmp.old"
+else
+  share_charge "$cost"; log miss "${1:-} ${2:-}"
+  "$REAL" "$@" > "$tmp"; rc=$?; etag=""
+fi
 # A real answer is kept: 0, and 8 from `gh pr checks` (checks still pending). Anything else (an error, a
-# failed check list, GitHub down) is never cached; an expired answer is never served, so none is kept.
+# failed check list, GitHub down) is never kept; an expired answer is never served without a 304.
 if { [ "$rc" -eq 0 ] || { [ "$rc" -eq 8 ] && [ "${1:-}" = pr ]; }; } && [ "$(gen)" = "$g0" ]; then
-  cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"; rm -f "$tmp" "$tmp.k"
+  cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"
+  if [ -n "$etag" ]; then printf '%s\n' "$etag" > "$tmp.e" && mv -f "$tmp.e" "$cache.etag"; else rm -f "$cache.etag"; fi
+  rm -f "$tmp"
 else
   cat "$tmp"; rm -f "$tmp"
+  [ "$rc" -eq 0 ] || rm -f "$cache" "$cache.etag"   # a failed fetch leaves nothing to revalidate
 fi
-# now and then (a cheap sweep, about one call in fifty): responses older than an hour go, and calls.log
-# keeps its last 48 h (about 10k calls an hour would otherwise grow it by 240k lines a day)
+# now and then (a cheap sweep, about one call in fifty): answers unused for an hour go, callers silent for
+# an hour go, and calls.log keeps its last 48 h (about 10k calls an hour would otherwise grow it by 240k
+# lines a day)
 if [ $(( NOW % ${GH_SHARE_SWEEP_EVERY:-50} )) -eq 0 ]; then
-  find "$DIR/resp" -type f -mmin +60 -delete 2>/dev/null
+  find "$DIR/resp" "$DIR/callers" "$DIR/tmp" -type f -mmin +60 -delete 2>/dev/null
   awk -v c=$(( NOW - 172800 )) '$1 > c' "$DIR/calls.log" > "$DIR/calls.log.$$" 2>/dev/null && mv -f "$DIR/calls.log.$$" "$DIR/calls.log"
 fi
 exit "$rc"

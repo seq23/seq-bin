@@ -13,15 +13,15 @@ cat > "$W/bin/gh" <<'SH'
 case "$*" in
   "run list --workflow e2e --branch main --status in_progress"*) [ -f "$STATE/done" ] && echo "" || printf '901\te2e\t%s\n' abcdef1234567 ;;
   "run list"*) echo "" ;;
-  "run view 901"*) n=$(cat "$STATE/views" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$STATE/views"
+  "api repos/{owner}/{repo}/actions/runs/901"*) n=$(cat "$STATE/views" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$STATE/views"
                    if [ "$n" -ge 3 ]; then touch "$STATE/done"; echo success; else echo ""; fi ;;
   "pr list"*) echo "${RECENT_OUT:-}" ;;
   *) echo "" ;;
 esac
 SH
-printf '#!/bin/bash\nexit 0\n' > "$W/bin/sleep"; chmod +x "$W/bin/"*
+printf '#!/bin/bash\necho "$1" >> "$STATE/sleeps"\n' > "$W/bin/sleep"; chmod +x "$W/bin/"*
 export PATH="$W/bin:$PATH" STATE="$W"
-eval "$(sed -n '/^# --- queue begin/,/^# --- queue end/p' "$LAND")"
+eval "$(sed -n '/^# --- run_conclusion begin/,/^# --- run_conclusion end/p;/^# --- queue begin/,/^# --- queue end/p' "$LAND")"
 type queue_wait >/dev/null 2>&1 || { echo "FAIL: no queue block in land"; exit 1; }
 last_duration() { echo 600; }
 fail=0
@@ -29,6 +29,10 @@ E2E_WF="e2e"; DEPLOY_WF=""; PROMOTE_WF="deploy.yml"
 out="$(queue_wait)"; rc=$?
 { [ $rc -eq 0 ] && grep -q "e2e run 901 on main abcdef1 is still running" <<<"$out" && grep -q "finished: success" <<<"$out"; } || { echo "FAIL: in-flight run not waited for: $out"; fail=1; }
 [ "$(cat "$W/views")" -ge 3 ] || { echo "FAIL: merged before the run finished"; fail=1; }
+# 22 Nov 2026 hostile review F1: one read per poll, a minute apart (it was two run views every 20 s,
+# ~700 REST per e2e wait). 3 reads = 2 pending + 1 done, so 2 sleeps, each 60 s.
+[ "$(cat "$W/views")" -eq 3 ] && [ "$(sort -u "$W/sleeps" | paste -sd, -)" = 60 ] && [ "$(wc -l < "$W/sleeps" | tr -d ' ')" -eq 2 ] \
+  || { echo "FAIL: the wait is not one read per 60 s poll: $(cat "$W/views") reads, sleeps $(paste -sd, - < "$W/sleeps")"; fail=1; }
 # no post-merge workflow on the route: nothing to wait for
 E2E_WF=""; DEPLOY_WF=""; rm -f "$W/views" "$W/done"
 [ -z "$(queue_workflows)" ] || { echo "FAIL: a route with no e2e/deploy workflow still queues"; fail=1; }

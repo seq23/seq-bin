@@ -76,6 +76,10 @@ jobs:
       - name: land must know how every West Peek site repo reaches production
         run: ./tests/test-land-routes.sh
 
+      # 22 Nov 2026: rate-limited reads made land call a green deploy "past its ceiling and cancelled".
+      - name: land treats an unanswered run read as unknown, never as cancelled
+        run: ./tests/test-land-wait-run.sh
+
       # 25 Sep 2026, local-guides-generator #48: land said "nothing to run" while a Cloudflare Pages
       # production build had failed on the merge commit. Evals land's pages_watch block.
       - name: land must refuse a merge whose Cloudflare build failed

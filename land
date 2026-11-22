@@ -578,19 +578,30 @@ smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to s
 }
 # Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
 # duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
+# --- wait_run begin (tests/test-land-wait-run.sh evals this block verbatim) ---
+# wait_run_bounded RID CEILING -> prints the run's conclusion, or (return 1):
+#   cancelled-at-ceiling  the run was READ still going at the ceiling, and the cancel went through;
+#   unread                GitHub did not answer (rate limit, auth, network), so the run's state is
+#                         UNKNOWN: nothing is cancelled and nothing is claimed about it.
+# 22 Nov 2026: a rate-limited API (403 on every read) made each read look like "still running", and
+# land reported westpeek-live deploy run 45044589982 "ran past 14 min and was cancelled" when it had
+# finished green with smoke ok in 3.5 min and the cancel itself had failed. A failed read is never a state.
 wait_run_bounded() { # $1 run id  $2 ceiling seconds
-  local rid="$1" deadline=$(( $(date +%s) + $2 )) conc=""
+  local rid="$1" deadline=$(( $(date +%s) + $2 )) row="" st="" conc=""
   while :; do
-    conc="$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
-    [ -n "$conc" ] && break
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      gh run cancel "$rid" >/dev/null 2>&1 || true
-      echo "cancelled-at-ceiling"; return 1
+    st=""; conc=""
+    if row="$(gh run view "$rid" --json status,conclusion -q '"\(.status)\t\(.conclusion // "")"' 2>/dev/null)" && [ -n "$row" ]; then
+      IFS=$'\t' read -r st conc <<<"$row"
+      [ "$st" = completed ] && [ -n "$conc" ] && { echo "$conc"; return 0; }
     fi
-    sleep 20
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      if [ -n "$st" ] && gh run cancel "$rid" >/dev/null 2>&1; then echo "cancelled-at-ceiling"; else echo "unread"; fi
+      return 1
+    fi
+    sleep "${LAND_WAIT_POLL_SECS:-20}"
   done
-  echo "$conc"
 }
+# --- wait_run end ---
 # Measured from the newest SUCCESSFUL run (1 Nov 2026): a failed or cancelled run ends early, and once
 # a load-error run of 2 min set e2e's ceiling to the 10-min floor, so a healthy 12-min run was cut off.
 # The LONGEST of the last 5 successful runs (6 Nov 2026): one quick 6-min dailystory deploy set a 9-min
@@ -736,6 +747,7 @@ promote_wait_inflight() {
   ceil=$(( $(last_duration "$PROMOTE_WF") * 3 / 2 )); [ "$ceil" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || ceil=${LAND_WAIT_FLOOR_SECS:-360}
   echo "     promote run $rid in flight for ${sha:0:7} ($st) — waiting (ceiling $((ceil / 60)) min, 1.5x its last completed run)"
   conc="$(wait_run_bounded "$rid" "$ceil")" || true
+  [ "$conc" != unread ] || die "NAMED STOP [RUN_UNREAD] GitHub did not answer about $PROMOTE_WF run $rid for $((ceil / 60)) min (rate limit or auth), so its result is unknown and nothing was cancelled. Read it (gh run view $rid) once GitHub answers, then land --promote $NAME again."
   [ "$conc" != cancelled-at-ceiling ] || die "NAMED STOP [PROMOTE_RUN_PAST_CEILING] $PROMOTE_WF run $rid on ${sha:0:7} ran past $((ceil / 60)) min and was cancelled. Nothing deployed on top of it: read the run (gh run view $rid), then land --promote $NAME again."
   echo "     promote run $rid finished: $conc — reading production again"
 }
@@ -1649,6 +1661,7 @@ if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -
     if [ "$DST" != completed ]; then
       echo "     $DEPLOY_WF run $DRID ($DST) — waiting (ceiling $((DCEIL / 60)) min, 1.5x its last completed run)"
       DCONC="$(wait_run_bounded "$DRID" "$DCEIL")" || true
+      [ "$DCONC" != unread ] || die "NAMED STOP [RUN_UNREAD] #$PR IS MERGED, but GitHub did not answer about $DEPLOY_WF run $DRID for $((DCEIL / 60)) min (rate limit or auth), so its result is unknown and nothing was cancelled. Production NOT confirmed: gh run view $DRID once GitHub answers"
       [ "$DCONC" != cancelled-at-ceiling ] || die "NAMED STOP [DEPLOY_RUN_PAST_CEILING] #$PR IS MERGED, but $DEPLOY_WF run $DRID ran past $((DCEIL / 60)) min and was cancelled. Production NOT confirmed: gh run view $DRID"
       # Superseded while we waited (concurrency cancel-in-progress): the newer run carries this merge.
       [ "$DCONC" != cancelled ] || { echo "     run $DRID was cancelled (superseded) — looking for the run that carries ${DMSHA:0:7}"; DAPPEAR=$((SECONDS + ${LAND_DEPLOY_APPEAR_SECS:-300})); continue; }

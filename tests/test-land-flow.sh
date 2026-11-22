@@ -60,6 +60,7 @@ SH
 cat > "$BIN/gh" <<'SH'
 #!/bin/bash
 a="$*"; echo "$a" >> "$FAKE_DIR/calls"
+echo "${GH_SHARE_UNTIL:-none}" > "$FAKE_DIR/gh-until"   # the deadline ~/bin/gh is given
 answer() { # mode-file default
   local m; m="$(cat "$FAKE_DIR/$1" 2>/dev/null || echo "$2")"
   case "$m" in
@@ -204,6 +205,8 @@ check "rc 0 (was: STOPPED: could not sync main, rc 1)" [ "$RC" -eq 0 ]
 check "main watched to success" has "completed success"
 check "her dirty file is byte-for-byte hers" [ "$(cat "$W/approvalprep/artifacts/a.json")" = '{"v":"hers"}' ]
 check "her local main was not moved" [ "$(git -C "$W/approvalprep" rev-parse HEAD)" = "$BEFORE" ]
+# #138 review: ~/bin/gh must not sleep past the whole land's 65-min wait (one owner of waiting).
+check "every gh call carried land's deadline (GH_SHARE_UNTIL ~ start + 65 min)" eval 'u="$(cat "$FAKE/gh-until")"; [[ "$u" =~ ^[0-9]+$ ]] && [ $(( u - $(date +%s) )) -gt 3600 ] && [ $(( u - $(date +%s) )) -le 3900 ]'
 check "it says it left the tree alone" has "left exactly as they are"
 check "origin/main was fetched" [ "$(git -C "$W/approvalprep" rev-parse origin/main)" = "$ORIGIN_MAIN" ]
 # 2 Oct 2026 (lgcv #163/#166): the run watched on main is the workflow that judged the PR, not `[0]`.

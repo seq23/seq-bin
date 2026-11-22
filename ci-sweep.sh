@@ -770,7 +770,7 @@ probe_main() {
 # dispatch to, which are parked from yesterday, and the merge route per repo. No
 # lock, no AI run, no PR, no merge, no notification.
 if [ -n "${CI_SWEEP_DRY_RUN:-}" ]; then
-  echo "[dry-run] schedule: Mon+Fri 22:15 CT (launchd com.seq.ci-sweep), one retry at 22:20 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Tue/Sat run"
+  echo "[dry-run] schedule: Mon+Fri 22:15 CT (launchd com.seq.ci-sweep), one retry at 22:20 if not green (launchd com.seq.ci-sweep-retry); at most one retry, then nothing retries before the next Mon/Fri run"
   echo "[dry-run] engine: every round runs ai-run --role worker (Codex); Codex out (limit or unavailable) hands the same brief to Claude; both out is a named stop"
   echo "[dry-run] budget: ${DEADLINE_MIN} min convergence, hard kill at ${HARD_KILL_MIN} awake min; round 1 cap ${ROUND1_CAP_MIN} min, later rounds ${ROUNDN_CAP_MIN} min"
   echo "[dry-run] rounds continue while a round makes progress; STUCK after ${NO_PROGRESS_LIMIT} consecutive rounds without"

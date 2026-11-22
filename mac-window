@@ -28,7 +28,7 @@ scheduled to finish by 06:30 with twice its worst measured runtime to spare (bos
 it). From the first morning job of the night to the last, ~/.boss-os/morning-window.active exists: the
 PBS fill reads it and drops to ONE lane so the memory is theirs. It is set when a MORNING job starts
 before 07:00, kept while any runs, cleared when one finishes at or after 06:14 (the last morning slot)
-with none left running, and swept if still there at 06:55 or later, or older than 4 hours, with nobody
+with none left running, and swept if still there at 06:55 or later, or older than 3 hours, with nobody
 holding it (the PBS fill's clone lane, peace-be-still #104, waits while it exists).
 
 HEAVY SLOTS. At most 2 heavy jobs at once on this 8 GB Mac (CLAUDE.md). A heavy run takes
@@ -245,7 +245,7 @@ def morning_holders():
 
 def sweep_morning_flag(m):
     f = morning_flag()
-    stale = os.path.exists(f) and time.time() - os.path.getmtime(f) > 4 * 3600   # older than 4 h: ignored and removed
+    stale = os.path.exists(f) and time.time() - os.path.getmtime(f) > 3 * 3600   # older than 3 h: ignored and removed (the PBS fill reads it the same way)
     if not os.path.exists(f):
         return
     with locked("morning"):
@@ -265,7 +265,7 @@ def run_morning(label, cmd, m):
         if not os.path.exists(f):
             with open(f, "w") as fh:
                 json.dump({"since": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": label,
-                           "clears": "after the last morning job finishing at or after 06:14; swept from 06:55 or after 4 h"}, fh)
+                           "clears": "after the last morning job finishing at or after 06:14; swept from 06:55 or after 3 h"}, fh)
             say("MORNING_BLOCK_ON %s by %s: the PBS fill runs one lane until the morning jobs are done" % (f, label))
     try:
         rc = subprocess.call(cmd)

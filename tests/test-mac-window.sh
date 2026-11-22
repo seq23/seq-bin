@@ -211,7 +211,7 @@ MAC_WINDOW_NOW=06:27 "$MW" run MORNING com.seq.m-short -- true >/dev/null
 wait $pl
 touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=06:56 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && [ ! -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "stale flag swept at 06:56"
 touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true >/dev/null; [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag swept inside the morning block"
-touch -t "$(date -v-5H +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 4 h is removed"
+touch -t "$(date -v-3H -v-10M +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 3 h is removed"
 
 echo "test-mac-window: $pass passed, $fail failed"
 [ "$fail" = 0 ] && [ "$pass" -ge 74 ]

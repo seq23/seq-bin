@@ -10,7 +10,10 @@
 # land-after, ci-sweep, scripts) shares one allowance without changing a line of theirs:
 #   1. ONE SHARED CACHE. A read (gh api GET, run view/list, pr view/list/checks, issue/workflow/repo/
 #      release view/list) with the same words, in the same repo, inside GH_SHARE_TTL seconds (20) is
-#      answered from ~/.cache/gh-share, so ten agents watching one PR cost one call, not ten. Only a
+#      answered from ~/.cache/gh-share, so ten agents watching one PR cost one call, not ten. "The same
+#      repo" includes the checkout's branch (a bare `gh pr view` means "this branch's PR"), so sibling
+#      worktrees never get each other's answers. A write bumps a generation; a read that was in flight
+#      across a write is returned to its caller but not kept. Only a
 #      successful answer is kept, and never past its TTL: an expired entry is fetched again, and if that
 #      fetch fails the failure is returned, never the old answer ("green" is never served stale).
 #   2. WATCHERS BACK OFF. `gh run watch` and `gh pr checks --watch` poll no faster than every
@@ -19,11 +22,15 @@
 #      GitHub's free rate_limit endpoint, re-read every 30 s and shared) is checked; at or under
 #      GH_SHARE_FLOOR (300) the read waits for the reset in ONE bounded sleep, then runs. The floor is
 #      kept for writes: a merge, a cancel, a deploy dispatch or a PR comment is never held (landing first).
-#      A reset further away than GH_SHARE_MAX_WAIT (3700 s) is a NAMED STOP, exit 75 (could not verify).
+#      The budget checked is the one the read spends: REST ("core") for api/run/workflow, GraphQL for
+#      pr/issue/repo/release (GitHub counts them apart; either can run out alone).
+#      A reset further away than GH_SHARE_MAX_WAIT (3700 s), or past GH_SHARE_UNTIL (the caller's own
+#      deadline, an epoch: land and land-after set it), is not slept: exit 75 at once with "rate limit: …"
+#      on stderr, so the caller's own rate-limit handling (and its one deadline) decides. One owner of waiting.
 #   4. NO POLLER TAKES MORE THAN ITS SHARE. Each caller (its process group: one agent's Bash call, one
 #      land run) may send GH_SHARE_PER_CALLER (500, a tenth of the hour) reads to GitHub in any hour;
 #      over that it waits until its oldest call in the window is an hour old. Cache hits are free.
-# Every call is logged, one line, to ~/.cache/gh-share/calls.log (epoch, caller, kind, subcommand), so
+# Every call is logged (the last 48 h are kept), one line, to ~/.cache/gh-share/calls.log (epoch, caller, kind, subcommand), so
 # calls per hour are measured, not guessed:
 #   awk -v c="$(( $(date +%s) - 3600 ))" '$1 > c {n[$3]++} END {for (k in n) print k, n[k]}' ~/.cache/gh-share/calls.log
 # (miss, write, watch and graphql reached GitHub; hit was answered here; wait/share/stop are holds).
@@ -33,7 +40,7 @@
 # (her own Terminal gets gh exactly as it is).
 #
 # Settings (env): GH_SHARE_REAL (the real gh), GH_SHARE_DIR, GH_SHARE_TTL, GH_SHARE_WATCH_SECS,
-# GH_SHARE_FLOOR, GH_SHARE_MAX_WAIT, GH_SHARE_PER_CALLER, GH_SHARE_OFF=1 (plain pass-through).
+# GH_SHARE_FLOOR, GH_SHARE_MAX_WAIT, GH_SHARE_PER_CALLER, GH_SHARE_UNTIL, GH_SHARE_SWEEP_EVERY, GH_SHARE_OFF=1 (plain pass-through).
 set -u
 
 real_gh() {
@@ -52,7 +59,7 @@ REAL="$(real_gh)"
 [ "${GH_SHARE_OFF:-}" = 1 ] && exec "$REAL" "$@"
 
 DIR="${GH_SHARE_DIR:-$HOME/.cache/gh-share}"
-mkdir -p "$DIR/resp" "$DIR/callers" 2>/dev/null && [ -w "$DIR" ] || exec "$REAL" "$@"
+mkdir -p "$DIR/resp" "$DIR/callers" "$DIR/tmp" 2>/dev/null && [ -w "$DIR" ] || exec "$REAL" "$@"
 TTL="${GH_SHARE_TTL:-20}"
 WATCH_SECS="${GH_SHARE_WATCH_SECS:-30}"
 FLOOR="${GH_SHARE_FLOOR:-300}"
@@ -102,32 +109,42 @@ has_flag() { local f="$1" a; shift; for a in "$@"; do [ "$a" = "$f" ] && return 
 
 # --- the allowance ------------------------------------------------------------------------------------
 # rate file: "<remaining> <reset epoch> <read at epoch>", from the rate_limit endpoint (costs nothing).
-allowance() { # -> "<remaining> <reset>"
-  local f="$DIR/rate" rem reset at line
+# rate file: "<core remaining> <core reset> <graphql remaining> <graphql reset> <read at epoch>".
+budget_of() { case "${1:-}" in pr|issue|repo|release) echo graphql ;; *) echo core ;; esac; }
+allowance() { # $1 core|graphql -> "<remaining> <reset>"
+  local f="$DIR/rate" cr cs gr gs at line
   line="$(cat "$f" 2>/dev/null)"
-  read -r rem reset at <<<"$line"
+  read -r cr cs gr gs at <<<"$line"
   if [ -z "${at:-}" ] || [ $(( NOW - at )) -ge 30 ]; then
-    line="$("$REAL" api rate_limit --jq '"\(.resources.core.remaining) \(.resources.core.reset)"' 2>/dev/null)"
-    read -r rem reset <<<"$line"
-    if [[ "${rem:-}" =~ ^[0-9]+$ && "${reset:-}" =~ ^[0-9]+$ ]]; then
-      printf '%s %s %s\n' "$rem" "$reset" "$NOW" > "$f.$$" && mv -f "$f.$$" "$f"
+    line="$("$REAL" api rate_limit --jq '"\(.resources.core.remaining) \(.resources.core.reset) \(.resources.graphql.remaining) \(.resources.graphql.reset)"' 2>/dev/null)"
+    read -r cr cs gr gs <<<"$line"
+    if [[ "${cr:-}" =~ ^[0-9]+$ && "${cs:-}" =~ ^[0-9]+$ && "${gr:-}" =~ ^[0-9]+$ && "${gs:-}" =~ ^[0-9]+$ ]]; then
+      printf '%s %s %s %s %s\n' "$cr" "$cs" "$gr" "$gs" "$NOW" > "$f.$$" && mv -f "$f.$$" "$f"
     else
       echo "unknown 0"; return   # unreadable: the call goes ahead and GitHub answers for itself
     fi
   fi
-  echo "$rem $reset"
+  if [ "${1:-core}" = graphql ]; then echo "$gr $gs"; else echo "$cr $cs"; fi
+}
+# A sleep that would end past the caller's deadline (GH_SHARE_UNTIL) or past MAX_WAIT is not slept:
+# exit 75 with "rate limit:" so land/land-after (which match that) handle it under their one deadline.
+too_long() { # $1 seconds $2 what -> exits 75 if the wait may not be slept
+  local until="${GH_SHARE_UNTIL:-}" why=""
+  [ "$1" -gt "$MAX_WAIT" ] && why="over the ${MAX_WAIT}s wait"
+  [[ "$until" =~ ^[0-9]+$ ]] && [ $(( NOW + $1 )) -gt "$until" ] && why="past the caller's deadline, $(date -r "$until" +%H:%M 2>/dev/null || date -d "@$until" +%H:%M)"
+  [ -n "$why" ] || return 0
+  echo "rate limit: NAMED STOP [GH_ALLOWANCE_SPENT] $2 would wait ${1}s ($why); run again later" >&2
+  log stop "$2"; exit 75
 }
 wait_for_reset() { # holds a read while the allowance is at or under the floor (one bounded sleep)
-  local rem reset secs
-  read -r rem reset <<<"$(allowance)"
+  local rem reset secs budget
+  budget="$(budget_of "${1:-}")"
+  read -r rem reset <<<"$(allowance "$budget")"
   [[ "$rem" =~ ^[0-9]+$ ]] || return 0
   [ "$rem" -gt "$FLOOR" ] && return 0
   secs=$(( reset - NOW + 5 )); [ "$secs" -ge 1 ] || secs=1
-  if [ "$secs" -gt "$MAX_WAIT" ]; then
-    echo "NAMED STOP [GH_ALLOWANCE_SPENT] GitHub's hourly allowance is down to $rem and resets in ${secs}s (over the ${MAX_WAIT}s wait); run again after $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M)" >&2
-    log stop "$*"; exit 75
-  fi
-  echo "gh-share: GitHub allowance is down to $rem (floor $FLOOR, kept for merges and deploys); this read waits ${secs}s for the $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M) reset" >&2
+  too_long "$secs" "GitHub's $budget allowance is down to $rem and resets at $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M); this read"
+  echo "gh-share: GitHub $budget allowance is down to $rem (floor $FLOOR, kept for merges and deploys); this read waits ${secs}s for the $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M) reset" >&2
   log wait "$secs"
   sleep "$secs"
   rm -f "$DIR/rate"; NOW="$(date +%s)"
@@ -138,7 +155,7 @@ hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
   n=0; [ -f "$f" ] && n="$(wc -l < "$f" | tr -d ' ')"
   if [ "$n" -ge "$PER_CALLER" ]; then
     oldest="$(head -1 "$f")"; secs=$(( oldest + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
-    [ "$secs" -le "$MAX_WAIT" ] || secs="$MAX_WAIT"
+    too_long "$secs" "this caller has sent $n GitHub reads this hour (its share is $PER_CALLER); its next read"
     echo "gh-share: this caller has sent $n GitHub reads this hour (its share is $PER_CALLER); waiting ${secs}s — poll less often or wait in one bounded call" >&2
     log share "$secs"
     sleep "$secs"; NOW="$(date +%s)"
@@ -147,6 +164,10 @@ hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
   # callers gone for an hour are forgotten
   find "$DIR/callers" -type f -mmin +60 -delete 2>/dev/null || true
 }
+
+# the generation: any write moves it (a unique token, so two writes at once still both move it)
+gen() { cat "$DIR/gen" 2>/dev/null; }
+bump() { printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$DIR/gen.$$" && mv -f "$DIR/gen.$$" "$DIR/gen"; }
 
 KIND="$(classify "$@")"
 
@@ -159,9 +180,9 @@ case "$KIND" in
     # every kept answer is dropped before it and again after it: a read that ran during the write is not
     # kept either, and land's own "did it merge?" read after the merge always reaches GitHub.
     log write "${1:-} ${2:-}"
-    rm -f "$DIR"/resp/* 2>/dev/null
+    bump; rm -f "$DIR"/resp/* 2>/dev/null
     "$REAL" "$@"; rc=$?
-    rm -f "$DIR"/resp/* 2>/dev/null
+    bump; rm -f "$DIR"/resp/* 2>/dev/null
     exit "$rc" ;;
   watch)
     # Raise the poll interval to the floor; leave every other word alone.
@@ -183,7 +204,9 @@ esac
 [ -t 1 ] && { wait_for_reset "$@"; log read-tty "${1:-} ${2:-}"; exec "$REAL" "$@"; }
 repo_hint=""
 has_flag -R "$@" || has_flag --repo "$@" || repo_hint="$(git config --get remote.origin.url 2>/dev/null)"
-key="$(printf '%s\0' "$@" "${GH_REPO:-}" "${GH_HOST:-}" "$repo_hint" | shasum -a 256 2>/dev/null | cut -c1-40)"
+# the branch always counts (with -R too: `gh pr view -R o/r` with no number still means this branch's PR)
+branch="$(git symbolic-ref -q HEAD 2>/dev/null || git rev-parse -q HEAD 2>/dev/null)"
+key="$(printf '%s\0' "$@" "${GH_REPO:-}" "${GH_HOST:-}" "$repo_hint" "$branch" | shasum -a 256 2>/dev/null | cut -c1-40)"
 [ -n "$key" ] || exec "$REAL" "$@"
 cache="$DIR/resp/$key"
 if [ -f "$cache" ] && [ $(( NOW - $(mtime "$cache") )) -lt "$TTL" ]; then
@@ -194,15 +217,20 @@ fi
 wait_for_reset "$@"
 hold_share
 log miss "${1:-} ${2:-}"
-tmp="$cache.$$"
+g0="$(gen)"
+tmp="$DIR/tmp/$key.$$"   # outside resp/: a write clearing resp/ must not take an answer in flight
 "$REAL" "$@" > "$tmp"; rc=$?
 # A real answer is kept: 0, and 8 from `gh pr checks` (checks still pending). Anything else (an error, a
 # failed check list, GitHub down) is never cached; an expired answer is never served, so none is kept.
-if [ "$rc" -eq 0 ] || { [ "$rc" -eq 8 ] && [ "${1:-}" = pr ]; }; then
-  cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"; rm -f "$tmp"
+if { [ "$rc" -eq 0 ] || { [ "$rc" -eq 8 ] && [ "${1:-}" = pr ]; }; } && [ "$(gen)" = "$g0" ]; then
+  cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"; rm -f "$tmp" "$tmp.k"
 else
   cat "$tmp"; rm -f "$tmp"
 fi
-# responses older than an hour are cleared now and then (a cheap sweep, about one call in fifty)
-[ $(( NOW % 50 )) -eq 0 ] && find "$DIR/resp" -type f -mmin +60 -delete 2>/dev/null
+# now and then (a cheap sweep, about one call in fifty): responses older than an hour go, and calls.log
+# keeps its last 48 h (about 10k calls an hour would otherwise grow it by 240k lines a day)
+if [ $(( NOW % ${GH_SHARE_SWEEP_EVERY:-50} )) -eq 0 ]; then
+  find "$DIR/resp" -type f -mmin +60 -delete 2>/dev/null
+  awk -v c=$(( NOW - 172800 )) '$1 > c' "$DIR/calls.log" > "$DIR/calls.log.$$" 2>/dev/null && mv -f "$DIR/calls.log.$$" "$DIR/calls.log"
+fi
 exit "$rc"

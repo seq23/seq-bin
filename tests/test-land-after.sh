@@ -45,6 +45,7 @@ OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$W/api/port")/intake"; export OPEN_LOOPS
 cat > "$BIN/gh" <<'SH'
 #!/bin/bash
 F="$FAKE_DIR"; echo "$*" >> "$F/gh-log"
+[ "$1 $2" = "pr checks" ] && echo "${GH_SHARE_UNTIL:-none}" > "$F/checks-until"   # the deadline ~/bin/gh is given
 mode() { cat "$F/$1" 2>/dev/null; }
 case "$1 $2" in
   "api rate_limit") # the allowance GitHub reports: spent with a reset at $F/reset-at while rate limited
@@ -136,6 +137,7 @@ check "…the sheet said landing while land ran" eval 'line1 "$T/job1.md" | grep
 check "…the worker finished after its starter's process group was killed" lockgone
 check "…PASS with the merge sha on line 1, moved to done/" eval 'line1 "$T/done/job1.md" | grep -q "^STATUS: PASS t/fixture#7 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " && [ ! -e "$T/job1.md" ]'
 check "…the rest of the sheet kept" grep -q 'built (abc123)' "$T/done/job1.md"
+check "…its checks reads gave ~/bin/gh the read's own deadline, so the wrapper never sleeps past it" eval '[[ "$(cat "$FAKE/checks-until")" =~ ^[0-9]{10}$ ]]'
 check "…both --then ran, in order" eval '[ "$(cat "$W/thens" 2>/dev/null | paste -sd, -)" = "one,two" ]'
 check "…pending checks were waited for before land" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -ge 2 ]'
 check "…land ran in the repo's checkout" grep -q "pwd=$(cd "$W/repo" && pwd -P)" "$FAKE/land-log"

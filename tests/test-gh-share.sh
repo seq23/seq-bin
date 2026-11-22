@@ -8,7 +8,8 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 cat > "$T/fake-gh" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_LOG"
-if [ "$1 $2" = "api rate_limit" ]; then echo "$FAKE_REM $FAKE_RESET"; exit 0; fi
+if [ "$1 $2" = "api rate_limit" ]; then echo "$FAKE_REM $FAKE_RESET ${FAKE_GQL_REM:-4000} ${FAKE_GQL_RESET:-$FAKE_RESET}"; exit 0; fi
+[ -n "${FAKE_SLOW:-}" ] && [ "$1" = pr ] && [ "$2" = view ] && sleep "$FAKE_SLOW"   # a read in flight
 n=$(wc -l < "$FAKE_LOG" | tr -d ' ')
 echo "answer-$n for $*"
 exit "${FAKE_RC:-0}"
@@ -17,7 +18,7 @@ chmod +x "$T/fake-gh"
 export GH_SHARE_REAL="$T/fake-gh" FAKE_LOG="$T/calls" FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 ))
 pass=0
 fail() { echo "FAIL: $*"; exit 1; }
-fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER FAKE_RC; }
+fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
 real_calls() { grep -vc '^api rate_limit' "$T/calls"; }
 GH_UNDER_TEST="${GH_SHARE_UNDER_TEST:-$HERE/gh}"
 gh() { "$GH_UNDER_TEST" "$@" </dev/null; }
@@ -103,6 +104,51 @@ FAKE_RC=3 gh pr merge 6 --squash >/dev/null; rc=$?
 [ "$rc" = 3 ] || fail "the write's own exit code was lost (rc $rc, want 3)"
 out="$(gh pr view 6 --json state)"
 [ "$(real_calls)" = 3 ] && ! grep -q answer-1 <<<"$out" || fail "a read after a merge was answered from before it ($(real_calls) calls): $out"
+pass=$((pass + 1))
+
+# 12. (review F1) the branch is in the key: two worktrees of one repo on different branches never share
+#     "this branch's PR" (land with no number picks its PR this way)
+fresh; git init -q --bare "$T/remote.git"
+for b in feat-a feat-b; do git clone -q "$T/remote.git" "$T/$b" 2>/dev/null; git -C "$T/$b" checkout -q -b "$b"; done
+a1="$(cd "$T/feat-a" && gh pr view --json number -q .number)"; b1="$(cd "$T/feat-b" && gh pr view --json number -q .number)"
+[ "$(real_calls)" = 2 ] && [ "$a1" != "$b1" ] || fail "feat-b was answered with feat-a's PR ($(real_calls) calls: '$a1' / '$b1')"
+(cd "$T/feat-a" && gh pr view --json number -q .number >/dev/null)
+[ "$(real_calls)" = 2 ] || fail "the same branch asking again inside the TTL was not shared ($(real_calls) calls)"
+pass=$((pass + 1))
+
+# 13. the GraphQL budget is guarded too: pr reads wait on it, REST reads do not; far away -> stop, rc 75
+fresh; export FAKE_GQL_REM=0 FAKE_GQL_RESET=$(( $(date +%s) - 3 ))
+gh pr checks 21 >/dev/null 2>"$T/err"; grep -q 'graphql allowance is down to 0' "$T/err" || fail "a pr read at a spent GraphQL budget did not wait: $(cat "$T/err")"
+gh run view 21 >/dev/null 2>"$T/err"; [ ! -s "$T/err" ] || fail "a REST read waited on the GraphQL budget: $(cat "$T/err")"
+fresh; export FAKE_GQL_REM=0 FAKE_GQL_RESET=$(( $(date +%s) + 3000 )) GH_SHARE_MAX_WAIT=60
+out="$(timeout 10 "$GH_UNDER_TEST" pr view 3 </dev/null 2>"$T/err")"; rc=$?
+[ "$rc" = 75 ] && [ -z "$out" ] && grep -q 'rate limit: NAMED STOP \[GH_ALLOWANCE_SPENT\]' "$T/err" || fail "spent GraphQL budget: rc $rc, want 75 + 'rate limit:' stop"
+pass=$((pass + 1))
+
+# 14. one owner of waiting: a wait that would pass the caller's deadline (GH_SHARE_UNTIL) is not slept;
+#     it comes back at once as "rate limit:" (land matches that) with rc 75, for the reset and the share
+fresh; export FAKE_REM=0 FAKE_RESET=$(( $(date +%s) + 120 )) GH_SHARE_UNTIL=$(( $(date +%s) + 10 ))
+t0=$(date +%s); out="$(timeout 20 "$GH_UNDER_TEST" run list </dev/null 2>"$T/err")"; rc=$?; t1=$(date +%s)
+[ "$rc" = 75 ] && [ $((t1 - t0)) -le 2 ] && grep -q "^rate limit: .*past the caller's deadline" "$T/err" || fail "a reset past GH_SHARE_UNTIL: rc $rc after $((t1 - t0)) s: $(cat "$T/err")"
+fresh; export GH_SHARE_PER_CALLER=1 GH_SHARE_TTL=0 GH_SHARE_UNTIL=$(( $(date +%s) + 10 ))
+# (both reads under one `timeout`: one process group, so one caller; a broken cap is red in 20 s, not a hang)
+t0=$(date +%s); timeout 20 bash -c '"$1" api a </dev/null >/dev/null; "$1" api b </dev/null >/dev/null 2>"$2"; echo $? > "$3"' _ "$GH_UNDER_TEST" "$T/err" "$T/rc"; t1=$(date +%s)
+[ "$(cat "$T/rc")" = 75 ] && [ $((t1 - t0)) -le 3 ] && grep -q '^rate limit: .*its share is 1' "$T/err" || fail "a share hold past GH_SHARE_UNTIL: rc $(cat "$T/rc") after $((t1 - t0)) s"
+pass=$((pass + 1))
+
+# 15. calls.log keeps the last 48 h, not forever
+fresh; mkdir -p "$T/share"; { echo "$(( $(date +%s) - 259200 )) 1 miss old"; echo "$(( $(date +%s) - 3600 )) 1 miss recent"; } > "$T/share/calls.log"
+GH_SHARE_SWEEP_EVERY=1 gh run view 15 >/dev/null
+! grep -q ' old$' "$T/share/calls.log" && grep -q ' recent$' "$T/share/calls.log" && grep -q ' miss run view' "$T/share/calls.log" || fail "calls.log not trimmed to 48 h: $(cat "$T/share/calls.log")"
+pass=$((pass + 1))
+
+# 16. a read in flight across a write is returned but not kept (it may be from before the merge)
+fresh
+( FAKE_SLOW=2 gh pr view 16 --json state > "$T/slow" 2>&1 ) & slow=$!
+sleep 1; gh pr merge 16 --squash >/dev/null; wait "$slow"
+gh pr view 16 --json state >/dev/null
+grep -qx "answer-[0-9]* for pr view 16 --json state" "$T/slow" || fail "the read in flight across the merge lost its own answer: $(cat "$T/slow")"
+[ "$(real_calls)" = 3 ] || fail "a read that straddled a merge was kept and served after it ($(real_calls) calls, want 3)"
 pass=$((pass + 1))
 
 echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers back off, a share per poller"

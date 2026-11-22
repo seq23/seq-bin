@@ -243,17 +243,17 @@ run_land approvalprep
 check "clicked through but no Ship-ready PASS (row 6e): rc 1, one line saying what to add" eval '[ "$RC" -eq 1 ] && has "Ship-ready: PASS — "'
 check "…and nothing was merged" eval '! merge_called'
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at 390 px; Engineering: PASS\n## Mutation proof\n| undo the fix | tests/x.test.ts goes red |","comments":[{"body":"Clicked through: Updates page, every row and the empty state, 390 px, console clean"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "with a Clicked through comment and a fresh Ship-ready PASS: rc 0" [ "$RC" -eq 0 ]
 check "…and it was merged" merge_called
 check "…and land says what was clicked" has "clicked through: Clicked through: Updates page"
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px; Engineering: PASS","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW Looked at the Updates page at 390 px; Engineering: PASS\n## Mutation proof\n| undo the fix | tests/x.test.ts goes red |","comments":[{"body":"Clicked through: Updates page, 390 px"}]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "a capitalised \"Looked at\" sign-off is accepted (21 Nov 2026: PBS #74 was refused for the capital L): rc 0" [ "$RC" -eq 0 ]
 fixture approvalprep
-echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px; Engineering: PASS\n## Mutation proof\n| undo the fix | tests/x.test.ts goes red |","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
 

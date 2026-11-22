@@ -9,26 +9,50 @@ cat > "$T/fake-gh" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_LOG"
 if [ "$1 $2" = "api rate_limit" ]; then [ -n "${FAKE_RL_FAIL:-}" ] && exit 1; echo "$FAKE_REM $FAKE_RESET ${FAKE_GQL_REM:-4000} ${FAKE_GQL_RESET:-$FAKE_RESET}"; exit 0; fi
-# a run that finishes on its FAKE_DONE_AT-th look, and checks that stop pending on theirs
-polls=$(grep -c "^$1 $2" "$FAKE_LOG")
-if [ "$1 $2" = "run view" ] && [ -n "${FAKE_DONE_AT:-}" ]; then
-  case " $* " in *" --json "*) [ "$polls" -ge "$FAKE_DONE_AT" ] && echo "completed ${FAKE_CONCL:-success}" || echo "in_progress "; exit 0 ;;
-                 *" --exit-status "*) echo "run done"; [ "${FAKE_CONCL:-success}" = success ]; exit $? ;; esac
+body() {
+  # a run that finishes on its FAKE_DONE_AT-th look, and checks that stop pending on theirs
+  local polls; polls=$(grep -c "^$1 $2" "$FAKE_LOG")
+  if [ -n "${FAKE_DONE_AT:-}" ]; then
+    case "$1 $2" in
+      "run view") case " $* " in *" --exit-status "*) echo "run done"; [ "${FAKE_CONCL:-success}" = success ]; return $? ;; esac ;;
+      "api repos/"*"/actions/runs/"*) if [ "$polls" -ge "$FAKE_DONE_AT" ]; then echo "completed ${FAKE_CONCL:-success}"; else echo "in_progress "; fi; return 0 ;;
+      "pr checks")
+        if [ "$polls" -lt "$FAKE_DONE_AT" ]; then printf 'lint\t%s\t1s\turl\t\nbuild\tpending\t0\turl\t\n' "${FAKE_EARLY:-pass}"; return 8; fi
+        printf 'lint\tpass\t1s\turl\t\nbuild\t%s\t2s\turl\t\n' "${FAKE_CONCL:-pass}"; [ "${FAKE_CONCL:-pass}" = pass ]; return $? ;;
+    esac
+  fi
+  # GitHub's runs and workflows lists, with --jq applied the way gh applies it (FAKE_RUNS / FAKE_WORKFLOWS: JSON)
+  local a prog="" prev=""; for a in "$@"; do [ "$prev" = --jq ] && prog="$a"; prev="$a"; done
+  case "$1 $2" in
+    "api repos/"*"/runs?"*) [ -n "${FAKE_RUNS:-}" ] && { jq -r "${prog:-.}" <<<"$FAKE_RUNS"; return; } ;;
+    "api repos/"*"/actions/workflows?"*) [ -n "${FAKE_WORKFLOWS:-}" ] && { jq -r "${prog:-.}" <<<"$FAKE_WORKFLOWS"; return; } ;;
+  esac
+  [ -n "${FAKE_SLOW:-}" ] && [ "$1" = pr ] && [ "$2" = view ] && sleep "$FAKE_SLOW"   # a read in flight
+  echo "answer-$(wc -l < "$FAKE_LOG" | tr -d ' ') for $*"
+  return "${FAKE_RC:-0}"
+}
+# `gh api -i` (the wrapper asks every api GET with its headers, for the ETag): GitHub's shape, CRLF
+# headers. The ETag is the body's hash (FAKE_ETAG pins it: "nothing changed"); an If-None-Match that
+# matches it is a 304 with no body, and gh exits 1 ("unexpected end of JSON input"), as measured.
+inm=""; inc=0; prev=""
+for a in "$@"; do [ "$a" = -i ] && inc=1; [ "$prev" = -H ] && case "$a" in If-None-Match:*) inm="${a#If-None-Match: }" ;; esac; prev="$a"; done
+if [ "$1" = api ] && [ "$inc" = 1 ]; then
+  out="$(body "$@")"; rc=$?
+  etag="${FAKE_ETAG:-$(printf '%s' "$out" | cksum | cut -d' ' -f1)}"
+  if [ "$rc" = 0 ] && [ -n "$inm" ] && [ "$inm" = "W/\"$etag\"" ]; then
+    printf 'HTTP/2.0 304 Not Modified\r\nEtag: "%s"\r\n\r\n' "$etag"; echo "unexpected end of JSON input" >&2; exit 1
+  fi
+  if [ "$rc" = 0 ]; then printf 'HTTP/2.0 200 OK\r\nEtag: W/"%s"\r\nX-Ratelimit-Remaining: 1\r\n\r\n%s\n' "$etag" "$out"
+  else printf 'HTTP/2.0 404 Not Found\r\n\r\n%s' "$out"; echo "gh: Not Found (HTTP 404)" >&2; fi
+  exit "$rc"
 fi
-if [ "$1 $2" = "pr checks" ] && [ -n "${FAKE_DONE_AT:-}" ]; then
-  if [ "$polls" -lt "$FAKE_DONE_AT" ]; then printf 'lint\t%s\t1s\turl\t\nbuild\tpending\t0\turl\t\n' "${FAKE_EARLY:-pass}"; exit 8; fi
-  printf 'lint\tpass\t1s\turl\t\nbuild\t%s\t2s\turl\t\n' "${FAKE_CONCL:-pass}"; [ "${FAKE_CONCL:-pass}" = pass ] && exit 0 || exit 1
-fi
-[ -n "${FAKE_SLOW:-}" ] && [ "$1" = pr ] && [ "$2" = view ] && sleep "$FAKE_SLOW"   # a read in flight
-n=$(wc -l < "$FAKE_LOG" | tr -d ' ')
-echo "answer-$n for $*"
-exit "${FAKE_RC:-0}"
+body "$@"
 EOF
 chmod +x "$T/fake-gh"
 export GH_SHARE_REAL="$T/fake-gh" FAKE_LOG="$T/calls" FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 ))
 pass=0
 fail() { echo "FAIL: $*"; exit 1; }
-fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_WATCH_SECS FAKE_DONE_AT FAKE_CONCL FAKE_EARLY FAKE_RL_FAIL GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
+fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_WATCH_SECS FAKE_DONE_AT FAKE_CONCL FAKE_EARLY FAKE_RL_FAIL GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW FAKE_ETAG FAKE_RUNS FAKE_WORKFLOWS; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
 real_calls() { grep -vc '^api rate_limit' "$T/calls"; }
 GH_UNDER_TEST="${GH_SHARE_UNDER_TEST:-$HERE/gh}"
 gh() { "$GH_UNDER_TEST" "$@" </dev/null; }
@@ -83,10 +107,12 @@ pass=$((pass + 1))
 #    never sees "run watch" or "--watch", every poll is a logged read, the interval floor holds, and gh's
 #    exit codes come back (a failed run with --exit-status, failed checks, --fail-fast on an early fail)
 fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=3
-t0=$(date +%s); gh run watch 55 --interval 0 >/dev/null; rc=$?; t1=$(date +%s)
+t0=$(date +%s); perl -e 'alarm 30; exec @ARGV' "$GH_UNDER_TEST" run watch 55 --interval 0 </dev/null >/dev/null; rc=$?; t1=$(date +%s)   # bounded: a watch that never ends is a fail, not a hang
 grep -qE 'run watch|--watch|--interval' "$T/calls" && fail "the real gh was handed a watch: $(cat "$T/calls")"
-[ "$rc" = 0 ] && [ "$(grep -c '^run view 55 --json' "$T/calls")" = 3 ] || fail "run watch: rc $rc, $(grep -c '^run view 55 --json' "$T/calls") polls, want 0 and 3"
-[ "$(grep -c ' miss run view' "$T/share/calls.log")" = 4 ] || fail "run watch polls not each logged as a read: $(cat "$T/share/calls.log")"
+[ "$rc" = 0 ] && [ "$(grep -c '^api repos/{owner}/{repo}/actions/runs/55 ' "$T/calls")" = 3 ] || fail "run watch: rc $rc, $(grep -c '^api repos/{owner}/{repo}/actions/runs/55 ' "$T/calls") polls, want 0 and 3"
+grep -q '^run view 55 --json' "$T/calls" && fail "run watch polled with run view --json (2 REST requests) instead of one api GET"
+# 3 polls: in_progress, in_progress again (unchanged, so GitHub's free 304), completed; then the summary
+[ "$(grep -c ' miss api repos/{owner}/{repo}/actions/runs/55' "$T/share/calls.log")" = 2 ] && [ "$(grep -c ' 304 api repos/{owner}/{repo}/actions/runs/55' "$T/share/calls.log")" = 1 ] && [ "$(grep -c ' miss run view' "$T/share/calls.log")" = 1 ] || fail "run watch polls not each logged as a read: $(cat "$T/share/calls.log")"
 [ $((t1 - t0)) -ge 2 ] || fail "--interval 0 was not raised to the floor (3 polls in $((t1 - t0)) s)"
 fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=2 FAKE_CONCL=failure
 gh run watch 56 --exit-status >/dev/null; rc=$?
@@ -226,6 +252,66 @@ for sh in /bin/bash /bin/zsh; do
 done
 grep -q '^export PATH="/opt/homebrew/bin' "$H20/.zprofile" || fail "the installer dropped what .zprofile already had"
 GH_SHARE_HOME="$H20" "$INSTALL" >/dev/null; [ "$(grep -c 'gh-share:' "$H20/.zprofile")" = 1 ] || fail "a second install added the line twice"
+pass=$((pass + 1))
+
+# 21. (hostile review F2) A 304 IS FREE: an expired api answer is asked again with its ETag; "unchanged" is
+#     served from the cache and charged to nobody, a changed one is a normal 200, a body gone missing is a
+#     full fetch (never an empty answer), and the ETag survives a write (the next read revalidates free)
+fresh; export GH_SHARE_TTL=0 FAKE_ETAG=e1
+a1="$(gh api repos/o/r/actions/runs/1)"; a2="$(gh api repos/o/r/actions/runs/1)"
+[ "$a1" = "$a2" ] && [ -n "$a1" ] || fail "an unchanged (304) answer was not served: '$a1' / '$a2'"
+grep -q 'If-None-Match: W/"e1"' "$T/calls" || fail "the expired read was not asked with its ETag: $(cat "$T/calls")"
+[ "$(grep -c ' 304 api' "$T/share/calls.log")" = 1 ] && [ "$(grep -c ' miss api' "$T/share/calls.log")" = 1 ] || fail "two expired reads with an unchanged ETag: $(cat "$T/share/calls.log")"
+[ "$(cat "$T"/share/callers/* | awk '{n += $2} END {print n}')" = 1 ] || fail "a 304 was charged to the caller's share"
+gh pr merge 1 --squash >/dev/null; a3="$(gh api repos/o/r/actions/runs/1)"
+[ "$a3" = "$a1" ] && [ "$(grep -c ' 304 api' "$T/share/calls.log")" = 2 ] || fail "after a write the read did not revalidate its ETag (a 304): $(tail -2 "$T/share/calls.log")"
+export FAKE_ETAG=e2; a4="$(gh api repos/o/r/actions/runs/1)"
+[ "$a4" != "$a1" ] && grep -q '^answer' <<<"$a4" || fail "a changed ETag was served the old answer: '$a4'"
+export FAKE_ETAG=e2; for f in "$T"/share/resp/*; do [[ $f == *.etag ]] || rm -f "$f"; done; : > "$T/calls"
+a5="$(gh api repos/o/r/actions/runs/1)"
+[ -n "$a5" ] && grep -q '^answer' <<<"$a5" && ! grep -q 'If-None-Match' "$T/calls" || fail "a missing body with a kept ETag gave '$a5' ($(cat "$T/calls"))"
+pass=$((pass + 1))
+
+# 22. (hostile review F3) the key names the question: the same `run view 123 -R o/r` from two checkouts on
+#     different branches and commits is one call (branch and HEAD count only for "this branch's PR")
+fresh; for b in k-a k-b; do git init -q "$T/$b"; git -C "$T/$b" checkout -q -b "$b"; git -C "$T/$b" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "$b"; done
+(cd "$T/k-a" && gh run view 123 -R o/r >/dev/null); (cd "$T/k-b" && gh run view 123 -R o/r >/dev/null)
+[ "$(real_calls)" = 1 ] || fail "one explicit read from two checkouts made $(real_calls) GitHub calls, want 1"
+pass=$((pass + 1))
+
+# 23. (hostile review F5) the share is append only: 40 reads at once in one process group are 40 charges
+#     (the old awk + mv rewrite dropped the lines its siblings appended meanwhile)
+fresh; export GH_SHARE_TTL=0
+for i in $(seq 1 40); do gh api "repos/o/r/x$i" >/dev/null & done; wait
+[ "$(cat "$T"/share/callers/* | grep -c .)" = 40 ] || fail "40 reads at once left $(cat "$T"/share/callers/* | grep -c .) charges, want 40"
+pass=$((pass + 1))
+
+# 24. (hostile review F7) the TTL is 5 s by default (a 304 makes re-asking free, and a push is not a gh write):
+#     an answer 6 s old is asked again, never served
+fresh; gh pr checks 24 >/dev/null
+perl -e 'utime undef, time - 6, @ARGV' "$T"/share/resp/*
+gh pr checks 24 >/dev/null
+[ "$(real_calls)" = 2 ] || fail "an answer 6 s old was served from the cache ($(real_calls) calls, want 2): the default TTL is over 5 s"
+pass=$((pass + 1))
+
+# 25. RUN LIST IS ONE api GET, free while unchanged: `gh run list --json` (2 REST, never a 304) is asked as
+#     …/actions/[workflows/<wf>/]runs; the answer keeps gh's shape (its field names, conclusion "" while
+#     running, -q applied); a workflow NAME is looked up once; what it cannot say exactly goes to gh itself
+fresh; export GH_SHARE_TTL=0
+export FAKE_RUNS='{"total_count":2,"workflow_runs":[{"id":11,"head_sha":"aaa","status":"in_progress","conclusion":null,"name":"e2e","event":"push"},{"id":10,"head_sha":"bbb","status":"completed","conclusion":"success","name":"e2e","event":"push"}]}'
+export FAKE_WORKFLOWS='{"total_count":2,"workflows":[{"id":77,"name":"e2e","path":".github/workflows/e2e.yml"},{"id":78,"name":"Fast Check","path":".github/workflows/fast.yml"}]}'
+got="$(gh run list --workflow e2e --branch feat/x --status completed --limit 5 --json databaseId,headSha,conclusion -q '.[] | "\(.databaseId) \(.headSha) \(.conclusion)"')"
+[ "$got" = "$(printf '11 aaa \n10 bbb success')" ] || fail "run list answer not in gh's shape: '$got'"
+grep -q '^api repos/{owner}/{repo}/actions/workflows/77/runs?per_page=5&branch=feat/x&status=completed ' "$T/calls" || fail "run list was not one api GET of the workflow's runs: $(cat "$T/calls")"
+grep -q '^run list' "$T/calls" && fail "run list reached gh's own run list (2 REST, never free)"
+[ "$(gh run list -R o/r -w fast.yml -L 1 --json databaseId,name | jq -c .)" = '[{"databaseId":11,"name":"e2e"},{"databaseId":10,"name":"e2e"}]' ] || fail "run list without -q is not gh's JSON (only the fields asked)"
+grep -q '^api repos/o/r/actions/workflows/fast.yml/runs?per_page=1 ' "$T/calls" || fail "-R and a workflow file were not asked directly: $(tail -2 "$T/calls")"
+export FAKE_ETAG=same; gh run list -w e2e --json status >/dev/null; n0=$(wc -l < "$T/share/calls.log"); gh run list -w e2e --json status >/dev/null
+again="$(tail -n +$((n0 + 1)) "$T/share/calls.log")"
+[ "$(grep -c ' 304 api ' <<<"$again")" = 2 ] && ! grep -q ' miss ' <<<"$again" || fail "a repeated run list (name lookup + runs) was not two free 304s: $again"
+unset FAKE_ETAG; : > "$T/calls"
+gh run list --json databaseId --all >/dev/null; gh run list -L 200 --json databaseId >/dev/null; gh run list -w "No Such" --json databaseId >/dev/null; gh run list -w e2e >/dev/null
+[ "$(grep -c '^run list' "$T/calls")" = 4 ] || fail "run list the api cannot say exactly (--all, --limit 200, an unknown workflow, no --json) did not go to gh: $(cat "$T/calls")"
 pass=$((pass + 1))
 
 echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers poll through it, a share per poller, an unreadable allowance stops, login shells find it"

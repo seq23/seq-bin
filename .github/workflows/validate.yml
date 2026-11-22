@@ -65,6 +65,11 @@ jobs:
       # land must wait for the run of its own merge commit before falling back to main's newest.
       - name: land must watch its own merge commit's run
         run: ./tests/test-land-merge-run.sh
+      # 22 Nov 2026: land ships on the PR's green run only when the merge is byte-for-byte the tested tree.
+      - name: land skips main's re-run only for the exact same code
+        run: ./tests/test-land-same-tree.sh
+      - name: pass-line posts only a sign-off land will read, through land's own parser
+        run: ./tests/test-pass-line.sh
 
       # seq-bin's last land step fast-forwards the launchd copy (the main checkout, ~/bin), never
       # the worktree land runs from (20 Nov 2026: a false STOPPED after a good merge from a worktree).
@@ -100,14 +105,6 @@ jobs:
       # morning. ~/bin/gh shares one cache and one allowance; writes are never held and drop the cache.
       - name: gh shares one GitHub allowance (cache, floor wait, writes never held, watchers back off)
         run: ./tests/test-gh-share.sh
-      # Row 18 (20 Nov 2026): the shared ship-ready-baseline tool catches every automatic fail on a
-      # fixture site, passes a clean one, and fails on zero pages rendered.
-      - name: ship-ready-baseline catches each automatic fail and passes a clean page
-        run: |
-          set -euo pipefail
-          npm ci --prefix ship-ready-baseline --no-audit --no-fund
-          npx --prefix ship-ready-baseline playwright install --with-deps chromium
-          ./tests/test-ship-ready-baseline.sh
       # Build first, test in batches (26 Sep 2026): staging on every land, `land --promote` ships
       # the newest green. 2 Oct 2026: a small change ships on the fast check; a large one only
       # through the suite; a known-red or unread suite blocks a small change. Evals land's plan
@@ -146,6 +143,37 @@ jobs:
       # on an unread answer or a land that merged nothing; cleanup only done/ and logs/ past 14 days.
       - name: land-after lands detached, refuses what it should, never reads could-not-check as PASS
         run: ./land-after --self-test
+
+      - name: a named job is tailed, her own replies included
+        run: ./tests/test-scooter-watch-named.sh
+      - name: a card a developer has taken over never launches a tail
+        run: ./tests/test-scooter-watch-takeover.sh
+      - name: a card that recovered and waits on the partner raises no friction tail
+        run: ./tests/test-scooter-watch-recovered.sh
+      - name: a tail that cannot check for mail tells her, and its D1 calls carry the vault token
+        run: ./tests/test-scooter-watch-fail.sh
+      - name: A tail watchdog only stops its own agent
+        run: ./tests/test-scooter-watch-watchdog.sh
+      - name: Partner tail runs with background tasks off
+        run: ./tests/test-scooter-watch-foreground.sh
+
+  # 22 Nov 2026 (her ask: land faster, same quality): the lane is three parallel jobs, so the merge gate
+  # finishes inside her 5-minute rule. Same steps, none removed (each runs in exactly one job).
+  validate-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is present
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1 || ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck zsh
+          fi
+          shellcheck --version
+          bash --version | head -1
 
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh
@@ -190,18 +218,31 @@ jobs:
           CI_SWEEP_SELFTEST_OFFLINE: "1"
           CI_SWEEP_SELFTEST_SKIP_DAILY: "1"
         run: ./ci-sweep-selftest.sh
-      - name: a named job is tailed, her own replies included
-        run: ./tests/test-scooter-watch-named.sh
-      - name: a card a developer has taken over never launches a tail
-        run: ./tests/test-scooter-watch-takeover.sh
-      - name: a card that recovered and waits on the partner raises no friction tail
-        run: ./tests/test-scooter-watch-recovered.sh
-      - name: a tail that cannot check for mail tells her, and its D1 calls carry the vault token
-        run: ./tests/test-scooter-watch-fail.sh
-      - name: A tail watchdog only stops its own agent
-        run: ./tests/test-scooter-watch-watchdog.sh
-      - name: Partner tail runs with background tasks off
-        run: ./tests/test-scooter-watch-foreground.sh
+
+  validate-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck is present
+        run: |
+          set -euo pipefail
+          if ! command -v shellcheck >/dev/null 2>&1 || ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck zsh
+          fi
+          shellcheck --version
+          bash --version | head -1
+
+      # Row 18 (20 Nov 2026): the shared ship-ready-baseline tool catches every automatic fail on a
+      # fixture site, passes a clean one, and fails on zero pages rendered.
+      - name: ship-ready-baseline catches each automatic fail and passes a clean page
+        run: |
+          set -euo pipefail
+          npm ci --prefix ship-ready-baseline --no-audit --no-fund
+          npx --prefix ship-ready-baseline playwright install --with-deps chromium
+          ./tests/test-ship-ready-baseline.sh
 
   # The encrypted snapshot needs hdiutil, so its fixture run is on a macOS runner (no secrets, no network).
   mac-snapshot:

@@ -633,18 +633,31 @@ smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to s
   echo "     smoke FAILED: $1 -> ${body:-no answer}"
   return 1
 }
+# --- run_conclusion begin (tests/test-land-queue.sh evals this block verbatim) ---
+# ONE READ PER POLL, A MINUTE APART (22 Nov 2026 hostile review F1): every wait here read the run twice
+# (`gh run view --json conclusion` then `--json status`, 2 REST requests each) every 20 s, after a
+# `gh run watch` that polled every 3 s, so one e2e wait of up to 58 min cost ~700 of the account's 5,000
+# REST calls an hour. A run's conclusion comes from one `gh api …/actions/runs/<id>` GET (1 request, and 0
+# when ~/bin/gh revalidates it with its ETag and GitHub answers 304), every POLL_SECS (60: e2e and CI here
+# take 10-58 min, so a minute late is nothing). Empty = still running, or not read (the callers' own
+# deadlines turn a run that is never read into a named stop, never a pass).
+POLL_SECS="${LAND_POLL_SECS:-60}"
+run_conclusion() { # $1 run id -> its conclusion, empty while it runs or when unreadable
+  gh api "repos/{owner}/{repo}/actions/runs/$1" --jq '.conclusion // ""' 2>/dev/null
+}
+# --- run_conclusion end ---
 # Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
 # duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
 wait_run_bounded() { # $1 run id  $2 ceiling seconds
   local rid="$1" deadline=$(( $(date +%s) + $2 )) conc=""
   while :; do
-    conc="$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+    conc="$(run_conclusion "$rid")"
     [ -n "$conc" ] && break
     if [ "$(date +%s)" -ge "$deadline" ]; then
       gh run cancel "$rid" >/dev/null 2>&1 || true
       echo "cancelled-at-ceiling"; return 1
     fi
-    sleep 20
+    sleep "$POLL_SECS"
   done
   echo "$conc"
 }
@@ -909,9 +922,10 @@ queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 o
     ceil=$(( $(last_duration "$wf") * 3 / 2 )); [ "$ceil" -ge 600 ] || ceil=600
     echo "     queue: $wf run $rid on main ${sha:0:7} is still running — waiting for it before merging (ceiling $((ceil / 60)) min)"
     deadline=$(( $(date +%s) + ceil ))
-    while concl="$(queue_gh run view "$rid" --json conclusion -q '.conclusion')" || return 75; [ -z "$concl" ]; do
+    # one read per poll (#146: the run's own api row, a 304 is free), through queue_gh: a refused read is a stop, never "still running"
+    while concl="$(queue_gh api "repos/{owner}/{repo}/actions/runs/$rid" --jq '.conclusion // ""')" || return 75; [ -z "$concl" ]; do
       [ "$(date +%s)" -lt "$deadline" ] || { echo "NAMED STOP [QUEUE_RUN_PAST_CEILING] $wf run $rid on main ran past $((ceil / 60)) min; nothing was merged. Read it: gh run view $rid"; return 1; }
-      sleep 20
+      sleep "$POLL_SECS"
     done
     echo "     queue: $wf run $rid finished: $concl"
   done
@@ -958,7 +972,7 @@ gate_lines() { # $1 jq path into land-surfaces.json -> its patterns joined into 
   jq -er "[$1] | flatten | map(select(type == \"string\")) | join(\"|\")" "$LAND_SURFACES" 2>/dev/null
 }
 surface_re() { # stdin: every path on main -> one ERE of what people see in this repo
-  local tree types t detect surf re
+  local tree types detect surf re
   tree="$(cat)"; re="$(gate_lines '.everywhere')" || return 1
   types="$(jq -r '.types[] | "\(.detect)\t\(.surfaces | join("|"))"' "$LAND_SURFACES")" || return 1
   while IFS=$'\t' read -r detect surf; do
@@ -1493,6 +1507,33 @@ PR_RUNID="${RUNID:-}"
 PR_WF=""
 [ -z "$PR_RUNID" ] || PR_WF="$(gh run view "$PR_RUNID" --json workflowName -q '.workflowName // empty' 2>/dev/null || true)"
 case "$PR_WF" in *\"*|*\\*) PR_WF="" ;; esac   # never splice a quote or backslash into pick_run's jq filter: fall back to "newest"
+# SAME CODE, CHECKED ONCE (her ask 22 Nov 2026: "make this faster and not sacrifice quality"). When the
+# squash merge's tree is byte-for-byte the tree step 1 verified green on the PR head, main's run of the
+# same workflow checks the same files again. land then ships on the PR's run. It stays conservative:
+#   - only when step 1 ran (HEAD verified here),
+#   - the PR's workflow is also deploy.yml's gate (or there is no gate),
+#   - that workflow has nothing that differs between a PR and a push (no github.event / github.ref).
+# Any doubt or unreadable answer → main is watched exactly as before.
+# --- same_tree begin (tests/test-land-same-tree.sh) ---
+SAME_TREE=""
+[ -n "${MERGESHA:-}" ] || MERGESHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null || true)"
+if [ -n "${RUNID:-}" ] && [ -n "${HEAD:-}" ] && [ -n "$MERGESHA" ] && [ -n "$PR_WF" ] && [ "${LAND_SAME_TREE:-1}" = 1 ]; then
+  ST_GATE="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
+  ST_WFPATH="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=100" --jq ".workflows[] | select(.name == \"$PR_WF\") | .path" 2>/dev/null | head -1)"
+  ST_TM="$(gh api "repos/{owner}/{repo}/commits/$MERGESHA" --jq '.commit.tree.sha' 2>/dev/null || true)"
+  ST_TH="$(gh api "repos/{owner}/{repo}/commits/$HEAD" --jq '.commit.tree.sha' 2>/dev/null || true)"
+  if [ -n "$ST_TM" ] && [ "$ST_TM" = "$ST_TH" ] && [ -n "$ST_WFPATH" ] \
+     && { [ -z "$ST_GATE" ] || [ "$ST_GATE" = "$PR_WF" ]; } \
+     && git show "origin/main:$ST_WFPATH" >/dev/null 2>&1 \
+     && ! git show "origin/main:$ST_WFPATH" | grep -vE '^[[:space:]]*(#|group:)' | grep -qE 'github\.(event|ref|head_ref|base_ref)'; then
+    SAME_TREE=1
+  fi
+fi
+# --- same_tree end ---
+if [ -n "$SAME_TREE" ]; then
+  echo "     same tree as the tested head ${HEAD:0:7} (tree ${ST_TM:0:7}): the PR's green \"$PR_WF\" run $RUNID checked exactly this code — shipping on it, main's run of the same files is not waited for"
+  CONC=success
+else
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
 GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
@@ -1571,17 +1612,17 @@ fi
 # A transient API error must not end the wait either — that is the same "silence looks like
 # failure" trap one layer down. Read errors are tolerated for a while and only become an answer
 # if they persist to the deadline.
-gh run watch "$RID" >/dev/null 2>&1 || true
-CONC=""; STAT=""
+# (One read per poll, a minute apart: run_conclusion, above. The `gh run watch` that came first polled
+# every 3 s and was dropped, 22 Nov 2026.)
+CONC=""
 DEADLINE=$(( $(date +%s) + 2700 ))   # 45 min: CI here runs ~14 min, twice over is ample
 while :; do
-  CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
-  STAT="$(gh run view "$RID" --json status -q '.status' 2>/dev/null)"
+  CONC="$(run_conclusion "$RID")"
   [ -n "$CONC" ] && break
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
-  sleep 20
+  sleep "$POLL_SECS"
 done
-echo "     ${STAT:-unknown} ${CONC:-unreadable}"
+echo "     ${CONC:+completed }${CONC:-unreadable}"
 case "$CONC" in
   success) : ;;
   "")
@@ -1602,13 +1643,12 @@ case "$CONC" in
       say "     cancelled with NO later commit on main — nothing superseded it. Re-running $RID."
       gh run rerun "$RID" >/dev/null 2>&1 || die "could not re-run $RID. #$PR IS MERGED and NOT deployed; main has no green run for $MSHA. Re-run it by hand: gh run rerun $RID"
       sleep 15
-      gh run watch "$RID" >/dev/null 2>&1 || true
       CONC=""; DEADLINE=$(( $(date +%s) + 2700 ))
       while :; do
-        CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
+        CONC="$(run_conclusion "$RID")"
         [ -n "$CONC" ] && [ "$CONC" != "cancelled" ] && break
         [ "$(date +%s)" -ge "$DEADLINE" ] && break
-        sleep 20
+        sleep "$POLL_SECS"
       done
       echo "     re-run: ${CONC:-unreadable}"
       case "$CONC" in
@@ -1636,6 +1676,7 @@ case "$CONC" in
     die "main is $CONC after merging #$PR. Not deploying. Fix main first."
     ;;
 esac
+fi
 
 # A SELF-DEPLOYING REPO IS NOT DEPLOYED UNTIL EVERY ONE OF ITS CLOUDFLARE BUILDS SAYS SO. 25 Sep 2026,
 # local-guides-generator #48: main's GitHub workflows went green, this script printed "nothing to

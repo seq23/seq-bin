@@ -301,6 +301,7 @@ def run(cls, label, cmd, no_wait):
             say("HEAVY_SAME_JOB %s already holds its slot; passing through (its own lock decides)" % label)
             return subprocess.call(cmd)
         poll = float(os.environ.get("MAC_WINDOW_WAIT_POLL", "60"))
+        waiting = False
         while True:
             ok, holders = take_slot(label, want)
             if ok:
@@ -315,6 +316,9 @@ def run(cls, label, cmd, no_wait):
                 say("HEAVY_SLOTS_BUSY %s: no free slot before 06:30 (held by %s); pending for 22:00"
                     % (label, ", ".join(holders)))
                 return 0
+            if not waiting:
+                waiting = True
+                say("HEAVY_WAITING %s: slots held by %s; it starts when one frees" % (label, ", ".join(holders)))
             time.sleep(poll)
     if clear_pending(label):
         say("PENDING_CLEARED %s: this run is the one it was owed" % label)
@@ -376,8 +380,11 @@ def run_until_stop(label, cmd):
                     time.sleep(0.05)
                 left = others_in_group()
                 kill_group_but_me(signal.SIGKILL)   # a straggler that ignored the TERM never runs past 06:55
-                say("OUTPUT %s stopped cleanly at the window end (exit %s)%s; it resumes next night"
-                    % (label, child.returncode, " (%d straggler(s) ignored TERM and were killed)" % len(left) if left else ""))
+                if left:   # part of the job was KILLed, so it did not stop cleanly: the same named stop as above
+                    say("NAMED STOP [KILLED_AT_WINDOW_END] %s: %d process(es) it started ignored TERM past the grace and were killed (the job itself exited %s)"
+                        % (label, len(left), child.returncode))
+                    return 75
+                say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night" % (label, child.returncode))
                 return 0
             time.sleep(min(5.0, max(0.05, stop_at - time.time())))
         return child.returncode

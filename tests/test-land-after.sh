@@ -296,10 +296,16 @@ echo "=== R3: a worker that ends inside the starter's poll leaves no lock behind
 reset; printf 'STATUS: review t/fixture#37 x 2026-11-22\nGoal: g\n' > "$T/fastjob.md"
 LAND_AFTER_TEST_CLEANUP_DELAY=1.5 la 37 --task fastjob   # the worker (instant land) is done before the starter cleans up
 check "a fast worker: started, and no lock is left once it ends" eval '[ "$RC" -eq 0 ] && lockgone'
-check "…no backup is left beside the locks" eval '[ -z "$(find "$T/locks" -name "*.sheet.before")" ]'
+check "…no backup is left beside the locks" eval '[ -z "$(find "$T/locks" -name "*.sheet.before*")" ]'
 reset; la 37 --task fastjob
 check "…the same sheet can be landed again at once (not held as 'starting')" eval '[ "$RC" -eq 0 ] && lockgone'
 rm -f "$T/fastjob.md" "$T/done/fastjob.md"
+
+echo "=== N13: a backup a killed starter left is never restored over the sheet ==="
+reset; rm -f "$T/stalejob.md"; mkdir -p "$T/locks/slugs"; printf 'STATUS: review OLD\nGoal: stale\n' > "$T/locks/slugs/stalejob.lock.sheet.before.99999"
+PATH="$W/badperl:$PATH" LAND_AFTER_START_WAIT_SECS=2 la 38 --task stalejob
+check "the worker fails to start on a slug with no sheet: no stale sheet is put back" eval '[ "$RC" -eq 1 ] && [ ! -e "$T/stalejob.md" ]'
+check "…and the stale backup is cleared" eval '[ -z "$(find "$T/locks" -name "stalejob*")" ]'
 
 echo "=== N6: a log an open FAIL sheet names is kept past 14 days ==="
 printf 'STATUS: FAIL t/fixture#9 x 2026-11-01 — red; log %s\n' "$T/logs/evidence-9.log" > "$T/evidence.md"

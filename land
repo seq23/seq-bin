@@ -894,9 +894,15 @@ review_text() { # stdin: PR view JSON -> where a reviewer's PASS line may stand:
   # (a passer-by on a public repo, a bot) is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
   # The newest verdict wins: from the last text that says `VERDICT: fail` on, so a later fail comment voids an
   # earlier PASS (review N9); a PASS posted after that fail still counts.
+  # A fail verdict is the comment's FIRST line only, `VERDICT: fail` as a whole word (review R5): a later
+  # note that quotes an earlier fail, "failsafe" or "failed checks fixed" never voids a PASS.
   jq -r '[(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))]
-    | ([to_entries[] | select(.value | test("verdict:\\W*fail"; "i")) | .key] | last // 0) as $from
+    | ([to_entries[] | select(.value | test("\\A\\W*verdict:\\W*fail\\b"; "i")) | .key] | last // 0) as $from
     | .[$from:][]' 2>/dev/null
+}
+owner_text() { # stdin: PR view JSON -> the body, then every comment by the repo's OWNER account: where a builder's
+  # own answer (Patch or rebuild) may stand. Not a verdict, so a later fail never voids it (review R4).
+  jq -r '(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))' 2>/dev/null
 }
 covers_engineering() { # stdin: one PASS line -> 0 when it also passes every automatic fail in engineering.md
   grep -qiE 'engineering: *pass'
@@ -937,7 +943,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   [ -n "$files" ] || return 0
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
+    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
@@ -947,7 +953,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
   [ -n "$launch" ] || return 0
   reviewer="$(signoff Launch-ready <<<"$body")" \
-    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
+    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
   return 0
@@ -985,17 +991,17 @@ patch_fixes() { # $1 base  $2 head -> "<ref>\t<path>\t<subject>" for each fix co
         done
   done | sort -u -t$'\t' -k1,1
 }
-patch_answered() { # $1 PR body  $2 ref (#N or short sha) -> 0 when a "Patch or rebuild:" line names it and says why
+patch_answered() { # $1 PR body + owner comments  $2 ref (#N or short sha) -> 0 when a "Patch or rebuild:" line names it and says why
   grep -E '^[[:space:]>*-]*Patch or rebuild:' <<<"$1" | grep -E -- "$2([^0-9a-zA-Z]|$)" \
     | sed -E 's/^[[:space:]>*-]*Patch or rebuild://' | grep -v '<' | awk 'NF >= 5 { ok = 1 } END { exit !ok }'
 }
-gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body -> rc 1 with one plain line on stdout
+gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body + owner comments -> rc 1 with one plain line on stdout
   local fixes missing ref
   fixes="$(patch_fixes "$2" "$3")"
   [ -n "$fixes" ] || return 0
   missing="$(cut -f1 <<<"$fixes" | while IFS= read -r ref; do patch_answered "$4" "$ref" || printf '%s ' "$ref"; done)"
   [ -n "$missing" ] || return 0
-  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
+  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add to the PR body, or as a PR comment by the repo's owner account, the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
   return 1
 }
 # OWNER OVERRIDE (her ruling 21 Nov 2026: "if i ask for one aspect of something to be added quickly and
@@ -1017,7 +1023,7 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
   git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
   git cat-file -e "$2^{commit}" 2>/dev/null || { echo "PR #$1's head ${2:0:7} could not be fetched for the patch-history check"; return 75; }
   base="$(git merge-base origin/main "$2")" || { echo "PR #$1 has no merge base with main"; return 75; }
-  body="$(jq -r '.body // ""' <<<"$3")"
+  body="$(owner_text <<<"$3")"
   msg="$(gate_patch "$1" "$base" "$2" "$body")" || { echo "$msg"; return 1; }
   return 0
 }

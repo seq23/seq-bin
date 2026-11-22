@@ -388,8 +388,11 @@ main() {
 
   # The backup sits beside the lock, never in it (22 Nov 2026 re-check R3): a worker that ends inside the
   # starter's 0.2 s poll must be able to rmdir its lock, or an empty lock holds the sheet for 2 minutes.
-  local LOG="$LOGS/$SLUG-$PR.log" WPID BACKUP="$SLOCK.sheet.before" c
+  # It carries this starter's pid, and older ones are cleared under the slug lock (N13): a backup a killed
+  # starter left is never restored over the sheet.
+  local LOG="$LOGS/$SLUG-$PR.log" WPID BACKUP="$SLOCK.sheet.before.$$" c
   for c in ${THENS[@]+"${THENS[@]}"}; do printf '%s\0' "$c"; done > "$LOCK/then" && chmod 600 "$LOCK/then"
+  rm -f "$SLOCK".sheet.before*
   [ -f "$TASKS/$SLUG.md" ] && cp -p "$TASKS/$SLUG.md" "$BACKUP"
   set_status "$SLUG" "STATUS: landing $REPO#$PR $HEADSHA $(now)" \
     || { rm -f "$BACKUP"; drop_lock "$SLOCK"; drop_lock "$LOCK"; refuse "could not write $TASKS/$SLUG.md"; }

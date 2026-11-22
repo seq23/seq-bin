@@ -58,7 +58,7 @@ echo "=== ship-ready: a PR that changes what people see ==="
 repo; pr_head 2 '  return x + 2;'
 gate "$(meta 'Tweaks the page.' "$SITE")"
 check "no PASS line -> refused (rc 1)" [ "$RC" -eq 1 ]
-check "…in one plain line that says what to add" eval 'one_line && grep -q "add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS — " <<<"$MSG"'
+check "…in one plain line that says what to add" eval 'one_line && grep -q "Ship-ready: PASS — " <<<"$MSG"'
 for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent session_01BUILDER' '<reviewer>'; do
   gate "$(meta "Ship-ready: PASS — $who looked at the home page at 390 px" "$SITE")"
   check "PASS signed by the builder ($who) -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "signed by the builder" <<<"$MSG"'
@@ -71,7 +71,7 @@ gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" OWNER)"
 check "a fresh reviewer's PASS in a comment by the owner account -> allowed (rc 0)" [ "$RC" -eq 0 ]
 for who in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR COLLABORATOR; do
   gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" "$who")"
-  check "the same PASS in a comment by a $who account -> refused" eval '[ "$RC" -eq 1 ] && grep -q "add as a PR comment (a later VERDICT: fail comment voids a PASS in the body) the line  Ship-ready: PASS" <<<"$MSG"'
+  check "the same PASS in a comment by a $who account -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "Ship-ready: PASS — " <<<"$MSG"'
 done
 gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" 'Ship-ready: PASS — builder looked at the page; Engineering: PASS' OWNER)"
 check "an owner-account comment signed by the builder -> still refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
@@ -80,6 +80,13 @@ gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" $'VERDICT: fai
 check "a later VERDICT: fail comment voids an earlier PASS comment -> refused (N9)" [ "$RC" -eq 1 ]
 gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" $'VERDICT: fail\n- F1 blank' "$GOOD")"
 check "a PASS posted after the fail comment -> allowed (rc 0)" [ "$RC" -eq 0 ]
+echo "=== only a first-line VERDICT: fail voids a PASS (review R5) ==="
+for later in 'verdict: failsafe is how the gate behaves' 'Verdict: failed checks fixed in 34d66c9' $'Re-check notes\nR3 earlier VERDICT: fail now fixed'; do
+  gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" "$later")"
+  check "a later comment '${later%%$'\n'*}…' does not void the PASS (rc 0)" [ "$RC" -eq 0 ]
+done
+gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" $'**VERDICT:** fail\n- F1 blank')"
+check "a later first-line **VERDICT:** fail still voids it (rc 1)" [ "$RC" -eq 1 ]
 echo "=== engineering rides on the Ship-ready PASS (her ruling 21 Nov 2026) ==="
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px' "$SITE")"
 check "a PASS that says nothing of engineering -> refused (rc 1)" [ "$RC" -eq 1 ]
@@ -134,6 +141,13 @@ gate "$(meta "Patch or rebuild: alpha is one line of arithmetic and #41 set the 
 check "…with a line naming #41 and why -> allowed" [ "$RC" -eq 0 ]
 gate "$(meta "Patch or rebuild: alpha is one line of arithmetic and #4 set the wrong constant")"
 check "…a line naming another fix (#4, not #41) -> refused" [ "$RC" -eq 1 ]
+gate "$(meta "Changes alpha.")"; ask="$(sed -E 's/.*the line  //' <<<"$MSG")"
+gate "$(jq --arg c "${ask/<why a patch and not a rebuild of that design>/alpha is one line of arithmetic and the fix set the wrong constant}" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<"$(meta "Changes alpha.")")"
+check "…following the refusal's own words (an owner-account comment) -> allowed (R4)" [ "$RC" -eq 0 ]
+gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "OWNER", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail\n- F2 other"}]' <<<"$(meta "Changes alpha.")")"
+check "…a later fail verdict does not void the builder's Patch line (it is not a verdict)" [ "$RC" -eq 0 ]
+gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "NONE", body: $c}]' <<<"$(meta "Changes alpha.")")"
+check "…the same line from a non-owner account -> refused" [ "$RC" -eq 1 ]
 repo; LINE=6 TEXT='  return y * 3;' commit "fix(sync): beta triples (#42)"; pr_head 2 '  return x + 10;'
 gate "$(meta "Changes alpha.")"
 check "a fix in ANOTHER function (beta) asks nothing (clean PR, rc 0)" [ "$RC" -eq 0 ]

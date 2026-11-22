@@ -8,6 +8,7 @@ set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 MW="$HERE/mac-window"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+export MAC_WINDOW_LOCAL_TZ=America/Chicago   # her Mac's zone; a CI runner is on UTC (the Eastern case overrides it)
 export MAC_WINDOW_STATE="$T/state" MAC_WINDOW_AGENTS="$T/agents" LAUNCHCTL="$T/launchctl" PBS_FILL_FILE="$T/no-fill"
 mkdir -p "$T/agents"
 cat > "$T/launchctl" <<EOF

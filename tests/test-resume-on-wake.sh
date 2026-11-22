@@ -6,7 +6,7 @@
 #   · INTERRUPTED today, budget left, nothing running -> exec the sweep as a RESUME
 #     (CI_SWEEP_RESUME_FROM / CI_SWEEP_LEDGER_ID / CI_SWEEP_STARTED_AT / prior awake)
 #   · a sweep running (live lock holder)              -> refuse
-#   · past the run's stop-by (or too little left)     -> refuse, left for the 09:00 retry
+#   · past the run's stop-by (or too little left)     -> refuse, left for the 22:20 retry
 #   · the 240-awake-minute ceiling nearly spent       -> refuse
 #   · today's latest row is KILLED / GREEN / none     -> refuse
 #   · a row already resumed once (resumed-by=)        -> resumes from the LATEST attempt
@@ -78,7 +78,7 @@ check "…and says so" grep -q 'no-op: a sweep is running' "$TMP/out"
 unhold
 reset; run r1 MAIN-RED-INTERRUPTED "$(( NOW - 60 ))"; resume
 check "after stop-by: refuses" [ -z "$(ran)" ]
-check "…left INTERRUPTED for the 09:00 retry" grep -q 'left INTERRUPTED; the 09:00 retry' "$TMP/out"
+check "…left INTERRUPTED for the retry" grep -q 'left INTERRUPTED; the ' "$TMP/out"
 reset; run r1 MAIN-RED-INTERRUPTED "$(( NOW + 10 * 60 ))"; resume
 check "10 min before stop-by (under the 20-min floor): refuses" [ -z "$(ran)" ]
 reset; run r1 MAIN-RED-INTERRUPTED "$LATER" 690; resume

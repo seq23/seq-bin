@@ -59,5 +59,8 @@ out=$("$HERE/launchd-reload" --pending)
 echo "$out" | grep -q "3 of 3 applied" && [ "$(loaded_hour com.seq.off)" = 10 ] && [ "$(loaded_hour com.seq.busy)" = 10 ] && [ "$(loaded_hour com.howweknow.backfill)" = 10 ] && ok || no "pending applied: $out"
 "$HERE/launchd-reload" --pending | grep -q "0 of 0 applied" && ok || no "pending empties"
 [ ! -e "$T/forbidden.log" ] && ok || no "pending enabled/kickstarted something"
+# a malformed file for a job never loaded (no good copy) is removed, never left in LaunchAgents
+echo "not a plist" > "$T/agents/com.seq.broken-new.plist"
+"$HERE/launchd-reload" "$T/agents/com.seq.broken-new.plist" | grep -q "PLIST_MALFORMED] com.seq.broken-new: not loaded and removed" && [ ! -e "$T/agents/com.seq.broken-new.plist" ] && ok || no "malformed new file left in place"
 echo "test-launchd-reload: $pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 14 ]
+[ "$fail" = 0 ] && [ "$pass" -ge 15 ]

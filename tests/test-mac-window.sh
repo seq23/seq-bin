@@ -171,6 +171,17 @@ EOF
 chmod +x "$T/parent.sh"
 MAC_WINDOW_NOW=06:30 MAC_WINDOW_STOP_IN=1 MAC_WINDOW_KILL_AFTER=3 "$MW" run HEAVY com.seq.t-group -- "$T/parent.sh" >/dev/null
 sleep 0.5; [ -e "$T/grandchild-term" ] && ok || no "grandchild never got TERM (process group not reached)"
+# a grandchild that IGNORES TERM, under a parent that exits on it: the guard still ends it (KILL),
+# so nothing of the job runs past 06:55 (a TERM to the child alone would leave it running)
+cat > "$T/parent2.sh" <<EOF
+#!/bin/bash
+bash -c 'trap "" TERM; echo \$\$ > $T/gc2.pid; while :; do sleep 0.2; done' &
+trap 'exit 0' TERM
+wait
+EOF
+chmod +x "$T/parent2.sh"
+MAC_WINDOW_NOW=06:30 MAC_WINDOW_STOP_IN=1 MAC_WINDOW_KILL_AFTER=3 "$MW" run HEAVY com.seq.t-group2 -- "$T/parent2.sh" >/dev/null
+sleep 0.5; gc=$(cat "$T/gc2.pid" 2>/dev/null); if [ -n "$gc" ] && ! kill -0 "$gc" 2>/dev/null; then ok; else no "a TERM-ignoring grandchild outlived the stop"; [ -n "$gc" ] && kill -9 "$gc"; fi
 # the 06:55 maths itself (no STOP_IN): 06:30:00 stops in 1500 s, 23:00:30 in 28470 s
 MAC_WINDOW_NOW=06:30:00 "$MW" run HEAVY com.seq.t-maths -- true | grep -q "stops at 06:55 (in 1500 s)" && ok || no "06:30 stop maths"
 MAC_WINDOW_NOW=23:00:30 "$MW" run HEAVY com.seq.t-maths -- true | grep -q "stops at 06:55 (in 28470 s)" && ok || no "23:00 stop maths"
@@ -202,4 +213,4 @@ touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.bos
 touch -t "$(date -v-5H +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 4 h is removed"
 
 echo "test-mac-window: $pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 73 ]
+[ "$fail" = 0 ] && [ "$pass" -ge 74 ]

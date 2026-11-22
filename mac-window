@@ -359,7 +359,7 @@ def run_until_stop(label, cmd):
                     child.wait(timeout=float(os.environ.get("MAC_WINDOW_KILL_AFTER", "180")))
                     say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night"
                         % (label, child.returncode))
-                    kill_group_but_me(signal.SIGTERM)
+                    kill_group_but_me(signal.SIGKILL)   # a straggler that ignored the TERM never runs past 06:55
                 except subprocess.TimeoutExpired:
                     kill_group_but_me(signal.SIGKILL)
                     child.wait()

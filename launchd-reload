@@ -60,8 +60,13 @@ reload_one() {
   l="$(basename "$p" .plist)"
   good="$STATE/good/$l.plist"
   if ! plutil -lint "$p" >/dev/null 2>&1; then
-    if [ -f "$good" ]; then cp "$good" "$p"; fi
-    echo "NAMED STOP [PLIST_MALFORMED] $l: not loaded; the last good file is back in place"
+    if [ -f "$good" ]; then
+      cp "$good" "$p"
+      echo "NAMED STOP [PLIST_MALFORMED] $l: not loaded; the last good file is back in place"
+    else
+      rm -f "$p"
+      echo "NAMED STOP [PLIST_MALFORMED] $l: not loaded and removed from LaunchAgents (there was no good file to put back)"
+    fi
     FAILED=$((FAILED + 1)); return
   fi
   if ! is_loaded "$l"; then

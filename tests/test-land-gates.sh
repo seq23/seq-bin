@@ -41,7 +41,8 @@ pr_head() { # leaves main pushed, then a PR commit on top -> PR_HEAD
 }
 meta() { # body [files json] [extra json] -> PR view JSON
   local f='[{"path":"src/sync.ts"}]'; [ -z "${2:-}" ] || f="$2"
-  jq -n --arg b "$1" --argjson f "$f" \
+  local b="$1"; [ -n "${NOPROOF:-}" ] || b="$b"$'\n\n''## Mutation proof'$'\n''| alpha +1 back to +0 | tests/sync.test.ts alpha goes red |'
+  jq -n --arg b "$b" --argjson f "$f" \
     '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
 }
@@ -157,6 +158,27 @@ check "a fix older than 30 days asks nothing (rc 0)" [ "$RC" -eq 0 ]
 repo; LINE=2 TEXT='  return x + 9;' commit "alpha adds nine, as asked (#43)"; pr_head 2 '  return x + 10;'
 gate "$(meta "Changes alpha.")"
 check "a change that was not a fix asks nothing (rc 0)" [ "$RC" -eq 0 ]
+
+echo "=== mutation proof: a PR that changes code ==="
+repo; pr_head 2 '  return x + 2;'
+gate "$(NOPROOF=1 meta "Changes alpha.")"
+check "code change, no mutation list -> refused in one line" eval '[ "$RC" -eq 1 ] && one_line && grep -q "## Mutation proof" <<<"$MSG"'
+gate "$(NOPROOF=1 meta "Changes alpha."$'\n\n''## Mutations (each one made the named tests fail)'$'\n''| Mutation | Test that failed |'$'\n''|---|---|'$'\n''| <mutation> | <test> |')"
+check "…a header row and a placeholder row are not proof -> refused" [ "$RC" -eq 1 ]
+gate "$(NOPROOF=1 meta "Changes alpha."$'\n\n''## Mutations'$'\n''| Mutation | Test that failed |'$'\n''|---|---|'$'\n''| alpha back to +1 | tests/sync.test.ts \"adds two\" |')"
+check "…a filled mutation table -> allowed" [ "$RC" -eq 0 ]
+gate "$(jq --arg c $'Mutation proof:\n- undo alpha fix: tests/sync.test.ts goes red' '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<"$(NOPROOF=1 meta "Changes alpha.")")"
+check "…a list in an owner-account comment -> allowed" [ "$RC" -eq 0 ]
+gate "$(jq --arg c $'Mutation proof:\n- undo alpha fix: tests/sync.test.ts goes red' '.comments = [{authorAssociation: "NONE", body: $c}]' <<<"$(NOPROOF=1 meta "Changes alpha.")")"
+check "…the same list from a non-owner account -> refused" [ "$RC" -eq 1 ]
+gate "$(NOPROOF=1 meta "Mutation proof: none — renames a local variable, no behaviour changes at all")"
+check "…a reasoned none (6+ words) -> allowed" [ "$RC" -eq 0 ]
+gate "$(NOPROOF=1 meta "Mutation proof: none")"
+check "…a bare none -> refused" [ "$RC" -eq 1 ]
+gate "$(NOPROOF=1 meta "Docs only." '[{"path":"README.md"},{"path":"tests/x.test.ts"}]')"
+check "docs and tests only need no proof (rc 0)" [ "$RC" -eq 0 ]
+gate "$(NOPROOF=1 meta 'Owner override: "ship it, land it now" (22 Nov 2026 12:00 CT)')"
+check "her Owner override skips it (rc 0)" [ "$RC" -eq 0 ]
 }
 
 run_cases
@@ -177,4 +199,6 @@ neg "a patch check that never reads history" '/^patch_fixes()/a\
 neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering()/a\
   return 0'
 neg "a quality gate that sees no surfaces" 's/^  \[ -n "\$files" \] || return 0$/  return 0/'
+neg "a mutation gate that never reads the body" '/^proof_listed()/a\
+  return 0'
 echo "test-land-gates: every gate refuses what it should and lets through what it should"

@@ -34,6 +34,7 @@ while read -r cls at want; do
   [ "$got" = "$want" ] && ok || no "check $cls $at gave $got, want $want"
 done <<'EOF'
 HEAVY 06:30 0
+HEAVY 06:31 1
 HEAVY 06:59 1
 HEAVY 07:00 1
 HEAVY 09:59 1
@@ -64,7 +65,7 @@ EOF
 # 2. Woken outside: never runs, one named line, one pending record (a second wake does not add one).
 out=$(MAC_WINDOW_NOW=06:40 "$MW" run LIGHT com.seq.t-light -- touch "$T/ran-light")
 [ ! -e "$T/ran-light" ] && ok || no "LIGHT ran at 06:40"
-echo "$out" | grep -q "OUTSIDE_WINDOW com.seq.t-light LIGHT woken 06:40; pending, runs once when its window opens at 10:00" && ok || no "named line: $out"
+echo "$out" | grep -q "^.*OUTSIDE_WINDOW com.seq.t-light LIGHT " && grep -q '"class": "LIGHT"' "$T/state/pending/com.seq.t-light" && ok || no "named line and pending record: $out"
 MAC_WINDOW_NOW=06:45 "$MW" run LIGHT com.seq.t-light -- touch "$T/ran-light" | grep -q "already pending" && ok || no "second wake"
 [ "$(ls "$T/state/pending" | wc -l | tr -d ' ')" = 1 ] && ok || no "one pending record"
 out=$(MAC_WINDOW_NOW=08:00 "$MW" run HEAVY com.seq.t-heavy -- touch "$T/ran-heavy")
@@ -100,10 +101,35 @@ MAC_WINDOW_NOW=10:30 "$MW" catch-up | grep -q "CAUGHT_UP com.seq.t-light2" && ok
 MAC_WINDOW_NOW=08:00 "$MW" run LIGHT com.seq.t-paused -- true >/dev/null
 echo '		"com.seq.t-paused" => disabled' > "$T/disabled"
 MAC_WINDOW_NOW=10:00 "$MW" catch-up | grep -q "PENDING_PAUSED com.seq.t-paused: disabled" && ok || no "disabled not woken"
-grep -q "com.seq.t-paused" "$T/lctl.log" | grep -q kickstart && no "kickstarted a disabled job" || ok
+if grep "kickstart" "$T/lctl.log" | grep -q "com.seq.t-paused"; then no "kickstarted a disabled job"; else ok; fi
 touch "$T/fill"; MAC_WINDOW_NOW=08:00 "$MW" run LIGHT com.howweknow.backfill -- true >/dev/null
 PBS_FILL_FILE="$T/fill" MAC_WINDOW_NOW=10:30 "$MW" catch-up | grep -q "PENDING_PAUSED com.howweknow.backfill: YouTube" && ok || no "YouTube held"
-grep "kickstart" "$T/lctl.log" | grep -qE "t-paused|howweknow" && no "a paused job was kickstarted" || ok
+if grep "kickstart" "$T/lctl.log" | grep -qE "t-paused|howweknow"; then no "a paused job was kickstarted"; else ok; fi
+# launchd unreadable: catch-up fails closed (starts nothing, named stop, exit 1)
+printf '#!/bin/bash\necho "$*" >> "%s/lctl.log"\n[ "$1" = print-disabled ] && exit 5\nexit 0\n' "$T" > "$T/launchctl-broken"; chmod +x "$T/launchctl-broken"
+: > "$T/lctl.log"; rm -f "$T/disabled"
+out=$(LAUNCHCTL="$T/launchctl-broken" MAC_WINDOW_NOW=10:30 "$MW" catch-up); rc=$?
+echo "$out" | grep -q "DISABLED_UNREADABLE" && [ "$rc" = 1 ] && ! grep -q kickstart "$T/lctl.log" && ok || no "fails closed when launchd is unreadable: rc=$rc $out"
+echo '		"com.seq.t-paused" => disabled' > "$T/disabled"
+# a pending job that is running right now is not started a second time
+cat > "$T/launchctl-running" <<EOF2
+#!/bin/bash
+echo "\$*" >> "$T/lctl.log"
+[ "\$1" = print-disabled ] && { echo 'disabled services = {'; echo '}'; exit 0; }
+[ "\$1" = list ] && [ "\$2" = com.seq.t-busy ] && { echo '{'; echo '	"PID" = 4242;'; echo '};'; exit 0; }
+exit 0
+EOF2
+chmod +x "$T/launchctl-running"
+MAC_WINDOW_NOW=08:00 "$MW" run LIGHT com.seq.t-busy -- true >/dev/null
+LAUNCHCTL="$T/launchctl-running" MAC_WINDOW_NOW=10:30 "$MW" catch-up | grep -q "PENDING_RUNNING com.seq.t-busy" && ! grep "kickstart" "$T/lctl.log" | grep -q t-busy && ok || no "running pending job started twice"
+rm -f "$T/state/pending/com.seq.t-busy"
+# an Eastern Mac: the plist says 07:20 local = 06:20 Central, so a 06:00 CT catch-up leaves it to its own slot
+plist com.seq.t-east 7 20
+MAC_WINDOW_NOW=05:00 "$MW" run LIGHT com.seq.t-east -- true >/dev/null
+sed -i '' 's/"class": "LIGHT"/"class": "MORNING"/' "$T/state/pending/com.seq.t-east"
+MAC_WINDOW_LOCAL_TZ=America/New_York MAC_WINDOW_NOW=06:00 "$MW" catch-up | grep -q "PENDING_LEFT com.seq.t-east" && ok || no "Eastern plist hour read as Central (double run)"
+MAC_WINDOW_LOCAL_TZ=America/Chicago MAC_WINDOW_NOW=06:00 "$MW" catch-up --dry-run | grep -q "WOULD_START com.seq.t-east" && ok || no "NEGATIVE: on a Central Mac 07:20 is after the window, so it is started"
+rm -f "$T/state/pending/com.seq.t-east"
 
 # 6. Heavy slots: two 1-slot jobs run; a third interval tick is told the slots are busy and runs nothing.
 MAC_WINDOW_NOW=23:00 MAC_WINDOW_STOP_IN=20 "$MW" run HEAVY com.seq.h1 -- sleep 3 & p1=$!
@@ -136,6 +162,18 @@ echo "$out" | grep -q "STOPPING_AT_0655 com.seq.t-stop" && echo "$out" | grep -q
 [ ! -e "$T/state/heavy/com.seq.t-stop" ] && ok || no "slot not freed"
 first=$(cat "$T/ckpt"); MAC_WINDOW_NOW=22:30 MAC_WINDOW_STOP_IN=1 "$MW" run HEAVY com.seq.t-stop -- "$T/job.sh" >/dev/null
 [ "$(cat "$T/ckpt")" -gt "$first" ] && ok || no "next night did not resume from the checkpoint"
+# the whole group: a backgrounded grandchild (a voice model the job started) gets TERM too
+cat > "$T/parent.sh" <<EOF
+#!/bin/bash
+bash -c 'trap "echo gone > $T/grandchild-term; exit 0" TERM; while :; do sleep 0.2; done' &
+wait
+EOF
+chmod +x "$T/parent.sh"
+MAC_WINDOW_NOW=06:30 MAC_WINDOW_STOP_IN=1 MAC_WINDOW_KILL_AFTER=3 "$MW" run HEAVY com.seq.t-group -- "$T/parent.sh" >/dev/null
+sleep 0.5; [ -e "$T/grandchild-term" ] && ok || no "grandchild never got TERM (process group not reached)"
+# the 06:55 maths itself (no STOP_IN): 06:30:00 stops in 1500 s, 23:00:30 in 28470 s
+MAC_WINDOW_NOW=06:30:00 "$MW" run HEAVY com.seq.t-maths -- true | grep -q "stops at 06:55 (in 1500 s)" && ok || no "06:30 stop maths"
+MAC_WINDOW_NOW=23:00:30 "$MW" run HEAVY com.seq.t-maths -- true | grep -q "stops at 06:55 (in 28470 s)" && ok || no "23:00 stop maths"
 # a job that ignores TERM is killed and named, never left running into the power-off
 cat > "$T/stubborn.sh" <<'EOF'
 #!/bin/bash
@@ -150,8 +188,7 @@ echo "$out" | grep -q "KILLED_AT_WINDOW_END" && [ "$rc" = 75 ] && ok || no "stub
 export MAC_WINDOW_MORNING_FLAG="$T/boss/morning-window.active"
 MAC_WINDOW_NOW=03:40 "$MW" run MORNING com.seq.boss-credentials -- true | grep -q MORNING_BLOCK_ON && [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "first morning job raises the flag"
 MAC_WINDOW_NOW=04:05 "$MW" run MORNING com.seq.boss-agent -- sh -c "test -e '$MAC_WINDOW_MORNING_FLAG'" && [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag held while a morning job runs and after it (more to come)"
-MAC_WINDOW_NOW=10:30 "$MW" run MORNING com.seq.boss-morning-catchup -- true >/dev/null
-[ ! -e "$MAC_WINDOW_MORNING_FLAG" ] || ok   # (a 10:30 run is not a morning-block run; the 06:55 sweep below decides)
+MAC_WINDOW_NOW=10:30 "$MW" run MORNING com.seq.boss-morning-catchup -- true | grep -q MORNING_BLOCK_SWEPT && [ ! -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "a flag left past 06:55 is swept by the next run"
 MAC_WINDOW_NOW=06:14 "$MW" run MORNING com.seq.boss-morning-catchup -- true >/dev/null; touch "$MAC_WINDOW_MORNING_FLAG"
 MAC_WINDOW_NOW=06:14 "$MW" run MORNING com.seq.boss-morning-catchup -- true | grep -q MORNING_BLOCK_OFF && [ ! -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "last morning job clears the flag"
 # two at once: the earlier one finishing past 06:14 does not clear it while the other still runs
@@ -165,4 +202,4 @@ touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.bos
 touch -t "$(date -v-5H +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 4 h is removed"
 
 echo "test-mac-window: $pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -gt 40 ]
+[ "$fail" = 0 ] && [ "$pass" -ge 73 ]

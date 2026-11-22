@@ -67,8 +67,8 @@ YOUTUBE = ("com.howweknow.", "com.seq.shorts-arm", "com.seq.boss-comment-watch",
 def now_central():
     fake = os.environ.get("MAC_WINDOW_NOW")
     if fake:
-        h, m = fake.split(":")
-        return dt.datetime(2026, 11, 23, int(h), int(m))   # a Monday; tests pass only the clock
+        h, m, *sec = fake.split(":")
+        return dt.datetime(2026, 11, 23, int(h), int(m), int(sec[0]) if sec else 0)   # a Monday; tests pass only the clock
     os.environ["TZ"] = CENTRAL
     time.tzset()
     return dt.datetime.now()
@@ -119,12 +119,41 @@ def lctl():
     return os.environ.get("LAUNCHCTL", "launchctl")
 
 
-def alive(pid):
+def started(pid):
+    """The process's start time as ps prints it ('' when it is gone): with the PID it names ONE process."""
     try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
+        return subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True).stdout.strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def me():
+    return {"pid": os.getpid(), "start": started(os.getpid())}
+
+
+def alive(pid, start=None):
+    """True when that process still runs; with `start`, only if it is the same process (PID reuse)."""
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
         return False
+    return start is None or started(pid) == start
+
+
+def locked(name):
+    """An exclusive lock on <state>/<name>.lock for a `with` block (released when the process dies)."""
+    import contextlib
+    import fcntl
+
+    @contextlib.contextmanager
+    def cm():
+        fd = os.open(os.path.join(state_dir(), name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+    return cm()
 
 
 # ─── heavy slots ────────────────────────────────────────────────────────────
@@ -136,7 +165,7 @@ def held_slots(skip_label=None):
             rec = json.load(open(os.path.join(d, name)))
         except (OSError, ValueError):
             continue
-        if not alive(int(rec.get("pid", 0))):
+        if not alive(rec.get("pid", 0), rec.get("start")):
             try:
                 os.remove(os.path.join(d, name))
             except OSError:
@@ -151,33 +180,20 @@ def held_slots(skip_label=None):
 
 def take_slot(label, want):
     """Atomically take `want` slots for label. Returns (ok, holders)."""
-    lock = os.path.join(state_dir(), "heavy.lock")
-    for _ in range(100):
-        try:
-            os.mkdir(lock)
-            break
-        except FileExistsError:
-            if time.time() - os.stat(lock).st_mtime > 30:
-                os.rmdir(lock)
-            time.sleep(0.1)
-    try:
+    with locked("heavy"):
         used, holders = held_slots(skip_label=label)
         if used + want > MAX_HEAVY:
             return False, holders
         with open(os.path.join(state_dir("heavy"), label), "w") as f:
-            json.dump({"pid": os.getpid(), "slots": want}, f)
+            json.dump({**me(), "slots": want}, f)
         return True, holders
-    finally:
-        try:
-            os.rmdir(lock)
-        except OSError:
-            pass
 
 
 def own_slot_alive(label):
     p = os.path.join(state_dir("heavy"), label)
     try:
-        return alive(int(json.load(open(p)).get("pid", 0)))
+        rec = json.load(open(p))
+        return alive(rec.get("pid", 0), rec.get("start"))
     except (OSError, ValueError):
         return False
 
@@ -214,10 +230,10 @@ def morning_holders():
     live = []
     for name in os.listdir(d):
         try:
-            pid = int(open(os.path.join(d, name)).read().strip() or 0)
+            rec = json.load(open(os.path.join(d, name)))
         except (OSError, ValueError):
-            pid = 0
-        if pid and alive(pid):
+            rec = {}
+        if rec.get("pid") and alive(rec["pid"], rec.get("start")):
             live.append(name)
         else:
             try:
@@ -230,35 +246,39 @@ def morning_holders():
 def sweep_morning_flag(m):
     f = morning_flag()
     stale = os.path.exists(f) and time.time() - os.path.getmtime(f) > 4 * 3600   # older than 4 h: ignored and removed
-    if os.path.exists(f) and (stale or HEAVY_STOP <= m < HEAVY_START[0]) and not morning_holders():
-        os.remove(f)
-        say("MORNING_BLOCK_SWEPT %s was still there at %02d:%02d with no morning job running" % (f, m // 60, m % 60))
+    if not os.path.exists(f):
+        return
+    with locked("morning"):
+        if os.path.exists(f) and (stale or HEAVY_STOP <= m < HEAVY_START[0]) and not morning_holders():
+            os.remove(f)
+            say("MORNING_BLOCK_SWEPT %s was still there at %02d:%02d with no morning job running" % (f, m // 60, m % 60))
 
 
 def run_morning(label, cmd, m):
     """A morning job before 07:00: hold the morning flag while it runs (the PBS fill drops a lane)."""
     f = morning_flag()
     os.makedirs(os.path.dirname(f), exist_ok=True)
-    if not os.path.exists(f):
-        with open(f, "w") as fh:
-            json.dump({"since": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": label,
-                       "clears": "after the last morning job finishing at or after 06:14; swept from 06:55"}, fh)
-        say("MORNING_BLOCK_ON %s by %s: the PBS fill runs one lane until the morning jobs are done" % (f, label))
     mine = os.path.join(state_dir("morning"), label)
-    child = subprocess.Popen(cmd)
-    with open(mine, "w") as fh:
-        fh.write(str(child.pid))
+    with locked("morning"):   # holder first, then the flag: a job finishing now can never clear it under us
+        with open(mine, "w") as fh:
+            json.dump(me(), fh)
+        if not os.path.exists(f):
+            with open(f, "w") as fh:
+                json.dump({"since": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": label,
+                           "clears": "after the last morning job finishing at or after 06:14; swept from 06:55 or after 4 h"}, fh)
+            say("MORNING_BLOCK_ON %s by %s: the PBS fill runs one lane until the morning jobs are done" % (f, label))
     try:
-        rc = child.wait()
+        rc = subprocess.call(cmd)
     finally:
-        try:
-            os.remove(mine)
-        except OSError:
-            pass
-    end = minute(now_central())
-    if end >= MORNING_LAST_START and end < REST[1] and not morning_holders() and os.path.exists(f):
-        os.remove(f)
-        say("MORNING_BLOCK_OFF %s: the last morning job (%s) is done; the fill may use both lanes" % (f, label))
+        with locked("morning"):
+            try:
+                os.remove(mine)
+            except OSError:
+                pass
+            end = minute(now_central())
+            if end >= MORNING_LAST_START and end < REST[1] and not morning_holders() and os.path.exists(f):
+                os.remove(f)
+                say("MORNING_BLOCK_OFF %s: the last morning job (%s) is done; the fill may use both lanes" % (f, label))
     return rc
 
 
@@ -302,6 +322,17 @@ def run(cls, label, cmd, no_wait):
     return run_until_stop(label, cmd)
 
 
+def kill_group_but_me(sig):
+    """Signal every other process in this guard's group (the job's stragglers), never the guard."""
+    out = subprocess.run(["pgrep", "-g", str(os.getpgrp())], capture_output=True, text=True).stdout.split()
+    for pid in out:
+        if int(pid) != os.getpid():
+            try:
+                os.kill(int(pid), sig)
+            except OSError:
+                pass
+
+
 def run_until_stop(label, cmd):
     """A heavy run, TERMed at 06:55 so it checkpoints before the 07:00 power-off."""
     stop_in = os.environ.get("MAC_WINDOW_STOP_IN")
@@ -309,18 +340,28 @@ def run_until_stop(label, cmd):
         t = now_central()
         stop_in = ((HEAVY_STOP - minute(t)) % 1440) * 60 - t.second
     stop_at = time.time() + float(stop_in)
-    child = subprocess.Popen(cmd, start_new_session=True)
+    say("HEAVY_RUN %s: stops at 06:55 (in %d s)" % (label, int(float(stop_in))))
+    # One process group, led by this guard (launchd already starts a job as its group leader), so the
+    # 06:55 TERM reaches every grandchild AND launchd's own group kill (bootout, logout) takes the job
+    # with the guard: nothing heavy outlives it.
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+    child = subprocess.Popen(cmd)
     try:
         while child.poll() is None:
             if time.time() >= stop_at:
                 say("STOPPING_AT_0655 %s: TERM to its process group so it saves its place" % label)
-                os.killpg(child.pid, signal.SIGTERM)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                os.killpg(os.getpgrp(), signal.SIGTERM)
                 try:
                     child.wait(timeout=float(os.environ.get("MAC_WINDOW_KILL_AFTER", "180")))
                     say("OUTPUT %s stopped cleanly at the window end (exit %s); it resumes next night"
                         % (label, child.returncode))
+                    kill_group_but_me(signal.SIGTERM)
                 except subprocess.TimeoutExpired:
-                    os.killpg(child.pid, signal.SIGKILL)
+                    kill_group_but_me(signal.SIGKILL)
                     child.wait()
                     say("NAMED STOP [KILLED_AT_WINDOW_END] %s ignored TERM for 3 minutes and was killed" % label)
                     return 75
@@ -345,8 +386,23 @@ def plist_json(label):
         return None
 
 
+def local_shift(t):
+    """Mac-local minus Central, as a timedelta: the plists' Hour/Weekday/Day are the Mac's zone once
+    plist-central has moved them (she travels; tz-watch re-moves them), and t is Central."""
+    from zoneinfo import ZoneInfo
+    local = os.environ.get("MAC_WINDOW_LOCAL_TZ")
+    if not local:
+        try:
+            local = os.readlink("/etc/localtime").split("zoneinfo/")[-1]
+        except OSError:
+            local = CENTRAL
+    c = ZoneInfo(CENTRAL)
+    at = t.replace(tzinfo=c)
+    return at.astimezone(ZoneInfo(local)).replace(tzinfo=None) - t
+
+
 def next_own_slot_minutes(pl, t):
-    """Minutes from t to the job's next calendar slot (None when it has none); an interval or
+    """Minutes from t (Central) to the job's next calendar slot (None when it has none); an interval or
     KeepAlive job counts as 'soon' (0): its own tick runs it."""
     if pl is None:
         return None
@@ -356,6 +412,7 @@ def next_own_slot_minutes(pl, t):
     if not sci:
         return None
     sci = sci if isinstance(sci, list) else [sci]
+    t = t + local_shift(t)   # compare in the Mac's zone, where the plist's fields are
     best = None
     for add in range(0, 2):
         day = t + dt.timedelta(days=add)
@@ -376,12 +433,21 @@ def next_own_slot_minutes(pl, t):
 
 
 def disabled_labels():
-    out = subprocess.run([lctl(), "print-disabled", "gui/%d" % os.getuid()], capture_output=True, text=True).stdout
+    """The disabled labels, or None when launchd could not be read (catch-up then starts nothing)."""
+    r = subprocess.run([lctl(), "print-disabled", "gui/%d" % os.getuid()], capture_output=True, text=True)
+    if r.returncode != 0 or "disabled services" not in r.stdout:
+        return None
+    out = r.stdout
     dis = set()
     for line in out.splitlines():
         if "=> disabled" in line or "=> true" in line:
             dis.add(line.split('"')[1] if '"' in line else line.split()[0])
     return dis
+
+
+def running(label):
+    r = subprocess.run([lctl(), "list", label], capture_output=True, text=True)
+    return r.returncode == 0 and '"PID" =' in r.stdout
 
 
 def youtube_paused(label):
@@ -396,6 +462,10 @@ def catch_up(dry):
     names = sorted(os.listdir(d))
     started = left = paused = waiting = 0
     dis = disabled_labels() if names else set()
+    if dis is None:
+        say("NAMED STOP [DISABLED_UNREADABLE] launchctl print-disabled could not be read; %d pending left, nothing started" % len(names))
+        say("OUTPUT mac-window catch-up: %d pending, 0 started (launchd unreadable)" % len(names))
+        return 1
     for label in names:
         try:
             rec = json.load(open(os.path.join(d, label)))
@@ -410,6 +480,10 @@ def catch_up(dry):
             paused += 1
             say("PENDING_PAUSED %s: %s; left pending, never woken while paused"
                 % (label, "disabled" if label in dis else "YouTube held for the PBS fill"))
+            continue
+        if running(label):
+            left += 1
+            say("PENDING_RUNNING %s: it is running now (that run clears it); not started twice" % label)
             continue
         nxt = next_own_slot_minutes(plist_json(label), t)
         if nxt is not None and nxt < closes_in(cls, m):

@@ -269,12 +269,12 @@ else
 fi
 
 # ===========================================================================
-echo "=== 7a. the 09:00 retry gate waits for an in-flight run and decides from its row ==="
+echo "=== 7a. the retry gate (22:20) waits for an in-flight run and decides from its row ==="
 # 26 Sep 2026 (then daily 07:00/08:00): at 08:00 the 07:00 run was still in round 2; the gate saw no row, ran the
 # sweep, the lock no-oped it, and the day could never get its one retry.
 GATE_SUITE="$BIN/tests/test-retry-gate.sh"
 if [ ! -x "$GATE_SUITE" ]; then
-  bad "tests/test-retry-gate.sh is missing — the 09:00 gate is unguarded"
+  bad "tests/test-retry-gate.sh is missing — the retry gate is unguarded"
 elif out="$("$GATE_SUITE" "$BIN" 2>&1)"; then
   n="$(printf '%s\n' "$out" | grep -oE '^=== [0-9]+ assertion' | grep -oE '[0-9]+')"
   examined_fixtures=$((examined_fixtures + ${n:-0}))
@@ -397,8 +397,8 @@ echo "=== 8. the docs cannot drift from the code ============================"
 # as the primary always has.
 #
 # 16 Nov 2026, owner: Tue+Sat (Wed+Sat 13-16 Nov); 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00, first run Sat 14 Nov. Daily is gone. The
-# primary fires Tuesday and Saturday at 08:00, the retry Tuesday and Saturday at
-# 09:00, and NOTHING else: read_schedule prints the full calendar as one
+# primary fires Monday and Friday at 22:15 (the Mac's day, 21 Nov 2026), the retry Monday and Friday
+# at 22:20, and NOTHING else: read_schedule prints the full calendar as one
 # canonical line (every entry, every key) so that a third weekday, a stray
 # Day/Month key, a second time, a StartInterval or an env knob changes the
 # line and fails the exact-match below. Proven negatively on 2 Oct 2026 by
@@ -467,7 +467,7 @@ else
   fi
 fi
 if [ ! -x "$RETRY_SCRIPT" ]; then
-  bad "ci-sweep-retry-if-red.sh is missing or not executable — the 09:00 plist has nothing to run"
+  bad "ci-sweep-retry-if-red.sh is missing or not executable — the retry plist has nothing to run"
 else
   consistency=$((consistency+1))
   if grep -q 'outcomes.tsv' "$RETRY_SCRIPT"; then

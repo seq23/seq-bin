@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
-<!-- Daily 11:25 CT (was 07:15; the Mac is off 07:00-10:00 from 21 Nov 2026): removes leaked Chrome code-sign clones, repair-fixture-* folders and merged worktrees, then checks free space (alert under 15 GB). Before Kendra mac-cleanup at 09:00 CT. -->
+<!-- Daily 11:25 CT (was 07:15; the Mac is off 07:00-10:00 from 21 Nov 2026): removes leaked Chrome code-sign clones, repair-fixture-* folders and merged worktrees, then checks free space (alert under 15 GB). After Kendra's mac-cleanup at 11:05 CT. -->
 <dict>
 	<key>Label</key>
 	<string>com.seq.disk-sweep</string>

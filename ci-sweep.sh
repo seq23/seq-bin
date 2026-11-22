@@ -4,8 +4,8 @@
 # CI sweep — Monday and Friday 22:15 CT, under launchd (launchd/com.seq.ci-sweep.plist
 # in this repo), with one automatic retry at 22:20 if that run does not end green
 # (launchd/com.seq.ci-sweep-retry.plist -> ci-sweep-retry-if-red.sh, which
-# runs THIS script again unchanged). Goal: every repo's main green by about
-# 11:30 (12:30 on a retry day).
+# runs THIS script again unchanged). Goal: every repo's main green before the
+# heavy window closes at 06:55 (mac-window stops it there; the next run resumes).
 # 16 Nov 2026, owner: Tue+Sat (Wed+Sat 13-16 Nov); 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00, first run Sat 14 Nov — replaces daily 07:00
 # (+08:00 retry). The cadence lives in the plist; everything here reads the
 # ledger by day, so a run day is a run day whichever weekday it is.

@@ -40,10 +40,16 @@ for label in "${labels[@]}"; do
   src="$SRC/$label.plist"
   [ -f "$src" ] || { echo "NAMED STOP [NO_SUCH_JOB] $src" >&2; exit 2; }
   dst="$AGENTS/$label.plist"
+  prev="$(mktemp)"; [ -f "$dst" ] && cp "$dst" "$prev"
   cp "$src" "$dst"
-  node "$CENTRAL" "$dst"
-  plutil -lint "$dst" >/dev/null || { echo "NAMED STOP [PLIST_MALFORMED] $dst; not loaded." >&2; exit 1; }
-  "$BIN/launchd-reload" "$dst" || rc=1
+  # A file that cannot be moved to the Mac's zone never stays in LaunchAgents: the one there before goes back.
+  if ! node "$CENTRAL" "$dst"; then
+    if [ -s "$prev" ]; then cp "$prev" "$dst"; else rm -f "$dst"; fi
+    echo "NAMED STOP [PLIST_TZ] $label: not moved to this Mac's zone; the previous file is back, not reloaded" >&2
+    rm -f "$prev"; rc=1; continue
+  fi
+  rm -f "$prev"
+  "$BIN/launchd-reload" "$dst" || rc=1   # it lints too: a malformed file is replaced by the last good one (PLIST_MALFORMED)
 done
 "$LCTL" list | grep -E "$(IFS='|'; echo "${labels[*]}")" || { echo "NAMED STOP [NOT_LOADED] none of the jobs is listed by launchctl" >&2; exit 1; }
 exit $rc

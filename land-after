@@ -21,9 +21,17 @@
 #                            sheet untouched 7+ days is "stale".
 #   land-after --self-test   runs tests/test-land-after.sh.
 #
-# Never PASS on a guess: a read that does not answer (rate limit, network) is `FAIL unknown: <reason>`;
-# land exiting 0 with the PR not merged is `FAIL NAMED STOP [LAND_MERGED_NOTHING]` (Rule 0).
-# Every run deletes files older than 14 days in done/ and logs/ only. Open sheets are never deleted.
+#   land-after --sweep       (nightly, housekeeping.sh) a `landing` sheet whose worker is gone (power loss,
+#                            kill -9) becomes FAIL unknown with its Open Loops row, so nothing waits unseen.
+#
+# A sheet is one job's: line 1 naming another <owner/repo>#<n> is refused, and one land at a time holds each
+# PR and each sheet (two atomic locks). The PASS line may stand in the body or in a comment by the repo's
+# owner account (land's review_text). Never PASS on a guess: a GitHub read that does not answer is asked
+# again with backoff for LAND_AFTER_READ_PATIENCE_SECS (10 min), and a spent allowance is waited out to its
+# reset when that falls inside the wait; only then is it `FAIL unknown: <reason>`. land exiting 0 with the
+# PR not merged is `FAIL NAMED STOP [LAND_MERGED_NOTHING]` (Rule 0).
+# Every run deletes files older than 14 days in done/ and logs/ only, never a log an open sheet names.
+# Open sheets are never deleted.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -36,7 +44,9 @@ LAND_DIR="${LAND_DIR:-$HERE}"                    # open-loops.mjs and land-surfa
 POLL="${LAND_AFTER_POLL_SECS:-30}"
 CHECKS_MAX="${LAND_AFTER_CHECKS_MAX_SECS:-2700}"    # 45 min for the PR's checks to finish
 APPEAR_MAX="${LAND_AFTER_APPEAR_SECS:-300}"         # 5 min for checks to show up at all
-RETRY="${LAND_AFTER_RETRY_SECS:-2}"
+RETRY="${LAND_AFTER_RETRY_SECS:-2}"                # first backoff step; doubles to 60 s
+PATIENCE="${LAND_AFTER_READ_PATIENCE_SECS:-600}"    # how long one unanswered GitHub read is asked again
+START_WAIT="${LAND_AFTER_START_WAIT_SECS:-15}"      # how long the starter waits to see its worker running
 KEEP_MIN=$((14 * 1440)); STALE_LANDING_MIN=90; STALE_OPEN_MIN=$((7 * 1440))
 
 say() { printf 'land-after: %s\n' "$*"; }
@@ -49,15 +59,34 @@ alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null && ps -p "$1" -o command= 2>/d
 redact() {
   perl -pe 'BEGIN { $| = 1 }
     s/\e\[[0-9;]*[A-Za-z]//g;
-    s/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|olt_[A-Za-z0-9_]{8,})/[masked]/g;
+    s/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|olt_[A-Za-z0-9_]{8,}|npm_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/[masked]/g;
+    s/(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]{40}(?![A-Za-z0-9_-]))(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{40}/[masked]/g;
     s/((?:authorization|bearer)[:= ]+)(?:bearer\s+)?\S+/$1\[masked]/gi;
     s/\b((?:[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSCODE|API_KEY|APIKEY))=)\S+/$1\[masked]/g;'
 }
-cleanup() { # done/ and logs/ only, files only, older than 14 days only
-  local d; for d in "$DONE" "$LOGS"; do [ -d "$d" ] && find "$d" -maxdepth 1 -type f -mmin +"$KEEP_MIN" -delete 2>/dev/null; done; return 0
+cleanup() { # done/ and logs/ only, files only, older than 14 days only; a log an open sheet names is evidence, kept
+  local f
+  [ -d "$DONE" ] && find "$DONE" -maxdepth 1 -type f -mmin +"$KEEP_MIN" -delete 2>/dev/null
+  [ -d "$LOGS" ] && find "$LOGS" -maxdepth 1 -type f -mmin +"$KEEP_MIN" -print 2>/dev/null | while IFS= read -r f; do
+    grep -qsF -- "$f" "$TASKS"/*.md || rm -f -- "$f"
+  done
+  return 0
 }
 repo_of_dir() { git -C "$1" remote get-url origin 2>/dev/null | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p'; }
-lock_pid_for_slug() { local l; for l in "$LOCKS"/*.lock; do [ -f "$l/slug" ] && [ "$(cat "$l/slug")" = "$1" ] && { cat "$l/pid" 2>/dev/null; return 0; }; done; return 1; }
+slug_lock() { printf '%s/slugs/%s.lock' "$LOCKS" "$1"; }
+lock_pid_for_slug() { cat "$(slug_lock "$1")/pid" 2>/dev/null; }
+take_lock() { # $1 lock dir -> rc 0 taken | 1 held by a live land (its pid, or "starting", on stdout). A dead holder's lock is taken over.
+  local l="$1" holder
+  mkdir "$l" 2>/dev/null && return 0
+  holder="$(cat "$l/pid" 2>/dev/null || true)"
+  if alive "$holder" || { [ -z "$holder" ] && [ "$(age_min "$l" || echo 99)" -lt 2 ]; }; then printf '%s' "${holder:-starting}"; return 1; fi
+  drop_lock "$l"; mkdir "$l" 2>/dev/null && return 0
+  printf 'unknown'; return 1
+}
+drop_lock() { [ -n "$1" ] && [ -d "$1" ] || return 0; rm -f "$1"/pid "$1"/slug "$1"/then; rmdir "$1" 2>/dev/null; return 0; }
+sheet_owner() { # $1 slug -> the <owner/repo>#<n> its line 1 names (empty when it names none)
+  head -1 "$TASKS/$1.md" 2>/dev/null | grep -oE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+' | head -1
+}
 
 # --- the reviewer's PASS line, read with land's own gate functions (one definition, never a copy) ---
 load_land_blocks() {
@@ -65,7 +94,7 @@ load_land_blocks() {
   block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p; /^# --- open_loops begin/,/^# --- open_loops end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  declare -F pass_line covers_engineering owner_override signoff builders is_builder open_loops_post >/dev/null
+  declare -F review_text pass_line covers_engineering owner_override signoff builders is_builder open_loops_post >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -88,6 +117,46 @@ move_done() { # $1 slug -> done/<slug>.md (an older done copy of the same slug i
   local dest="$DONE/$1.md"
   [ -e "$dest" ] && dest="$DONE/$1.$(date '+%Y%m%d-%H%M%S').md"
   mv "$TASKS/$1.md" "$dest" && printf '%s\n' "$dest"
+}
+
+# One FAIL row on Open Loops (owner claude) naming the PR, the step, the log and the sheet; noted on the sheet.
+file_fail_row() { # $1 repo $2 pr $3 slug $4 reason $5 log
+  local stop="LAND_AFTER_PR_$2" body out msg
+  body="$(jq -nc --arg repo "$1" --arg stop "$stop" --arg pr "$2" --arg reason "$4" --arg log "$5" --arg sheet "$TASKS/$3.md" --arg slug "$3" \
+    '{repo: $repo, stop: $stop, owner: "claude", business: "personal",
+      title: "Land of \($repo)#\($pr) failed: \($reason | .[0:90])",
+      finish_line: "\($repo)#\($pr) merged and deployed green, or closed with a reason",
+      next_step: "Read \($log), fix the failing step (\($reason | .[0:120])) on \($repo)#\($pr), then run land-after \($pr) --task \($slug) again (sheet \($sheet))."}')"
+  if out="$(open_loops_post "$body")"; then
+    add_note "$3" "Open Loops row $stop filed (owner claude): $(tail -1 <<<"$out")"
+    echo "Open Loops row $stop filed (owner claude)"
+  else
+    msg="$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")"
+    add_note "$3" "Open Loops row was NOT filed ($msg); file it by hand: cd ~/GitHub/boss-os && npm run -s vault:run -- node $OPEN_LOOPS_POSTER '<body in the log>'"
+    echo "NAMED STOP [LAND_AFTER_LOOP_NOT_FILED] the Open Loops row was NOT filed ($msg). Body: $body"
+  fi
+}
+
+# ============================== --sweep (nightly) ==============================
+# A worker killed outright (power loss, forced shutdown, kill -9) runs no trap and files nothing; its sheet
+# would say "landing" until someone reads --status. This turns each such sheet into a FAIL with its row.
+sweep() {
+  local f slug line rp repo pr pid n=0
+  for f in "$TASKS"/*.md; do
+    [ -f "$f" ] || continue
+    slug="$(basename "$f" .md)"; line="$(head -1 "$f")"
+    case "$line" in "STATUS: landing"*) ;; *) continue ;; esac
+    pid="$(lock_pid_for_slug "$slug" || true)"
+    alive "$pid" && continue
+    [ "$(age_min "$f" || echo 0)" -ge 2 ] || continue        # a land that is starting right now
+    rp="$(sheet_owner "$slug")"; repo="${rp%#*}"; pr="${rp##*#}"
+    [ -n "$rp" ] || { repo="?"; pr="?"; }
+    set_status "$slug" "STATUS: FAIL $rp $(awk '{print $4}' <<<"$line") $(now) — unknown: the land-after worker is gone (power loss, forced shutdown or kill); nothing says whether it merged. Read the log, then run land-after again; log $LOGS/$slug-$pr.log"
+    [ "$pr" = "?" ] || file_fail_row "$repo" "$pr" "$slug" "unknown: the land-after worker died mid-land" "$LOGS/$slug-$pr.log"
+    drop_lock "$(slug_lock "$slug")"
+    n=$((n + 1)); say "$slug: landing with no live worker -> FAIL unknown"
+  done
+  echo "OUTPUT land-after sweep: $n dead land(s) filed"
 }
 
 # ============================== --status ==============================
@@ -114,57 +183,77 @@ status() {
 
 # ============================== worker (detached) ==============================
 worker() {
-  local DIR="$1" REPO="$2" PR="$3" SLUG="$4" LOG="$5" LOCK="$6" HEADSHA="$7"; shift 8
-  local THENS=("$@") FINISHED="" ERRF LANDOUT
+  local DIR="$1" REPO="$2" PR="$3" SLUG="$4" LOG="$5" LOCK="$6" SLOCK="$7" HEADSHA="$8"
+  local THENS=() FINISHED="" ERRF LANDOUT c
+  # The --then commands come in a file only this user can read, never on the command line (where ps shows them).
+  if [ -f "$LOCK/then" ]; then while IFS= read -r -d '' c; do THENS+=("$c"); done < "$LOCK/then"; fi
   SHEET_REPO="$REPO"; SHEET_PR="$PR"; SHEET_TITLE="(sheet recreated at finish)"
-  echo "$$" > "$LOCK/pid"
+  echo "$$" > "$LOCK/pid"; echo "$$" > "$SLOCK/pid"
   ERRF="$(mktemp)"; LANDOUT="$(mktemp)"
-  trap 'rm -f "$ERRF" "$LANDOUT" "$LOCK/pid" "$LOCK/slug"; rmdir "$LOCK" 2>/dev/null' EXIT
+  trap 'rm -f "$ERRF" "$LANDOUT"; drop_lock "$LOCK"; drop_lock "$SLOCK"' EXIT
   trap '[ -n "$FINISHED" ] || fail "unknown: land-after was stopped by a signal mid-land (sleep, reboot or kill); read the log, then run land-after again"' TERM HUP INT
-  local SHEET="$TASKS/$SLUG.md" STOP="LAND_AFTER_PR_$PR"
+  local SHEET="$TASKS/$SLUG.md" STOP="LAND_AFTER_PR_$PR" MERGE_SHA=""
   echo "=== land-after worker $(now) pid $$: $REPO#$PR in $DIR (sheet $SHEET)"
 
   fail() { # $1 reason
     FINISHED=1
-    local reason msg out body
-    reason="$(printf '%s' "$1" | tr '\n' ' ' | cut -c1-220)"
+    local reason
+    reason="$(printf '%s' "$1" | tr '\n' ' ' | redact | cut -c1-220)"
     set_status "$SLUG" "STATUS: FAIL $REPO#$PR ${MERGE_SHA:-$HEADSHA} $(now) — $reason; log $LOG"
-    body="$(jq -nc --arg repo "$REPO" --arg stop "$STOP" --arg pr "$PR" --arg reason "$reason" --arg log "$LOG" --arg sheet "$SHEET" --arg slug "$SLUG" \
-      '{repo: $repo, stop: $stop, owner: "claude", business: "personal",
-        title: "Land of \($repo)#\($pr) failed: \($reason | .[0:90])",
-        finish_line: "\($repo)#\($pr) merged and deployed green, or closed with a reason",
-        next_step: "Read \($log), fix the failing step (\($reason | .[0:120])) on \($repo)#\($pr), then run land-after \($pr) --task \($slug) again (sheet \($sheet))."}')"
-    if out="$(open_loops_post "$body")"; then
-      add_note "$SLUG" "Open Loops row $STOP filed (owner claude): $(tail -1 <<<"$out")"
-      echo "Open Loops row $STOP filed (owner claude)"
-    else
-      msg="$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")"
-      add_note "$SLUG" "Open Loops row was NOT filed ($msg); file it by hand: cd ~/GitHub/boss-os && npm run -s vault:run -- node $OPEN_LOOPS_POSTER '<body in the log>'"
-      echo "NAMED STOP [LAND_AFTER_LOOP_NOT_FILED] the Open Loops row was NOT filed ($msg). Body: $body"
-    fi
+    file_fail_row "$REPO" "$PR" "$SLUG" "$reason" "$LOG"
     echo "OUTPUT land-after $REPO#$PR FAIL — $reason"
     exit 1
   }
 
+  # One GitHub read that keeps asking through a short outage (22 Nov 2026 review F2: three tries 2 s apart
+  # turned a one-minute rate limit into a FAIL). Backoff from RETRY s, doubling to 60 s, for PATIENCE s; a
+  # spent allowance is slept out once to the reset GitHub reports when that falls before the deadline.
+  # stdout the answer; rc 0 answered | 3 "no checks reported" | 1 gave up (why: first line of $ERRF).
+  patient() { # $1 deadline (epoch) $2 ERE an answer matches $3.. gh args
+    local deadline="$1" ok="$2" out delay give tries=0 reset left
+    shift 2
+    delay="$RETRY"; [ "$delay" -ge 1 ] 2>/dev/null || delay=1
+    give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
+    while :; do
+      out="$(gh "$@" 2>"$ERRF")"
+      grep -qE "$ok" <<<"$out" && { printf '%s\n' "$out"; return 0; }
+      grep -qi 'no checks reported' "$ERRF" && return 3
+      tries=$((tries + 1))
+      if grep -qiE 'rate limit|abuse detection' "$ERRF"; then
+        reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
+        if [[ "$reset" =~ ^[0-9]+$ ]]; then
+          left=$(( reset + 5 - $(date +%s) ))
+          if [ "$left" -gt 0 ] && [ $(( $(date +%s) + left )) -le "$deadline" ]; then
+            echo "GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
+            sleep "$left"
+            give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
+            continue
+          fi
+          [ "$left" -le 0 ] || { echo "rate limit: GitHub's allowance resets in $(( (left + 59) / 60 )) min, after this wait ends" > "$ERRF"; return 1; }
+        fi
+      fi
+      [ $(( $(date +%s) + delay )) -le "$give" ] || return 1
+      echo "GitHub did not answer (try $tries: $(head -1 "$ERRF" | redact)); asking again in ${delay}s" >&2
+      sleep "$delay"; delay=$(( delay * 2 )); [ "$delay" -le 60 ] || delay=60
+    done
+  }
+
   # 1. the PR's checks, bounded. Pending is waited for; red, past the ceiling or unreadable is a FAIL.
-  local start errs=0 out red pending n
+  local start out red pending n prc
   start="$(date +%s)"
   while :; do
-    out="$(gh pr checks "$PR" -R "$REPO" --json name,bucket 2>"$ERRF")"
-    if grep -q '^\[' <<<"$out"; then
-      errs=0; n="$(jq length <<<"$out")"
+    out="$(patient $((start + CHECKS_MAX)) '^\[' pr checks "$PR" -R "$REPO" --json name,bucket)"; prc=$?
+    if [ "$prc" -eq 0 ]; then
+      n="$(jq length <<<"$out")"
       red="$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' <<<"$out")"
       [ -z "$red" ] || fail "checks red: $red"
       pending="$(jq '[.[] | select(.bucket == "pending")] | length' <<<"$out")"
       [ "$n" -gt 0 ] && [ "$pending" -eq 0 ] && { echo "checks green ($n)"; break; }
       [ "$n" -gt 0 ] || [ $(( $(date +%s) - start )) -lt "$APPEAR_MAX" ] || { echo "no checks appeared in $((APPEAR_MAX / 60)) min; land decides"; break; }
-    elif grep -qi 'no checks reported' "$ERRF"; then
+    elif [ "$prc" -eq 3 ]; then
       [ $(( $(date +%s) - start )) -lt "$APPEAR_MAX" ] || { echo "no checks appeared in $((APPEAR_MAX / 60)) min; land decides"; break; }
     else
-      errs=$((errs + 1))
-      echo "checks could not be read (attempt $errs of 3): $(head -1 "$ERRF")"
-      [ "$errs" -lt 3 ] || fail "unknown: the PR's checks could not be read ($(head -1 "$ERRF" | redact))"
-      sleep "$RETRY"; continue
+      fail "unknown: the PR's checks could not be read ($(head -1 "$ERRF"))"
     fi
     [ $(( $(date +%s) - start )) -lt "$CHECKS_MAX" ] || fail "checks still pending after $((CHECKS_MAX / 60)) min"
     sleep "$POLL"
@@ -186,19 +275,16 @@ worker() {
   fi
 
   # 3. Rule 0: exit 0 is not proof. GitHub must say MERGED, with a merge sha.
-  local view="" try
-  for try in 1 2 3; do
-    view="$(gh pr view "$PR" -R "$REPO" --json state,mergeCommit 2>"$ERRF")" && grep -q '"state"' <<<"$view" && break
-    view=""; [ "$try" -lt 3 ] && sleep "$RETRY"
-  done
-  [ -n "$view" ] || fail "unknown: land exited 0 but the merge could not be confirmed ($(head -1 "$ERRF" | redact))"
+  local view
+  view="$(patient $(( $(date +%s) + PATIENCE )) '"state"' pr view "$PR" -R "$REPO" --json state,mergeCommit)" \
+    || fail "unknown: land exited 0 but the merge could not be confirmed ($(head -1 "$ERRF"))"
   local state; state="$(jq -r '.state' <<<"$view")"; MERGE_SHA="$(jq -r '.mergeCommit.oid // empty' <<<"$view")"
   { [ "$state" = MERGED ] && [ -n "$MERGE_SHA" ]; } || fail "NAMED STOP [LAND_MERGED_NOTHING] land exited 0 but $REPO#$PR is $state with no merge commit"
 
   # 4. each --then, in order; the first failure is the FAIL.
   local cmd
   for cmd in ${THENS[@]+"${THENS[@]}"}; do
-    echo "=== then: $cmd"
+    echo "=== then: $cmd" | redact
     (cd "$DIR" && bash -c "$cmd" </dev/null) 2>&1 | redact
     rc="${PIPESTATUS[0]}"
     [ "$rc" -eq 0 ] || fail "then failed (exit $rc): $cmd"
@@ -222,6 +308,7 @@ main() {
   case "${1:-}" in
     --self-test) exec bash "$HERE/tests/test-land-after.sh" ;;
     --status) mkdir -p "$TASKS"; status; exit 0 ;;
+    --sweep) mkdir -p "$TASKS" "$LOGS" "$LOCKS"; load_land_blocks || { echo "FAIL: land's blocks could not be read"; exit 1; }; sweep; exit 0 ;;
     --worker) shift; mkdir -p "$TASKS" "$DONE" "$LOGS"; load_land_blocks || { echo "FAIL: land's blocks could not be read"; exit 1; }; worker "$@" ;;
     -h|--help|"") sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
   esac
@@ -233,7 +320,7 @@ main() {
       --repo=*) REPO="${1#--repo=}" ;;
       --then) THENS+=("${2:-}"); shift ;;
       --then=*) THENS+=("${1#--then=}") ;;
-      --*) refuse "unknown flag $1 (land-after <pr> [--task <slug>] [--repo owner/name] [--then \"<cmd>\"]... | --status | --self-test)" ;;
+      --*) refuse "unknown flag $1 (land-after <pr> [--task <slug>] [--repo owner/name] [--then \"<cmd>\"]... | --status | --sweep | --self-test)" ;;
       *) [ -z "$PR" ] || refuse "one PR at a time (got $PR and $1)"; PR="$1" ;;
     esac
     shift
@@ -241,7 +328,7 @@ main() {
   [[ "$PR" =~ ^[0-9]+$ ]] || refuse "the PR must be a number (got '${PR}')"
   [ -z "$SLUG" ] || valid_slug "$SLUG" || refuse "task slug '$SLUG' must be letters, digits, . _ - (no / and no ..)"
   local c; for c in ${THENS[@]+"${THENS[@]}"}; do [ -n "$c" ] || refuse "--then needs a command"; done
-  mkdir -p "$TASKS" "$DONE" "$LOGS" "$LOCKS" || refuse "cannot create $TASKS"
+  mkdir -p "$TASKS" "$DONE" "$LOGS" "$LOCKS/slugs" || refuse "cannot create $TASKS"
   cleanup
   load_land_blocks || refuse "land's gate block could not be read from $LAND_SRC, so the PASS line cannot be checked"
 
@@ -260,18 +347,19 @@ main() {
   # The PR and its PASS line. A read that never answers starts nothing (exit 75, "could not verify").
   local VIEW="" try errf; errf="$(mktemp)"
   for try in 1 2 3; do
-    VIEW="$(gh pr view "$PR" -R "$REPO" --json state,body,headRefOid,headRefName,title,url,author,commits 2>"$errf")" && grep -q '"state"' <<<"$VIEW" && break
+    VIEW="$(gh pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits 2>"$errf")" && grep -q '"state"' <<<"$VIEW" && break
     VIEW=""; [ "$try" -lt 3 ] && sleep "$RETRY"
   done
   [ -n "$VIEW" ] || { say "could not verify $REPO#$PR ($(head -1 "$errf")); nothing started"; rm -f "$errf"; exit 75; }
   rm -f "$errf"
-  local state body reviewer HEADSHA
+  local state body review reviewer HEADSHA
   state="$(jq -r .state <<<"$VIEW")"; body="$(jq -r '.body // ""' <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
+  review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
   if ! owner_override <<<"$body"; then
-    reviewer="$(signoff Ship-ready <<<"$body")" \
+    reviewer="$(signoff Ship-ready <<<"$review")" \
       || refuse "$REPO#$PR has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output>; Engineering: PASS"
-    pass_line Ship-ready <<<"$body" | covers_engineering \
+    pass_line Ship-ready <<<"$review" | covers_engineering \
       || refuse "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
     is_builder "$reviewer" "$(builders <<<"$VIEW")" \
       && refuse "$REPO#$PR's PASS line is signed by its builder ($reviewer); a fresh reviewer signs it. Nothing started"
@@ -283,27 +371,46 @@ main() {
   [ -n "$SLUG" ] || SLUG="pr-$(printf '%s' "${REPO#*/}" | tr -c 'A-Za-z0-9._-' '-')-$PR"
   valid_slug "$SLUG" || refuse "derived slug '$SLUG' is not valid; pass --task"
 
-  # One land per PR at a time: an atomic mkdir lock; a dead holder's lock is taken over.
-  local LOCK="$LOCKS/${REPO//\//_}-$PR.lock" holder
-  if ! mkdir "$LOCK" 2>/dev/null; then
-    holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-    if alive "$holder" || { [ -z "$holder" ] && [ "$(age_min "$LOCK" || echo 99)" -lt 2 ]; }; then
-      refuse "$REPO#$PR is already being landed (pid ${holder:-starting}, sheet $(cat "$LOCK/slug" 2>/dev/null || echo '?')); nothing started"
-    fi
-    rm -f "$LOCK/pid" "$LOCK/slug"; rmdir "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || refuse "could not take the lock $LOCK"
-  fi
+  # One land per PR, and one per sheet, at a time: atomic mkdir locks; a dead holder's lock is taken over.
+  local LOCK="$LOCKS/${REPO//\//_}-$PR.lock" SLOCK holder
+  SLOCK="$(slug_lock "$SLUG")"
+  holder="$(take_lock "$LOCK")" \
+    || refuse "$REPO#$PR is already being landed (pid $holder, sheet $(cat "$LOCK/slug" 2>/dev/null || echo '?')); nothing started"
   echo "$SLUG" > "$LOCK/slug"
+  holder="$(take_lock "$SLOCK")" \
+    || { drop_lock "$LOCK"; refuse "the sheet $TASKS/$SLUG.md is held by another land (pid $holder); nothing started. One sheet is one job: give this PR its own --task"; }
+  # A sheet is one job's (22 Nov 2026 review F1): line 1 naming another PR is that job's status, never overwritten.
+  local named; named="$(sheet_owner "$SLUG")"
+  if [ -n "$named" ] && [ "$named" != "$REPO#$PR" ]; then
+    drop_lock "$SLOCK"; drop_lock "$LOCK"
+    refuse "$TASKS/$SLUG.md belongs to $named (its line 1), not $REPO#$PR; nothing started. Pass this job's own --task, or set that sheet's line 1 to name $REPO#$PR first"
+  fi
 
-  local LOG="$LOGS/$SLUG-$PR.log" WPID
-  set_status "$SLUG" "STATUS: landing $REPO#$PR $HEADSHA $(now)" || { rmdir "$LOCK"; refuse "could not write $TASKS/$SLUG.md"; }
+  local LOG="$LOGS/$SLUG-$PR.log" WPID BACKUP="$SLOCK/sheet.before" c
+  for c in ${THENS[@]+"${THENS[@]}"}; do printf '%s\0' "$c"; done > "$LOCK/then" && chmod 600 "$LOCK/then"
+  [ -f "$TASKS/$SLUG.md" ] && cp -p "$TASKS/$SLUG.md" "$BACKUP"
+  set_status "$SLUG" "STATUS: landing $REPO#$PR $HEADSHA $(now)" \
+    || { rm -f "$BACKUP"; drop_lock "$SLOCK"; drop_lock "$LOCK"; refuse "could not write $TASKS/$SLUG.md"; }
   printf '\n=== land-after %s: %s#%s from %s\n' "$(now)" "$REPO" "$PR" "$DIR" >> "$LOG"
   # Detached: its own session (setsid), no terminal, stdin closed, HUP ignored, so the agent's shell
-  # ending (or its process group being killed) does not end the land.
-  nohup perl -MPOSIX=setsid -e 'setsid(); exec @ARGV or die "exec failed: $!\n"' -- \
-    "$SELF" --worker "$DIR" "$REPO" "$PR" "$SLUG" "$LOG" "$LOCK" "$HEADSHA" -- ${THENS[@]+"${THENS[@]}"} \
+  # ending (or its process group being killed) does not end the land. A setsid that fails says so in the log.
+  nohup perl -MPOSIX=setsid -e 'defined(setsid()) or print STDERR "land-after: setsid failed ($!): the worker stays in the starting shell session, so ending that session may end the land\n"; exec @ARGV or die "land-after: exec failed: $!\n"' -- \
+    "$SELF" --worker "$DIR" "$REPO" "$PR" "$SLUG" "$LOG" "$LOCK" "$SLOCK" "$HEADSHA" \
     </dev/null >>"$LOG" 2>&1 &
   WPID=$!
-  echo "$WPID" > "$LOCK/pid"
+  echo "$WPID" > "$LOCK/pid"; echo "$WPID" > "$SLOCK/pid"
+  # The starter reports a land only once its worker is seen running (it writes its first log line).
+  local waited=0
+  until grep -qF "=== land-after worker" "$LOG" 2>/dev/null && grep -q "pid $WPID:" "$LOG"; do
+    if [ "$waited" -ge $((START_WAIT * 5)) ] || ! kill -0 "$WPID" 2>/dev/null && ! grep -q "pid $WPID:" "$LOG"; then
+      kill "$WPID" 2>/dev/null
+      if [ -f "$BACKUP" ]; then mv -f "$BACKUP" "$TASKS/$SLUG.md"; else rm -f "$TASKS/$SLUG.md"; fi
+      drop_lock "$SLOCK"; drop_lock "$LOCK"
+      refuse "the worker for $REPO#$PR did not start ($(tail -1 "$LOG" | redact)); nothing is landing, the sheet is as it was. Log $LOG"
+    fi
+    sleep 0.2; waited=$((waited + 1))
+  done
+  rm -f "$BACKUP"
   say "landing $REPO#$PR detached (pid $WPID); log $LOG; result on line 1 of $TASKS/$SLUG.md"
   exit 0
 }

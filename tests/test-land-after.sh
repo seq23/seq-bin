@@ -9,6 +9,11 @@
 #                  a killed worker -> --status says stale, never running
 #   rule 0         land exits 0 having merged nothing -> FAIL LAND_MERGED_NOTHING
 #   detached       the worker finishes after the starting shell AND its whole process group are gone
+#   22 Nov review  F1 another job's sheet, or a sheet another land holds -> refused, untouched; F2 a GitHub hiccup or
+#                  a spent allowance inside the wait is waited out, never "FAIL unknown"; N1 a worker that never
+#                  starts -> refused, sheet restored; N3 more token shapes masked, --then never on a command line;
+#                  N4 --sweep files a dead worker's land; N6 logs an open sheet names are kept; N7 a failed sheet
+#                  write drops both locks; N8 a PASS comment counts only from the owner account
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LA="${LAND_AFTER_UNDER_TEST:-$HERE/../land-after}"
@@ -17,7 +22,7 @@ W="$(mktemp -d)"; STUB=""
 trap '[ -n "$STUB" ] && kill "$STUB" 2>/dev/null; rm -rf "$W"' EXIT
 export HOME="$W/home"; mkdir -p "$HOME"
 T="$HOME/Work/tasks"; FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
-export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0
+export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0 LAND_AFTER_READ_PATIENCE_SECS=3
 export LAND_OPEN_LOOPS_NO_VAULT=1 BOSS_OPEN_LOOPS_TOKEN=olt_testtoken123 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 pass=0; failn=0
 check() { local d="$1"; shift; if "$@"; then pass=$((pass + 1)); echo "  ok  $d"; else failn=$((failn + 1)); echo "  FAIL $d"; fi; }
@@ -42,16 +47,26 @@ cat > "$BIN/gh" <<'SH'
 F="$FAKE_DIR"; echo "$*" >> "$F/gh-log"
 mode() { cat "$F/$1" 2>/dev/null; }
 case "$1 $2" in
+  "api rate_limit") # the allowance GitHub reports: spent with a reset at $F/reset-at while rate limited
+    if [ -f "$F/reset-at" ]; then jq -n --argjson r "$(cat "$F/reset-at")" '{resources: {core: {remaining: 0, reset: $r}, graphql: {remaining: 5000, reset: $r}}}' | jq -r "${4:-.}"
+    else echo 0 | jq -r '.'; fi; exit 0 ;;
   "pr view")
     { [ "$(mode view-mode)" = down ] || { [ "$(mode view-mode)" = down-after-land ] && [ -f "$F/land-ran" ]; }; } \
       && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
-    jq -n --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" \
-      '{state: $st, body: $body, headRefOid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", headRefName: "feat", title: "A change",
+    cm="$(cat "$F/comments" 2>/dev/null || echo '[]')"
+    jq -n --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
+      '{state: $st, body: $body, comments: $cm, headRefOid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", headRefName: "feat", title: "A change",
         url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}' ;;
   "pr checks")
     case "$(mode checks-mode)" in
       ratelimit) echo "HTTP 403: API rate limit exceeded for user" >&2; exit 1 ;;
+      ratelimit-until) # spent until the epoch in reset-at, then answers
+        [ "$(date +%s)" -ge "$(cat "$F/reset-at")" ] || { echo "HTTP 403: API rate limit exceeded for user" >&2; exit 1; }
+        echo '[{"name":"ci","bucket":"pass"}]' ;;
+      flaky) # two short network failures, then answers
+        n=$(grep -c '^pr checks' "$F/gh-log"); [ "$n" -gt 2 ] || { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
+        echo '[{"name":"ci","bucket":"pass"}]' ;;
       red) echo '[{"name":"ci","bucket":"fail"}]'; exit 1 ;;
       pending-once) if [ -f "$F/checked" ]; then echo '[{"name":"ci","bucket":"pass"}]'; else : > "$F/checked"; echo '[{"name":"ci","bucket":"pending"}]'; exit 8; fi ;;
       *) echo '[{"name":"ci","bucket":"pass"}]' ;;
@@ -67,7 +82,10 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   nomerge) echo "1/5  verifying"; exit 0 ;;
   red) echo "4/5  e2e"; printf '\033[31mSTOPPED: NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 9 ended failure\033[0m\n'; exit 1 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
-  secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"; : > "$F/merged"; exit 0 ;;
+  secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"
+          echo "npm npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 google AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+          echo "cf Zk3pQ9vX2mL7nR4tY8wB1cD6fG0hJ5kM3sA9qE2u commit 0123456789abcdef0123456789abcdef01234567"
+          : > "$F/merged"; exit 0 ;;
 esac
 SH
 chmod +x "$BIN/gh" "$W/fake-land"
@@ -75,7 +93,7 @@ git init -q "$W/repo" && git -C "$W/repo" remote add origin https://github.com/t
 GOOD='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
 reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; rm -f "$W/api/down"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
 la() { (cd "$W/repo" && "$LA" "$@") > "$W/out" 2>&1; RC=$?; }
-lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(ls "$T/locks" 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }
+lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(find "$T/locks" -name '*.lock' 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }
 has() { grep -qF -- "$1" "$W/out"; }
 line1() { head -1 "$1" 2>/dev/null; }
 posts() { cat "$W/api/posts.jsonl" 2>/dev/null; }
@@ -148,9 +166,16 @@ reset; la 9 --task redjob; lockgone
 check "a later green try of the same PR: PASS and the row closed" eval 'line1 "$T/done/redjob.md" | grep -q "^STATUS: PASS" && posts | jq -e "select(.stop == \"LAND_AFTER_PR_9\" and .cleared == true)" >/dev/null'
 
 echo "=== outage: unknown, never PASS ==="
-reset; echo ratelimit > "$FAKE/checks-mode"
+reset; echo ratelimit > "$FAKE/checks-mode"; echo $(( $(date +%s) + 7200 )) > "$FAKE/reset-at"
 la 10 --task ratelimited; lockgone
-check "gh rate-limited reading checks: FAIL unknown, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit" && [ ! -f "$FAKE/land-ran" ]'
+check "allowance spent with its reset after the wait ends: FAIL unknown naming the reset, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit: GitHub.s allowance resets in 12[01] min" && [ ! -f "$FAKE/land-ran" ]'
+check "…and it did not burn the wait asking again (one checks read)" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 1 ]'
+reset; echo flaky > "$FAKE/checks-mode"
+la 23 --task flaky; lockgone
+check "F2: two network failures reading checks are asked again with backoff, then PASS" eval 'line1 "$T/done/flaky.md" | grep -q "^STATUS: PASS" && grep -q "asking again in" "$T/logs/flaky-23.log"'
+reset; echo ratelimit-until > "$FAKE/checks-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
+LAND_AFTER_READ_PATIENCE_SECS=1 la 24 --task waitreset; lockgone
+check "F2: allowance spent, resetting inside the wait: one sleep to the reset (past the 1 s patience), then PASS" eval 'line1 "$T/done/waitreset.md" | grep -q "^STATUS: PASS" && grep -q "waiting [0-9]*s for its reset" "$T/logs/waitreset-24.log"'
 reset; echo unverified > "$FAKE/land-mode"
 la 11 --task netdown; lockgone
 check "land exit 75 (network down mid-land): FAIL unknown" eval 'line1 "$T/netdown.md" | grep -q "^STATUS: FAIL .*unknown: STOPPED: could not verify"'
@@ -180,6 +205,17 @@ check "sheet missing at finish: recreated with the PASS, in done/" eval 'line1 "
 reset; echo secret > "$FAKE/land-mode"
 la 17 --task secrets; lockgone
 check "no token, bearer or KEY=value in the log" eval '! grep -qE "ghp_ABCDEF|sk-abcdefghij|cfsecretvalue123" "$T/logs/secrets-17.log" && grep -q "\[masked\]" "$T/logs/secrets-17.log"'
+check "…nor an npm, Google, JWT or bare 40-character Cloudflare token" eval '! grep -qE "npm_AbCd|AIzaSyA1|eyJhbGci|Zk3pQ9vX" "$T/logs/secrets-17.log"'
+check "…while a 40-character git sha stays readable" grep -q 'commit 0123456789abcdef0123456789abcdef01234567' "$T/logs/secrets-17.log"
+reset
+FAKE_LAND_SECS=2 la 19 --task thensecret --then "echo CLOUDFLARE_API_TOKEN=thenvalue987 > /dev/null"
+sleep 0.5
+# shellcheck disable=SC2034 # read inside an eval below
+WP="$(cat "$T"/locks/slugs/thensecret.lock/pid 2>/dev/null)"
+check "--then text is never on the worker's command line (ps)" eval '[ -n "$WP" ] && ! ps -p "$WP" -o command= | grep -q thenvalue987'
+check "…its file is readable by this user only" eval '[ "$(stat -f %Lp "$T"/locks/t_fixture-19.lock/then 2>/dev/null || stat -c %a "$T"/locks/t_fixture-19.lock/then)" = 600 ]'
+lockgone
+check "…and its echo in the log is masked" eval 'grep -q "^=== then: echo CLOUDFLARE_API_TOKEN=\[masked\]" "$T/logs/thensecret-19.log" && ! grep -q thenvalue987 "$T/logs/thensecret-19.log"'
 reset
 la 18; lockgone
 check "no --task: a minimal sheet from the PR, ending PASS in done/" eval 'line1 "$T/done/pr-fixture-18.md" | grep -q "^STATUS: PASS" && grep -q "Goal: land t/fixture#18 (A change)" "$T/done/pr-fixture-18.md"'
@@ -197,18 +233,71 @@ check "a file outside done/ and logs/ kept" [ -e "$T/keepdir/old.txt" ]
 
 echo "=== --status: a killed worker is stale, never running; done/ is never listed ==="
 printf 'STATUS: landing t/fixture#20 aaa 2026-11-22T01:00\n' > "$T/killed.md"; old 0.1 "$T/killed.md"
-mkdir -p "$T/locks/t_fixture-20.lock"; echo killed > "$T/locks/t_fixture-20.lock/slug"; echo 999999 > "$T/locks/t_fixture-20.lock/pid"
+mkdir -p "$T/locks/t_fixture-20.lock" "$T/locks/slugs/killed.lock"; echo killed > "$T/locks/t_fixture-20.lock/slug"; echo 999999 > "$T/locks/t_fixture-20.lock/pid"; echo 999999 > "$T/locks/slugs/killed.lock/pid"
 printf 'STATUS: landing t/fixture#21 aaa 2026-11-22T01:00\n' > "$T/oldlanding.md"; old 0.1 "$T/oldlanding.md"
 "$LA" --status > "$W/out" 2>&1
 check "landing with a dead worker pid: stale" grep -q '^killed  STATUS: landing .*\[stale: landing, no land running\]' "$W/out"
 check "landing 2.4 h old with no worker: stale" grep -q '^oldlanding  .*\[stale: landing' "$W/out"
 check "nothing shown as running" eval '! grep -q "\\[running" "$W/out"'
 check "done/ sheets are not listed" eval '! grep -q "done/" "$W/out"'
-rm -rf "$T/locks/t_fixture-20.lock"
+
+echo "=== N4: --sweep files a land whose worker is gone ==="
+old 0.01 "$T/killed.md"; : > "$W/api/posts.jsonl"
+"$LA" --sweep > "$W/out" 2>&1
+check "a landing sheet with a dead worker: FAIL unknown naming the dead worker" eval 'line1 "$T/killed.md" | grep -q "^STATUS: FAIL t/fixture#20 .*unknown: the land-after worker is gone"'
+check "…its Open Loops row is filed (stop LAND_AFTER_PR_20)" eval 'posts | jq -e "select(.stop == \"LAND_AFTER_PR_20\")" >/dev/null'
+check "…its dead slug lock is dropped, and the OUTPUT line counts it" eval '[ ! -e "$T/locks/slugs/killed.lock" ] && has "OUTPUT land-after sweep: 2 dead land(s) filed"'
+rm -rf "$T/locks/t_fixture-20.lock"; rm -f "$T/killed.md" "$T/oldlanding.md"
 # A dead holder's lock does not block a new land of that PR.
 mkdir -p "$T/locks/t_fixture-22.lock"; echo x > "$T/locks/t_fixture-22.lock/slug"; echo 999999 > "$T/locks/t_fixture-22.lock/pid"
 reset; la 22 --task afterkill; lockgone
 check "a dead worker's lock is taken over; the new land ends PASS" eval 'line1 "$T/done/afterkill.md" | grep -q "^STATUS: PASS"'
+
+
+echo "=== F1: one sheet is one job's ==="
+reset; printf 'STATUS: building seq23/other#99 abc 2026-11-22\nGoal: another job\n' > "$T/theirs.md"
+# shellcheck disable=SC2034 # read inside an eval below
+SUM="$(cksum < "$T/theirs.md")"
+la 30 --task theirs
+check "a sheet whose line 1 names another PR: refused, land never ran" eval '[ "$RC" -eq 1 ] && has "belongs to seq23/other#99" && [ ! -f "$FAKE/land-ran" ]'
+check "…the sheet byte for byte the same, and no lock left" eval '[ "$(cksum < "$T/theirs.md")" = "$SUM" ] && [ -z "$(find "$T/locks" -name "*.lock")" ]'
+reset; printf 'STATUS: building\nGoal: g\n' > "$T/shared.md"
+FAKE_LAND_SECS=3 la 31 --task shared
+check "first PR on a sheet: rc 0" [ "$RC" -eq 0 ]
+sed -i.bak '1s/.*/STATUS: building/' "$T/shared.md"; rm -f "$T/shared.md.bak"
+la 32 --task shared
+check "a second PR on the same sheet while the first lands (line 1 names no PR): refused by the sheet lock" eval '[ "$RC" -eq 1 ] && has "is held by another land" && ! grep -q "^land 32" "$FAKE/land-log" 2>/dev/null'
+lockgone; check "…the first still ends PASS" eval 'line1 "$T/done/shared.md" | grep -q "^STATUS: PASS t/fixture#31"'
+
+echo "=== N8: a PASS comment counts only from the repo's owner account ==="
+reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "seq23"}, authorAssociation: "OWNER", body: $b}]' > "$FAKE/comments"
+la 33 --task ownercomment; lockgone
+check "the reviewer's PASS in an owner-account comment: lands" eval 'line1 "$T/done/ownercomment.md" | grep -q "^STATUS: PASS"'
+reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "passerby"}, authorAssociation: "NONE", body: $b}]' > "$FAKE/comments"
+la 34 --task strangercomment
+check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
+
+echo "=== N1: a worker that never starts is reported, the sheet put back ==="
+reset; printf 'STATUS: review\nGoal: kept\n' > "$T/nostart.md"
+# shellcheck disable=SC2034 # read inside an eval below
+SUM="$(cksum < "$T/nostart.md")"
+mkdir -p "$W/badperl"; printf '#!/bin/bash\nfor a in "$@"; do [ "$a" = --worker ] && { echo "perl: cannot detach" >&2; exit 1; }; done\nexec /usr/bin/perl "$@"\n' > "$W/badperl/perl"; chmod +x "$W/badperl/perl"
+PATH="$W/badperl:$PATH" LAND_AFTER_START_WAIT_SECS=2 la 35 --task nostart
+check "detach fails: refused, saying the worker did not start" eval '[ "$RC" -eq 1 ] && has "did not start" && [ ! -f "$FAKE/land-ran" ]'
+check "…the sheet is as it was and no lock is left" eval '[ "$(cksum < "$T/nostart.md")" = "$SUM" ] && [ -z "$(find "$T/locks" -name "*.lock")" ]'
+rm -f "$T/nostart.md"
+
+echo "=== N7: a sheet that cannot be written drops both locks ==="
+reset; chmod 555 "$T"   # the sheet folder read-only: the status line cannot be written
+la 36 --task unwritable; chmod 755 "$T"
+check "set_status fails: refused, and neither lock is left behind" eval '[ "$RC" -eq 1 ] && has "could not write" && [ -z "$(find "$T/locks" -name "*.lock")" ] && [ ! -f "$FAKE/land-ran" ]'
+
+echo "=== N6: a log an open FAIL sheet names is kept past 14 days ==="
+printf 'STATUS: FAIL t/fixture#9 x 2026-11-01 — red; log %s\n' "$T/logs/evidence-9.log" > "$T/evidence.md"
+echo x > "$T/logs/evidence-9.log"; old 20 "$T/logs/evidence-9.log"; echo x > "$T/logs/orphan.log"; old 20 "$T/logs/orphan.log"
+"$LA" --status > "$W/out" 2>&1
+check "the named log kept, an unnamed one of the same age deleted" eval '[ -e "$T/logs/evidence-9.log" ] && [ ! -e "$T/logs/orphan.log" ]'
+rm -f "$T/evidence.md"
 
 echo
 echo "land-after: $pass passed, $failn failed"

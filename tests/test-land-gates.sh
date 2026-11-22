@@ -65,6 +65,16 @@ for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent sess
 done
 gate "$(meta "$GOOD" "$SITE")"
 check "a fresh reviewer's PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
+echo "=== a PASS posted as a PR comment counts only from the repo's owner account (22 Nov 2026 review N8) ==="
+with_comment() { jq --arg c "$2" --arg who "$3" '.comments = [{author: {login: "x"}, authorAssociation: $who, body: $c}]' <<<"$1"; }
+gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" OWNER)"
+check "a fresh reviewer's PASS in a comment by the owner account -> allowed (rc 0)" [ "$RC" -eq 0 ]
+for who in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR COLLABORATOR; do
+  gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" "$who")"
+  check "the same PASS in a comment by a $who account -> refused" eval '[ "$RC" -eq 1 ] && grep -q "add to the PR body the line  Ship-ready: PASS" <<<"$MSG"'
+done
+gate "$(with_comment "$(meta 'Tweaks the page.' "$SITE")" 'Ship-ready: PASS — builder looked at the page; Engineering: PASS' OWNER)"
+check "an owner-account comment signed by the builder -> still refused as the builder's" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
 echo "=== engineering rides on the Ship-ready PASS (her ruling 21 Nov 2026) ==="
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px' "$SITE")"
 check "a PASS that says nothing of engineering -> refused (rc 1)" [ "$RC" -eq 1 ]

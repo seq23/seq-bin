@@ -857,7 +857,8 @@ recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the 
 #     webPropertyChange.ts took #527, #531, #532, #537, #540, #546 and #551 in one day.
 #  2. SHIP-READY. A PR that changes what a person sees (land-surfaces.json: pages, app screens, emails,
 #     video/social output, per repo type) stops unless its body has
-#     `Ship-ready: PASS — <reviewer> looked at <real output>` from a reviewer who is not the builder
+#     `Ship-ready: PASS — <reviewer> looked at <real output>` (in the body, or in a comment by the repo's
+#     owner account: `review_text`) from a reviewer who is not the builder
 #     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
 #     public (a launch marker added, or the repo's first surface) also needs `Launch-ready: PASS — ...`.
 #     The same Ship-ready line carries `Engineering: PASS` (every automatic fail in engineering.md; no
@@ -887,6 +888,11 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   local line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
+}
+review_text() { # stdin: PR view JSON -> where a reviewer's PASS line may stand: the body, then each comment by the
+  # repo's OWNER account (oldest first). Every agent posts as the owner's login; a comment from any other account
+  # (a passer-by on a public repo, a bot) is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
+  jq -r '(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))' 2>/dev/null
 }
 covers_engineering() { # stdin: one PASS line -> 0 when it also passes every automatic fail in engineering.md
   grep -qiE 'engineering: *pass'
@@ -925,7 +931,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   [ -n "$files" ] || return 0
-  body="$(jq -r '.body // ""' <<<"$2")"; ids="$(builders <<<"$2")"
+  body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
     || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add to the PR body the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \

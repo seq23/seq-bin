@@ -63,5 +63,26 @@ run sess-10 "## In flight
 - NOTE-SESS-10"
 grep -q 'Carried over from 2000-01-01' "$H" && bad "the carried block survived a second day"
 grep -q 'PINNED-LINE-STAYS' "$H" || bad "PINNED text was touched"
+# Jobs (22 Nov 2026): Today carries ONE Jobs list from `land-after --status` (open sheets only, line 1 +
+# path, never a sheet's body), replaced on every write.
+grep -q 'none open' "$H" || bad "jobs: no open sheets did not say 'none open'"
+mkdir -p "$T/Work/tasks/done"
+printf 'STATUS: building o/r#1 aaa 2026-11-22T09:00\nGoal: SHEET-BODY-A\n' > "$T/Work/tasks/job-a.md"
+printf 'STATUS: landing o/r#2 bbb 2026-11-22T09:05\nGoal: SHEET-BODY-B\n' > "$T/Work/tasks/job-b.md"
+printf 'STATUS: PASS o/r#3 ccc 2026-11-22T08:00\n' > "$T/Work/tasks/done/job-c.md"
+run sess-10 "## In flight
+- NOTE-SESS-10b"
+jobs="$(sed -n '/<!-- JOBS:START -->/,/<!-- JOBS:END -->/p' "$H")"
+[ "$(grep -c '^- ' <<<"$jobs")" = 2 ] || bad "jobs: expected exactly 2 lines, got: $jobs"
+grep -q "^- job-a  STATUS: building o/r#1 .* $T/Work/tasks/job-a.md$" <<<"$jobs" || bad "jobs: job-a's line 1 and path missing"
+grep -q "^- job-b  STATUS: landing o/r#2 " <<<"$jobs" || bad "jobs: job-b missing"
+grep -q 'job-c' <<<"$jobs" && bad "jobs: a done/ sheet was listed"
+grep -q 'SHEET-BODY' "$H" && bad "jobs: a sheet body was copied into HANDOFF"
+rm "$T/Work/tasks/job-a.md"
+run sess-11 "## In flight
+- NOTE-SESS-11"
+[ "$(grep -c 'JOBS:START' "$H")" = 1 ] || bad "jobs: the Jobs list was stacked, not replaced"
+grep -q 'job-a' "$H" && bad "jobs: a closed sheet stayed on the list"
+grep -q 'NOTE-SESS-10b' "$H" || bad "jobs: a session note was lost when the Jobs list was replaced"
 rm -rf "$T"
 [ $fail = 0 ] && echo "PASS test-handoff-keeps-curated" || exit 1

@@ -22,6 +22,11 @@ else
   fi
   (cd "$REPO" && npm run -s vault:run -- node "$BIN/housekeeping.mjs"); rc=$?
 fi
+# A land-after worker killed outright (power loss, kill -9) files nothing itself; the sweep turns its
+# `landing` sheet into a FAIL with an Open Loops row (22 Nov 2026 review N4). Its own failure is said, never hidden.
+if [ "${HOUSEKEEPING_DRY_RUN:-}" != 1 ] && [ -x "$BIN/land-after" ]; then
+  "$BIN/land-after" --sweep || echo "NAMED STOP [LAND_AFTER_SWEEP_FAILED] land-after --sweep exited $?; a dead land may still read 'landing' (land-after --status shows it)." >&2
+fi
 if [ "$rc" -ne 0 ]; then
   echo "NAMED STOP [HOUSEKEEPING_INCOMPLETE] exit $rc; the line above says why. Nothing was committed, stashed or discarded." >&2
 fi

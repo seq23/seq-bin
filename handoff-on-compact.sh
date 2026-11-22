@@ -85,6 +85,16 @@ block="### Session note — ${STAMP_LOCAL}
 ${summary}
 "
 
+# JOBS (22 Nov 2026): one line per open task sheet (~/Work/tasks/<slug>.md line 1 + its path) from
+# `land-after --status`, REPLACING the previous Jobs list at the top of Today. Never a sheet's body.
+LAND_AFTER_BIN="${LAND_AFTER_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/land-after}"
+if jobs_out="$("$LAND_AFTER_BIN" --status 2>&1)"; then
+  if grep -q '^land-after: no open task sheets' <<<"$jobs_out"; then jobs="- none open"
+  else jobs="$(grep -v '^land-after:' <<<"$jobs_out" | grep . | sed 's/^/- /')"; [ -n "$jobs" ] || jobs="- none open"; fi
+else
+  jobs="- **could not read the jobs** (\`land-after --status\` failed: $(tail -1 <<<"$jobs_out")); run it by hand"
+fi
+
 # 20 Oct 2026 rule (hers): the handoff follows the PINNED sheet; temporary things (what's in
 # flight, what we did today) live ONLY in the "Today" section between the TODAY markers, which is
 # REPLACED, never stacked: a new note from the same session replaces that session's earlier note
@@ -94,7 +104,7 @@ ${summary}
 # note; a new day drops yesterday's notes but CARRIES the newest one (or yesterday's hand-written
 # status) once, so work in flight over midnight survives. Everything outside the markers is never touched. No markers
 # yet → the section is appended at the END of the file, never at the top.
-FAILED="$FAILED" STAMP_LOCAL="$STAMP_LOCAL" BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
+JOBS="$jobs" FAILED="$FAILED" STAMP_LOCAL="$STAMP_LOCAL" BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
 import os, re, fcntl
 path, block = os.environ["HANDOFF"], os.environ["BLOCK"].rstrip() + "\n"
 today, today_long = os.environ["TODAY"], os.environ["TODAY_LONG"]
@@ -109,6 +119,9 @@ if S not in doc or E not in doc:
     doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + E + "\n"
 head, rest = doc.split(S, 1)
 body, tail = rest.split(E, 1)
+JS, JE = "<!-- JOBS:START -->", "<!-- JOBS:END -->"
+body = re.sub(re.escape(JS) + r".*?" + re.escape(JE) + r"\n*", "", body, flags=re.S)
+jobs = JS + "\n### Jobs (open task sheets, from `land-after --status`)\n" + os.environ.get("JOBS", "- none open").rstrip() + "\n" + JE + "\n\n"
 m = re.search(r"<!-- day:(\d{4}-\d{2}-\d{2}) -->", body)
 parts = re.split(r"(?m)^(?=### (?:Session note — |Carried over from ))", body)
 notes = [n.rstrip() + "\n" for n in parts if n.strip().startswith(NOTE)]
@@ -138,7 +151,7 @@ else:
     newest = pre or (notes[0].split("\n", 1)[1] if notes else "")
     lead = (CARRY + old_day + " (check before trusting)\n" + newest.strip() + "\n\n") if newest.strip() else ""
     out_notes = [block]
-out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + lead + "\n".join(out_notes) + E + tail
+out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + jobs + lead + "\n".join(out_notes) + E + tail
 tmp = path + ".tmp"
 open(tmp, "w").write(out)
 os.replace(tmp, path)

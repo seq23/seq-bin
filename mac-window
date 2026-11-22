@@ -23,6 +23,14 @@ clears the record first, and catch-up leaves a record alone when the job's own n
 the window that is open now (that slot runs it). Paused jobs are never woken: a disabled label, or a
 YouTube job while the Peace Be Still fill holds the channels, stays pending.
 
+THE MORNING BLOCK (owner 21 Nov 2026: "do not let my ... morning email /briefs suffer"). Every MORNING job is
+scheduled to finish by 06:30 with twice its worst measured runtime to spare (boss-os mac-day:check proves
+it). From the first morning job of the night to the last, ~/.boss-os/morning-window.active exists: the
+PBS fill reads it and drops to ONE lane so the memory is theirs. It is set when a MORNING job starts
+before 07:00, kept while any runs, cleared when one finishes at or after 06:14 (the last morning slot)
+with none left running, and swept if still there at 06:55 or later, or older than 4 hours, with nobody
+holding it (the PBS fill's clone lane, peace-be-still #104, waits while it exists).
+
 HEAVY SLOTS. At most 2 heavy jobs at once on this 8 GB Mac (CLAUDE.md). A heavy run takes
 MAC_WINDOW_SLOTS slots (default 1; the PBS fill's two lanes take 2). A calendar job waits for a free
 slot until 06:30, then becomes pending for the next night; an interval tick (--no-wait) just says
@@ -52,6 +60,7 @@ HEAVY_START = (22 * 60, 6 * 60 + 30)
 HEAVY_STOP = 6 * 60 + 55
 DAY = (10 * 60, 22 * 60)
 MAX_HEAVY = 2
+MORNING_LAST_START = 6 * 60 + 14   # the last morning slot (the catch-up's 06:14)
 YOUTUBE = ("com.howweknow.", "com.seq.shorts-arm", "com.seq.boss-comment-watch", "com.seq.oneshot.hwk-money")
 
 
@@ -195,10 +204,69 @@ def clear_pending(label):
     return False
 
 
+# ─── the morning block ──────────────────────────────────────────────────────
+def morning_flag():
+    return os.environ.get("MAC_WINDOW_MORNING_FLAG") or os.path.expanduser("~/.boss-os/morning-window.active")
+
+
+def morning_holders():
+    d = state_dir("morning")
+    live = []
+    for name in os.listdir(d):
+        try:
+            pid = int(open(os.path.join(d, name)).read().strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        if pid and alive(pid):
+            live.append(name)
+        else:
+            try:
+                os.remove(os.path.join(d, name))
+            except OSError:
+                pass
+    return live
+
+
+def sweep_morning_flag(m):
+    f = morning_flag()
+    stale = os.path.exists(f) and time.time() - os.path.getmtime(f) > 4 * 3600   # older than 4 h: ignored and removed
+    if os.path.exists(f) and (stale or HEAVY_STOP <= m < HEAVY_START[0]) and not morning_holders():
+        os.remove(f)
+        say("MORNING_BLOCK_SWEPT %s was still there at %02d:%02d with no morning job running" % (f, m // 60, m % 60))
+
+
+def run_morning(label, cmd, m):
+    """A morning job before 07:00: hold the morning flag while it runs (the PBS fill drops a lane)."""
+    f = morning_flag()
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    if not os.path.exists(f):
+        with open(f, "w") as fh:
+            json.dump({"since": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": label,
+                       "clears": "after the last morning job finishing at or after 06:14; swept from 06:55"}, fh)
+        say("MORNING_BLOCK_ON %s by %s: the PBS fill runs one lane until the morning jobs are done" % (f, label))
+    mine = os.path.join(state_dir("morning"), label)
+    child = subprocess.Popen(cmd)
+    with open(mine, "w") as fh:
+        fh.write(str(child.pid))
+    try:
+        rc = child.wait()
+    finally:
+        try:
+            os.remove(mine)
+        except OSError:
+            pass
+    end = minute(now_central())
+    if end >= MORNING_LAST_START and end < REST[1] and not morning_holders() and os.path.exists(f):
+        os.remove(f)
+        say("MORNING_BLOCK_OFF %s: the last morning job (%s) is done; the fill may use both lanes" % (f, label))
+    return rc
+
+
 # ─── run ────────────────────────────────────────────────────────────────────
 def run(cls, label, cmd, no_wait):
     t = now_central()
     m = minute(t)
+    sweep_morning_flag(m)
     if not inside(cls, m):
         first = write_pending(label, cls, t, "outside")
         say("OUTSIDE_WINDOW %s %s woken %02d:%02d; %s, runs once when its window opens at %s"
@@ -227,6 +295,8 @@ def run(cls, label, cmd, no_wait):
             time.sleep(poll)
     if clear_pending(label):
         say("PENDING_CLEARED %s: this run is the one it was owed" % label)
+    if cls == "MORNING" and m < REST[0]:
+        return run_morning(label, cmd, m)
     if cls != "HEAVY":
         os.execvp(cmd[0], cmd)
     return run_until_stop(label, cmd)

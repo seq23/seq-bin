@@ -145,5 +145,24 @@ chmod +x "$T/stubborn.sh"
 out=$(MAC_WINDOW_NOW=06:30 MAC_WINDOW_STOP_IN=1 MAC_WINDOW_KILL_AFTER=1 "$MW" run HEAVY com.seq.t-stub -- "$T/stubborn.sh"); rc=$?
 echo "$out" | grep -q "KILLED_AT_WINDOW_END" && [ "$rc" = 75 ] && ok || no "stubborn job: rc=$rc $out"
 
+# 8. The morning block: the first morning job before 07:00 raises the flag, it stays between morning jobs,
+#    the last one (finishing at/after 06:14) clears it, and a flag left behind is swept from 06:55.
+export MAC_WINDOW_MORNING_FLAG="$T/boss/morning-window.active"
+MAC_WINDOW_NOW=03:40 "$MW" run MORNING com.seq.boss-credentials -- true | grep -q MORNING_BLOCK_ON && [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "first morning job raises the flag"
+MAC_WINDOW_NOW=04:05 "$MW" run MORNING com.seq.boss-agent -- sh -c "test -e '$MAC_WINDOW_MORNING_FLAG'" && [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag held while a morning job runs and after it (more to come)"
+MAC_WINDOW_NOW=10:30 "$MW" run MORNING com.seq.boss-morning-catchup -- true >/dev/null
+[ ! -e "$MAC_WINDOW_MORNING_FLAG" ] || ok   # (a 10:30 run is not a morning-block run; the 06:55 sweep below decides)
+MAC_WINDOW_NOW=06:14 "$MW" run MORNING com.seq.boss-morning-catchup -- true >/dev/null; touch "$MAC_WINDOW_MORNING_FLAG"
+MAC_WINDOW_NOW=06:14 "$MW" run MORNING com.seq.boss-morning-catchup -- true | grep -q MORNING_BLOCK_OFF && [ ! -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "last morning job clears the flag"
+# two at once: the earlier one finishing past 06:14 does not clear it while the other still runs
+MAC_WINDOW_NOW=06:20 "$MW" run MORNING com.seq.m-long -- sleep 2 & pl=$!
+sleep 0.5
+MAC_WINDOW_NOW=06:27 "$MW" run MORNING com.seq.m-short -- true >/dev/null
+[ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag cleared while a morning job still ran"
+wait $pl
+touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=06:56 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && [ ! -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "stale flag swept at 06:56"
+touch "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true >/dev/null; [ -e "$MAC_WINDOW_MORNING_FLAG" ] && ok || no "flag swept inside the morning block"
+touch -t "$(date -v-5H +%Y%m%d%H%M)" "$MAC_WINDOW_MORNING_FLAG"; MAC_WINDOW_NOW=05:00 "$MW" run ANY com.seq.boss-runtime-sync -- true | grep -q MORNING_BLOCK_SWEPT && ok || no "a flag older than 4 h is removed"
+
 echo "test-mac-window: $pass passed, $fail failed"
 [ "$fail" = 0 ] && [ "$pass" -gt 40 ]

@@ -46,8 +46,22 @@ meta() { # body [files json] [extra json] -> PR view JSON
     '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
 }
+# gh, for the one read the gates make: when a commit reached GitHub (its earliest check suite, review F5 of #137).
+# $W/suites/<sha> holds that epoch; none is a commit with no suite; $W/suites-down is GitHub not answering.
+mkdir -p "$W/bin" "$W/suites"
+cat > "$W/bin/gh" <<SH
+#!/bin/bash
+case "\$*" in
+  "api repos/{owner}/{repo}/commits/"*"/check-suites"*)
+    [ -f "$W/suites-down" ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    c="\${2#repos/\{owner\}/\{repo\}/commits/}"; c="\${c%%/*}"; cat "$W/suites/\$c" 2>/dev/null; exit 0 ;;
+esac
+echo "unexpected gh call: \$*" >&2; exit 1
+SH
+chmod +x "$W/bin/gh"
+pushed() { date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$2" +%s > "$W/suites/$1"; }   # sha, when GitHub first saw it
 gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/${PR_HEAD:0:8}}")"; RC=$?
+  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/${PR_HEAD:0:8}}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
@@ -166,15 +180,30 @@ check "…naming only the old commit, with work after it -> still STALE_PASS" ev
 SHALESS='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS'
 at_comment() { jq --arg c "$SHALESS" --arg at "$2" '.comments = [{authorAssociation: "OWNER", createdAt: $at, body: $c}]' <<<"$1"; }
 stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-02T00:00:00Z; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
+pushed "$PR_HEAD" 2026-01-02T00:05:00Z
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
-check "a PASS naming no commit, in an owner comment posted after the PR's last commit -> allowed" [ "$RC" -eq 0 ]
+check "a PASS naming no commit, in an owner comment posted after the PR's last commit reached GitHub -> allowed" [ "$RC" -eq 0 ]
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-01T12:00:00Z)"
-check "…posted before the PR's last commit -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before" <<<"$MSG"'
+check "…posted before it reached GitHub -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before its last commit reached GitHub" <<<"$MSG"'
+# Review F5 of #137: the commit's date is the builder's. Committed 10:00, PASS 10:10 (on the older head), pushed 10:20.
+stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-03T10:00:00Z; GIT_COMMITTER_DATE=2026-01-03T10:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
+pushed "$PR_HEAD" 2026-01-03T10:20:00Z
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T10:10:00Z)"
+check "committed 10:00, PASS 10:10, pushed 10:20 -> refused STALE_PASS (the push time decides, not the commit date)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "reached GitHub" <<<"$MSG"'
+rm -f "$W/suites/$PR_HEAD"
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…no check suite on the commit (when it arrived is unknown) -> refused STALE_PASS, never a pass" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG" && grep -q "unknown (no check suite)" <<<"$MSG"'
+: > "$W/suites-down"
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…GitHub not answering for the suites -> could not verify (rc 75), never a pass" eval '[ "$RC" -eq 75 ]'
+rm -f "$W/suites-down"; pushed "$PR_HEAD" 2026-01-02T00:05:00Z
 gate "$(jq '.comments[0] |= del(.createdAt)' <<<"$(at_comment "$(meta 'Tweaks the page.' "$SITE")" x)")"
 check "…a comment whose time is missing -> refused STALE_PASS (unknown is never a pass)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
 stale_pr; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; git -C "$W/r" checkout -q main
 echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"; git -C "$W/r" push -q origin HEAD:main
+OWN="$(git -C "$W/r" rev-parse pr)"; pushed "$OWN" 2026-01-02T00:05:00Z
 git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+pushed "$PR_HEAD" 2026-01-04T00:00:00Z   # the main merge reached GitHub after the comment: it is not the PR's own work
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
 check "…a main merge after that comment -> still allowed (the PASS survives updates)" [ "$RC" -eq 0 ]
 

@@ -391,7 +391,8 @@ printf '#!/bin/bash\nif [ "$1" = +%%s ]; then echo $(( $(/bin/date +%%s) + $(cat
 printf '#!/bin/bash\nn="${1%%%%.*}"; echo $(( $(cat "%s/clock/offset") + ${n:-0} )) > "%s/clock/offset"\n' "$W" "$W" > "$W/clock/sleep"
 chmod +x "$W/clock/date" "$W/clock/sleep"
 fixture approvalprep; echo ratelimit-once > "$FAKE/base"; echo ratelimit > "$FAKE/checks"
-OUT="$(cd "$W/approvalprep" && PATH="$W/clock:$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=12 bash "$LAND" 7 2>&1)"; RC=$?
+# Under `timeout 60`: a bound that never holds spins the fake clock forever; a hang must be a red check, not a stuck CI job.
+OUT="$(cd "$W/approvalprep" && PATH="$W/clock:$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=12 timeout 60 bash "$LAND" 7 2>&1)"; RC=$?
 check "two rate-limited reads, 8 s each, under a 12 s bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
 check "…one wait in the whole land, not one per read" [ "$(grep -c "allowance is spent; waiting" <<<"$OUT")" -eq 1 ]
 

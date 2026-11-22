@@ -980,8 +980,9 @@ baseline_red() { # $1 the PR's checks JSON -> prints "<name>: <bucket>" and rc 0
 # A re-check line names two commits, the old one first ("the diff A..B", "diff since A, tests at B"), so the
 # NEWEST commit the line names is the one it passed (review F1).
 # A PASS line that names no commit (the reviewer template's own shape) counts only where its time is known: an
-# OWNER comment posted after the newest commit of the PR's own work. In the body, or older than that work, it is
-# STALE_PASS (review F2). A commit date is the builder's to set, so a named commit stays the strong form.
+# OWNER comment posted after the newest commit of the PR's own work REACHED GITHUB. In the body, or older than that
+# push, it is STALE_PASS (review F2). The commit's own date is the builder's to set (review F5: committed 10:00,
+# PASS 10:10 on the older head, pushed 10:20), so the time is GitHub's: its earliest check suite for that commit.
 pass_sha() { # $1 one PASS line  $2 head sha -> the full sha of the newest commit it names (rc 1 none on the PR's history)
   local t best=""
   for t in $(tr -cs '[:alnum:]' '\n' <<<"$1" | tr '[:upper:]' '[:lower:]' | grep -E '^[0-9a-f]{7,40}$' | grep '[a-f]'); do
@@ -999,12 +1000,23 @@ pass_posted() { # $1 Ship-ready|Launch-ready; stdin: PR view JSON -> epoch of th
   done < <(review_entries)
   [[ "$last" =~ ^[0-9]+$ ]] && echo "$last"
 }
-own_work_at() { # $1 head -> committer time (epoch) of the newest commit of the PR's own work: main's commits and
-  # merges that keep a side excluded, as in changed_since_pass (rc 1 when there is none)
-  { git log --no-merges --format=%ct "$1" --not origin/main
-    git rev-list --merges "$1" --not origin/main | while IFS= read -r m; do
-      [ -n "$(git diff-tree --no-commit-id --cc --name-only "$m")" ] && git log -1 --format=%ct "$m"; done
-  } | sort -n | tail -1 | grep -E '^[0-9]+$'
+own_work_sha() { # $1 head -> the newest commit of the PR's own work: main's commits and merges that keep a side
+  # excluded, as in changed_since_pass (rc 1 when there is none)
+  local c
+  while IFS= read -r c; do
+    if [ -n "$(git rev-list --no-walk --merges "$c")" ]; then [ -n "$(git diff-tree --no-commit-id --cc --name-only "$c")" ] || continue; fi
+    echo "$c"; return 0
+  done < <(git rev-list --topo-order "$1" --not origin/main)
+  return 1
+}
+arrived_at() { # $1 commit  $2 head -> epoch GitHub first saw $1: the earliest check suite on it, or on the first commit
+  # after it on the way to the head that has one (a later push is never earlier). rc 1 none has a suite | 75 unread
+  local c t
+  for c in "$1" $(git rev-list --reverse --ancestry-path "$1..$2"); do
+    t="$(gh api "repos/{owner}/{repo}/commits/$c/check-suites?per_page=100" --jq '[.check_suites[]?.created_at | fromdateiso8601] | min // empty' 2>/dev/null)" || return 75
+    [[ "$t" =~ ^[0-9]+$ ]] && { echo "$t"; return 0; }
+  done
+  return 1
 }
 changed_since_pass() { # $1 the PASS's sha  $2 head -> the PR's own files changed after it (main's commits excluded)
   { git log --no-merges --format= --name-only "$1..$2" --not origin/main
@@ -1017,12 +1029,16 @@ have_head() { # $1 PR  $2 head -> 0 once the head commit is here (rc 1 with one 
 }
 fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (body, comments) -> rc 1 with one plain line
   # when stale | 75 the head could not be read. Run in the repo, after origin/main is fetched.
-  local line sha stale posted own
+  local line sha stale posted="" own arrived="" rc
   line="$(review_text <<<"$4" | pass_line "$1")" || return 0
   have_head "$2" "$3" || return 75
   if ! sha="$(pass_sha "$line" "$3")"; then
-    posted="$(pass_posted "$1" <<<"$4")" && own="$(own_work_at "$3")" && [ "$posted" -gt "$own" ] && return 0
-    echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR$([ -n "$posted" ] && echo " and was posted before its last commit" || echo " and stands where its time is unknown (the body)"), so what it passed is unknown: the reviewer posts it again as a PR comment, naming the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"
+    if posted="$(pass_posted "$1" <<<"$4")" && own="$(own_work_sha "$3")"; then
+      arrived="$(arrived_at "$own" "$3")"; rc=$?
+      [ "$rc" -eq 75 ] && { echo "PR #$2's check suites could not be read, so when its last commit reached GitHub is unknown"; return 75; }
+      [ "$rc" -eq 0 ] && [ "$posted" -gt "$arrived" ] && return 0
+    fi
+    echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR$([ -z "$posted" ] && echo " and stands where its time is unknown (the body)" || { [ -n "$arrived" ] && echo " and was posted before its last commit reached GitHub" || echo " and when its last commit reached GitHub is unknown (no check suite)"; }), so what it passed is unknown: the reviewer posts it again as a PR comment, naming the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"
     return 1
   fi
   stale="$(changed_since_pass "$sha" "$3")"

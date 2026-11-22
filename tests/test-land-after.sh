@@ -48,6 +48,8 @@ F="$FAKE_DIR"; echo "$*" >> "$F/gh-log"
 [ "$1 $2" = "pr checks" ] && echo "${GH_SHARE_UNTIL:-none}" > "$F/checks-until"   # the deadline ~/bin/gh is given
 mode() { cat "$F/$1" 2>/dev/null; }
 case "$1 $2" in
+  "api repos/{owner}/{repo}/commits/"*) # when the PR's commit reached GitHub (its earliest check suite): $F/suite-at
+    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$(cat "$F/suite-at" 2>/dev/null || echo 2026-11-22T12:05:00Z)" +%s; exit 0 ;;
   "api rate_limit") # the allowance GitHub reports: spent with a reset at $F/reset-at while rate limited
     if [ -f "$F/reset-at" ]; then jq -n --argjson r "$(cat "$F/reset-at")" '{resources: {core: {remaining: 0, reset: $r}, graphql: {remaining: 5000, reset: $r}}}' | jq -r "${4:-.}"
     else echo 0 | jq -r '.'; fi; exit 0 ;;
@@ -301,6 +303,11 @@ check "the same line in an owner comment posted after the PR's last commit (12:0
 reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T11:00:00Z", body: $b}]' > "$FAKE/comments"
 la 42 --task shaless-before
 check "…posted before the PR's last commit (11:00 < 12:00): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-before.md" ]'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
+echo 2026-11-22T13:30:00Z > "$FAKE/suite-at"
+la 44 --task shaless-pushedlater
+check "committed 12:00, PASS 13:00, reached GitHub 13:30 (review F5): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "reached GitHub" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-pushedlater.md" ]'
+rm -f "$FAKE/suite-at"
 reset "Ship-ready: PASS — reviewer session_rev123 looked at it at 0123456789ab; Engineering: PASS"
 la 43 --task notonpr
 check "a PASS naming a commit that is not on the PR: refused STALE_PASS before the CI wait" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'

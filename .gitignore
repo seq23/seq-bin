@@ -18,3 +18,4 @@ token.json
 
 # ship-ready-baseline installs its own deps in CI (npm ci); never committed.
 ship-ready-baseline/node_modules/
+__pycache__/

@@ -8,7 +8,17 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 cat > "$T/fake-gh" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_LOG"
-if [ "$1 $2" = "api rate_limit" ]; then echo "$FAKE_REM $FAKE_RESET ${FAKE_GQL_REM:-4000} ${FAKE_GQL_RESET:-$FAKE_RESET}"; exit 0; fi
+if [ "$1 $2" = "api rate_limit" ]; then [ -n "${FAKE_RL_FAIL:-}" ] && exit 1; echo "$FAKE_REM $FAKE_RESET ${FAKE_GQL_REM:-4000} ${FAKE_GQL_RESET:-$FAKE_RESET}"; exit 0; fi
+# a run that finishes on its FAKE_DONE_AT-th look, and checks that stop pending on theirs
+polls=$(grep -c "^$1 $2" "$FAKE_LOG")
+if [ "$1 $2" = "run view" ] && [ -n "${FAKE_DONE_AT:-}" ]; then
+  case " $* " in *" --json "*) [ "$polls" -ge "$FAKE_DONE_AT" ] && echo "completed ${FAKE_CONCL:-success}" || echo "in_progress "; exit 0 ;;
+                 *" --exit-status "*) echo "run done"; [ "${FAKE_CONCL:-success}" = success ]; exit $? ;; esac
+fi
+if [ "$1 $2" = "pr checks" ] && [ -n "${FAKE_DONE_AT:-}" ]; then
+  if [ "$polls" -lt "$FAKE_DONE_AT" ]; then printf 'lint\t%s\t1s\turl\t\nbuild\tpending\t0\turl\t\n' "${FAKE_EARLY:-pass}"; exit 8; fi
+  printf 'lint\tpass\t1s\turl\t\nbuild\t%s\t2s\turl\t\n' "${FAKE_CONCL:-pass}"; [ "${FAKE_CONCL:-pass}" = pass ] && exit 0 || exit 1
+fi
 [ -n "${FAKE_SLOW:-}" ] && [ "$1" = pr ] && [ "$2" = view ] && sleep "$FAKE_SLOW"   # a read in flight
 n=$(wc -l < "$FAKE_LOG" | tr -d ' ')
 echo "answer-$n for $*"
@@ -18,7 +28,7 @@ chmod +x "$T/fake-gh"
 export GH_SHARE_REAL="$T/fake-gh" FAKE_LOG="$T/calls" FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 ))
 pass=0
 fail() { echo "FAIL: $*"; exit 1; }
-fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
+fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_WATCH_SECS FAKE_DONE_AT FAKE_CONCL FAKE_EARLY FAKE_RL_FAIL GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
 real_calls() { grep -vc '^api rate_limit' "$T/calls"; }
 GH_UNDER_TEST="${GH_SHARE_UNDER_TEST:-$HERE/gh}"
 gh() { "$GH_UNDER_TEST" "$@" </dev/null; }
@@ -69,18 +79,46 @@ out="$(timeout 10 "$GH_UNDER_TEST" run list </dev/null 2>"$T/err")"; rc=$?
 [ "$rc" = 75 ] && grep -q 'NAMED STOP \[GH_ALLOWANCE_SPENT\]' "$T/err" && [ -z "$out" ] || fail "spent allowance: rc $rc, want 75 + named stop and no answer"
 pass=$((pass + 1))
 
-# 7. watchers back off: no --interval gets 30; a shorter one is raised to 30; a longer one is kept
-fresh; export FAKE_REM=4000
-gh run watch 55 >/dev/null; gh pr checks 3 --watch --interval 5 >/dev/null; gh pr checks 4 --watch -i 90 >/dev/null
-grep -q '^run watch 55 --interval 30$' "$T/calls" || fail "gh run watch did not get --interval 30: $(cat "$T/calls")"
-grep -q '^pr checks 3 --watch --interval 30$' "$T/calls" || fail "--interval 5 was not raised to 30"
-grep -q '^pr checks 4 --watch -i 90$' "$T/calls" || fail "a longer interval was changed"
+# 7. a watcher polls THROUGH the wrapper (22 Nov 2026: an exec'd watch polled GitHub uncounted): the real gh
+#    never sees "run watch" or "--watch", every poll is a logged read, the interval floor holds, and gh's
+#    exit codes come back (a failed run with --exit-status, failed checks, --fail-fast on an early fail)
+fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=3
+t0=$(date +%s); gh run watch 55 --interval 0 >/dev/null; rc=$?; t1=$(date +%s)
+grep -qE 'run watch|--watch|--interval' "$T/calls" && fail "the real gh was handed a watch: $(cat "$T/calls")"
+[ "$rc" = 0 ] && [ "$(grep -c '^run view 55 --json' "$T/calls")" = 3 ] || fail "run watch: rc $rc, $(grep -c '^run view 55 --json' "$T/calls") polls, want 0 and 3"
+[ "$(grep -c ' miss run view' "$T/share/calls.log")" = 4 ] || fail "run watch polls not each logged as a read: $(cat "$T/share/calls.log")"
+[ $((t1 - t0)) -ge 2 ] || fail "--interval 0 was not raised to the floor (3 polls in $((t1 - t0)) s)"
+fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=2 FAKE_CONCL=failure
+gh run watch 56 --exit-status >/dev/null; rc=$?
+[ "$rc" = 1 ] || fail "run watch --exit-status on a failed run returned $rc, want 1"
+fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=3
+out="$(gh pr checks 3 --watch --interval 5)"; rc=$?
+[ "$rc" = 0 ] && [ "$(grep -c '^pr checks 3$' "$T/calls")" = 3 ] && grep -q 'build.pass' <<<"$out" || fail "pr checks --watch: rc $rc, $(grep -c '^pr checks 3$' "$T/calls") polls: $out"
+[ "$(grep -c ' miss pr checks' "$T/share/calls.log")" = 3 ] || fail "pr checks --watch polls not each logged as a read"
+fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=3 FAKE_CONCL=fail
+gh pr checks 4 --watch >/dev/null; rc=$?; [ "$rc" = 1 ] || fail "pr checks --watch on failed checks returned $rc, want 1"
+fresh; export GH_SHARE_WATCH_SECS=1 GH_SHARE_TTL=0 FAKE_DONE_AT=5 FAKE_EARLY=fail
+gh pr checks 5 --watch --fail-fast >/dev/null; rc=$?
+[ "$rc" = 1 ] && [ "$(grep -c '^pr checks 5$' "$T/calls")" = 1 ] || fail "--fail-fast did not stop at the first fail (rc $rc, $(grep -c '^pr checks 5$' "$T/calls") polls)"
+fresh; export GH_SHARE_WATCH_SECS=1 FAKE_DONE_AT=9 FAKE_REM=0 FAKE_RESET=$(( $(date +%s) + 3000 )) GH_SHARE_MAX_WAIT=60
+timeout 10 "$GH_UNDER_TEST" run watch 57 </dev/null >/dev/null 2>"$T/err"; rc=$?
+[ "$rc" = 75 ] && grep -q GH_ALLOWANCE_SPENT "$T/err" && [ "$(real_calls)" = 0 ] || fail "a watch at a spent allowance polled anyway (rc $rc, $(real_calls) calls)"
 pass=$((pass + 1))
 
 # 8. one poller cannot take more than its share: over it, it waits (bounded) before GitHub sees it
 fresh; export GH_SHARE_PER_CALLER=2 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
 ( gh api a >/dev/null; gh api b >/dev/null; gh api c >/dev/null 2>"$T/err" )
 grep -q 'its share is 2' "$T/err" || fail "the third read of a 2-call share was not held"
+pass=$((pass + 1))
+
+# 8b. the share is REST requests, not gh calls: run view costs 2 (measured), so a 3-request share holds
+#     the second run view while three 1-request api reads fit
+fresh; export GH_SHARE_PER_CALLER=3 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
+( gh api a >/dev/null; gh api b >/dev/null; gh api c >/dev/null 2>"$T/err" )
+! grep -q 'its share is' "$T/err" || fail "three 1-request reads were held by a 3-request share"
+fresh; export GH_SHARE_PER_CALLER=3 GH_SHARE_TTL=0 GH_SHARE_MAX_WAIT=2
+( gh run view 1 >/dev/null; gh run view 2 >/dev/null 2>"$T/err" )
+grep -q 'its share is 3' "$T/err" || fail "two run views (4 requests) passed a 3-request share: the share counts calls, not REST cost"
 pass=$((pass + 1))
 
 # 9. fail toward working: no cache dir -> plain pass-through; GH_SHARE_OFF=1 -> plain pass-through
@@ -167,4 +205,27 @@ fresh; gh api graphql -f query=q >/dev/null; gh api graphql -f query=q >/dev/nul
 [ "$(real_calls)" = 2 ] || fail "api graphql was cached ($(real_calls) calls, want 2)"
 pass=$((pass + 1))
 
-echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers back off, a share per poller"
+# 19. OUTAGE: an allowance that cannot be read is a stop (rc 75, named), never a read sent uncounted;
+#     a write still goes through (the floor is the writes')
+fresh; export FAKE_RL_FAIL=1
+out="$(timeout 15 "$GH_UNDER_TEST" run list </dev/null 2>"$T/err")"; rc=$?
+[ "$rc" = 75 ] && [ -z "$out" ] && [ "$(real_calls)" = 0 ] && grep -q '^rate limit: NAMED STOP \[GH_ALLOWANCE_UNKNOWN\]' "$T/err" || fail "unreadable allowance: rc $rc, $(real_calls) reads sent: $(cat "$T/err")"
+timeout 10 "$GH_UNDER_TEST" pr merge 19 --squash </dev/null >/dev/null || fail "a merge was held when the allowance was unreadable"
+pass=$((pass + 1))
+
+# 20. login shells find the wrapper (22 Nov 2026: launchd's `bash -lc`, Codex's `zsh -lc` and every script they
+#     ran got Homebrew's gh, since path_helper and `brew shellenv` put /opt/homebrew/bin ahead of ~/bin)
+H20="$T/home"; mkdir -p "$H20/bin"; printf '#!/bin/sh\n' > "$H20/bin/gh"; chmod +x "$H20/bin/gh"
+printf 'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' > "$H20/.zprofile"   # what brew shellenv does
+mkdir -p "$T/hb"; INSTALL="${GH_SHARE_INSTALL_UNDER_TEST:-$HERE/install-gh-share.sh}"
+GH_SHARE_HOME="$H20" "$INSTALL" --check >/dev/null 2>&1 && fail "--check passed before the line was installed"
+GH_SHARE_HOME="$H20" "$INSTALL" >/dev/null || fail "install-gh-share.sh did not leave login shells on the wrapper"
+for sh in /bin/bash /bin/zsh; do
+  got="$(env -i HOME="$H20" PATH=/usr/bin:/bin "$sh" -lc 'command -v gh')"
+  [ "$got" = "$H20/bin/gh" ] || fail "$sh -lc finds '$got', not the wrapper"
+done
+grep -q '^export PATH="/opt/homebrew/bin' "$H20/.zprofile" || fail "the installer dropped what .zprofile already had"
+GH_SHARE_HOME="$H20" "$INSTALL" >/dev/null; [ "$(grep -c 'gh-share:' "$H20/.zprofile")" = 1 ] || fail "a second install added the line twice"
+pass=$((pass + 1))
+
+echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers poll through it, a share per poller, an unreadable allowance stops, login shells find it"

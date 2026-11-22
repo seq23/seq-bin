@@ -216,6 +216,40 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
     sleep "$backoff"; try=$((try + 1)); backoff=$((backoff * 2))
   done
 }
+not_green() { # $1 the PR's checks JSON -> "<name>: <bucket>" per check that is not pass or skipping ("" = all green)
+  jq -r 'if length == 0 then "no checks reported" else (.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)") end' <<<"$1"
+}
+merge_clean() { # sets STATE; dies unless PR $PR is MERGEABLE and CLEAN|HAS_HOOKS|UNSTABLE (75 when unread)
+  # UNKNOWN is GitHub still computing — it answers that for a minute after anything merges to main
+  # (19 Sep: #132 stopped as UNKNOWN/UNKNOWN seconds after #135 landed, and was clean). Wait it out.
+  for _ in $(seq 1 12); do
+    STATE="$(gh_read '^[A-Z_]+/[A-Z_]+$' pr view "$PR" --json mergeable,mergeStateStatus -q '.mergeable+"/"+.mergeStateStatus')" \
+      || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's merge state could not be read: $(gh_err)"
+    [ "${STATE%%/*}" = "UNKNOWN" ] || break
+    sleep 10
+  done
+  [ "${STATE%%/*}" = "MERGEABLE" ] || die "PR #$PR is $STATE — resolve conflicts BY HAND, never with a union script"
+  case "${STATE##*/}" in
+    CLEAN|HAS_HOOKS|UNSTABLE) : ;;   # UNSTABLE is a failing NON-required check; the bucket scan already refused a real failure
+    *) die "PR #$PR merge state is ${STATE##*/} — not landing" ;;
+  esac
+}
+# A MERGE RACE IS NOT A FAILURE (22 Nov 2026, boss-os#518: "Base branch was modified. Review and try the merge
+# again" because another PR merged a second earlier). Before each new try the PR is verified again from GitHub:
+# every check green, the head still the one verified, the merge state clean. Red, a new head or a dirty state
+# stops (exit 1); an unread answer is "could not verify" (75). The try itself is the same pinned merge: never
+# --admin, never --auto, never past branch protection.
+still_ready() { # after a race: rc 0 when PR $PR is still green, at $HEAD and clean; dies otherwise
+  local c ng h
+  c="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)" \
+    || unverified "$(gh_kind "$(gh_err)")" "main moved under the merge, and PR #$PR's checks could not be read again: $(gh_err)"
+  ng="$(not_green "$c")"
+  [ -z "$ng" ] || die "main moved under the merge, and PR #$PR is no longer green — $(tr '\n' ';' <<<"$ng"). Nothing was merged."
+  h="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
+    || unverified "$(gh_kind "$(gh_err)")" "main moved under the merge, and PR #$PR's head could not be read again: $(gh_err)"
+  [ "$h" = "$HEAD" ] || die "main moved under the merge, and PR #$PR's head moved from ${HEAD:0:7} to ${h:0:7}. Nothing was merged: land $PR again so the new head is verified."
+  merge_clean
+}
 # --- verify helpers end ---
 
 # How this repo reaches production. westpeek-live deploys itself through its own GitHub workflow
@@ -920,7 +954,7 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
 }
-review_entries() { # stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
+review_entries() { # [$1 voided]; stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
   # stand: the body (no time), then each comment by the repo's OWNER account (oldest first, with its createdAt).
   # Every agent posts as the owner's login; a comment from any other account (a passer-by on a public repo, a bot)
   # is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
@@ -931,11 +965,28 @@ review_entries() { # stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for
   jq -r '[{at: "", b: (.body // "")}, (.comments[]? | select(.authorAssociation == "OWNER")
           | {at: ((.createdAt // "") | (try (fromdateiso8601 | tostring) catch "")), b: (.body // "")})]
     | ([to_entries[] | select(.value.b | test("\\A\\W*verdict:\\W*fail\\b"; "i")) | .key] | last // 0) as $from
-    | .[$from:][] | "\(.at)|\(.b | @base64)"' 2>/dev/null
+    | (if $part == "voided" then .[:$from] else .[$from:] end)[] | "\(.at)|\(.b | @base64)"' --arg part "${1:-}" 2>/dev/null
+  # With "voided": the texts BEFORE that fail instead, the ones it voids (voided_pass says so to the builder).
 }
 review_text() { # stdin: PR view JSON -> the texts of review_entries, one after another
   local at b64
   review_entries | while IFS='|' read -r at b64; do base64 -d <<<"$b64"; echo; done
+}
+when() { date -u -r "$1" '+%d %b %H:%M UTC' 2>/dev/null || date -u -d "@$1" '+%d %b %H:%M UTC'; }   # epoch -> "22 Nov 14:00 UTC" (BSD, GNU)
+voided_pass() { # $1 Ship-ready|Launch-ready; stdin: PR view JSON -> one sentence, rc 0, when a $1 PASS line stands
+  # (body or owner comment) only BEFORE the newest VERDICT: fail, so review_entries does not count it. The newest-verdict
+  # rule stays; the builder is told why and the way out (22 Nov 2026: 4 PRs refused "no PASS" with a PASS in the body).
+  # Reads review_entries only, so a non-owner comment is never read, trusted or echoed. rc 1 when nothing was voided.
+  local json at b64 where="" failat n=0
+  json="$(cat)"
+  while IFS='|' read -r at b64; do   # the first entry is always the body, the rest owner comments
+    n=$((n + 1)); base64 -d <<<"$b64" | pass_line "$1" >/dev/null || continue
+    if [ "$n" -eq 1 ]; then where="the PR body"; else where="an owner comment${at:+ of $(when "$at")}"; fi
+  done < <(review_entries voided <<<"$json")
+  [ -n "$where" ] || return 1
+  failat="$(review_entries <<<"$json" | head -1 | cut -d'|' -f1)"
+  [ -n "$failat" ] && failat=" ($(when "$failat"))"
+  echo "its $1 PASS in $where does not count: a later VERDICT: fail comment$failat voids it (the newest verdict wins). If those fails are fixed and re-checked, the reviewer posts the PASS again as a NEW PR comment"
 }
 owner_text() { # stdin: PR view JSON -> the body, then every comment by the repo's OWNER account: where a builder's
   # own answer (Patch or rebuild) may stand. Not a verdict, so a later fail never voids it (review R4).
@@ -1049,14 +1100,15 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
   return 1
 }
 gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
-  local tree re files added launch body reviewer ids msg
+  local tree re files added launch body reviewer ids msg why
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   [ -n "$files" ] || return 0
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames> at <head sha>; Engineering: PASS"; return 1; }
+    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 changes what people see, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
+         echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames> at <head sha>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
@@ -1248,7 +1300,7 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 # not green whatever the exit code says; only `pass` (and a genuinely `skipping` job) is.
 # Row 18's shared baseline (renders the real output, fails on the automatic fails): its own sentence.
 BASELINE_RED="$(baseline_red "$CHECKS")" && die "PR #$PR's ship-ready-baseline check is not green ($BASELINE_RED): fix what its job summary lists, push, and land again."
-NOTGREEN="$(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"' <<<"$CHECKS")"
+NOTGREEN="$(not_green "$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
 # CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
 # 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
@@ -1284,19 +1336,7 @@ if [ -n "$RUNID" ]; then
     || unverified "$(gh_kind "$(gh_err)")" "the sha of green run $RUNID could not be read: $(gh_err)"
   [ "$RUNSHA" = "$HEAD" ] || die "the green run is for $RUNSHA but the PR head is $HEAD — stale checks"
 fi
-# UNKNOWN is GitHub still computing — it answers that for a minute after anything merges to main
-# (19 Sep: #132 stopped as UNKNOWN/UNKNOWN seconds after #135 landed, and was clean). Wait it out.
-for _ in $(seq 1 12); do
-  STATE="$(gh_read '^[A-Z_]+/[A-Z_]+$' pr view "$PR" --json mergeable,mergeStateStatus -q '.mergeable+"/"+.mergeStateStatus')" \
-    || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's merge state could not be read: $(gh_err)"
-  [ "${STATE%%/*}" = "UNKNOWN" ] || break
-  sleep 10
-done
-[ "${STATE%%/*}" = "MERGEABLE" ] || die "PR #$PR is $STATE — resolve conflicts BY HAND, never with a union script"
-case "${STATE##*/}" in
-  CLEAN|HAS_HOOKS|UNSTABLE) : ;;   # UNSTABLE is a failing NON-required check; the bucket scan above already refused a real failure
-  *) die "PR #$PR merge state is ${STATE##*/} — not landing" ;;
-esac
+merge_clean
 echo "     green, head $HEAD, $STATE"
 # The two gates (block above): patch or rebuild, and ship-ready. Before any side effect (D1, merge).
 GATE_MSG="$(gate_pr "$PR" "$HEAD" "$PRMETA")"; GATE_RC=$?
@@ -1316,8 +1356,16 @@ queue_wait || die "PR #$PR was NOT merged: main's post-merge run is past its cei
 say "2/5  merging"
 # Pinned to the head verified above: a push after the check cannot ride in unverified.
 # A spent allowance refuses the merge without making it: wait for the reset and ask again (rate_wait).
+# A race with another PR's merge ("Base branch was modified") is tried again, up to 3 tries in all, 5 s then 10 s
+# apart, each after still_ready has verified the PR again. Any other merge error stops below.
+MERGE_TRY=1
 until MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)"; MERGE_RC=$?; [ "$MERGE_RC" -eq 0 ]; do
-  rate_wait "$MERGE_OUT" || break
+  rate_wait "$MERGE_OUT" && continue
+  grep -qi 'Base branch was modified' <<<"$MERGE_OUT" && [ "$MERGE_TRY" -lt 3 ] || break
+  echo "     main moved under the merge (another PR landed): verifying PR #$PR again, then try $((MERGE_TRY + 1)) of 3 in $((MERGE_TRY * ${LAND_RACE_SECS:-5}))s"
+  sleep $((MERGE_TRY * ${LAND_RACE_SECS:-5}))
+  still_ready
+  MERGE_TRY=$((MERGE_TRY + 1))
 done
 if [ "$MERGE_RC" -ne 0 ]; then
   echo "$MERGE_OUT"
@@ -1326,6 +1374,7 @@ if [ "$MERGE_RC" -ne 0 ]; then
   case "$MSTATE" in
     MERGED) echo "     the merge call errored but PR #$PR reads MERGED — carrying on" ;;
     OPEN) [ "$(gh_kind "$MERGE_OUT")" != api ] && unverified "$(gh_kind "$MERGE_OUT")" "the merge call did not answer and PR #$PR is still open"
+          grep -qi 'Base branch was modified' <<<"$MERGE_OUT" && die "merge failed: main moved under all 3 tries (other PRs landing). Nothing was merged; land $PR again."
           die "merge failed" ;;
     "") unverified "$(gh_kind "$(gh_err)")" "the merge call failed and PR #$PR's state could not be read back — check it: gh pr view $PR" ;;
     *) die "merge failed — PR #$PR is $MSTATE" ;;

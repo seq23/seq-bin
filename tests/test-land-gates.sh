@@ -101,6 +101,14 @@ check "an owner-account comment signed by the builder -> still refused as the bu
 two_comments() { jq --arg a "$2" --arg b "$3" '.comments = [{authorAssociation: "OWNER", body: $a}, {authorAssociation: "OWNER", body: $b}]' <<<"$1"; }
 gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" "$GOOD" $'VERDICT: fail\n- F1 the page is blank at 390 px')"
 check "a later VERDICT: fail comment voids an earlier PASS comment -> refused (N9)" [ "$RC" -eq 1 ]
+check "…and says why: the PASS is voided by the later fail, post it again as a new comment" eval 'one_line && grep -q "PASS in an owner comment" <<<"$MSG" && grep -q "voids it" <<<"$MSG" && grep -q "NEW PR comment" <<<"$MSG"'
+gate "$(two_comments "$(meta "$GOOD" "$SITE")" $'VERDICT: fail\n- F1 blank' 'Thanks, fixing.')"
+check "a PASS in the body before an owner fail comment -> refused, naming the body as voided" eval '[ "$RC" -eq 1 ] && grep -q "PASS in the PR body does not count" <<<"$MSG"'
+gate "$(jq --arg c "$GOOD" '.comments = [{authorAssociation: "NONE", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail"}]' <<<"$(meta 'Tweaks the page.' "$SITE")")"
+check "abuse: a stranger's PASS before an owner fail is never called voided, never echoed" eval '[ "$RC" -eq 1 ] && ! grep -q "does not count" <<<"$MSG" && ! grep -q "session_01REVIEW" <<<"$MSG"'
+gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" $'VERDICT: fail\n- F1 blank' 'Thanks, fixing.')"
+check "a fail with no PASS before it -> the plain refusal (nothing to call voided)" eval '[ "$RC" -eq 1 ] && ! grep -q "does not count" <<<"$MSG" && grep -q "Ship-ready: PASS — " <<<"$MSG"'
+
 gate "$(two_comments "$(meta 'Tweaks the page.' "$SITE")" $'VERDICT: fail\n- F1 blank' "$GOOD")"
 check "a PASS posted after the fail comment -> allowed (rc 0)" [ "$RC" -eq 0 ]
 echo "=== only a first-line VERDICT: fail voids a PASS (review R5) ==="

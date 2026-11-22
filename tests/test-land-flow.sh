@@ -70,6 +70,8 @@ answer() { # mode-file default
     ratelimit-once) if [ -f "$FAKE_DIR/$1.failed" ]; then echo "$2"; exit 0; fi
               : > "$FAKE_DIR/$1.failed"; echo 'HTTP 403: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include the request ID' >&2; exit 1 ;;
     401) echo 'HTTP 401: Requires authentication (https://api.github.com/graphql)' >&2; echo 'Try authenticating with:  gh auth login' >&2; exit 1 ;;
+    403) echo 'HTTP 403: Resource not accessible by integration (https://api.github.com/graphql)' >&2; exit 1 ;;
+    502) echo 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' >&2; exit 1 ;;
     *) echo "$m"; exit 0 ;;
   esac
 }
@@ -103,6 +105,11 @@ case "$a" in
       graphql500) echo 'GraphQL: Something went wrong while executing your query on 2026-10-30T14:26:18Z. Please include `F1A0:283603:182C90:4E979C:6AE4A908` when reporting this issue.' >&2; exit 1 ;;
       refused) echo 'GraphQL: Pull Request is not mergeable (mergePullRequest)' >&2; exit 1 ;;
       ratelimit-once) if [ ! -f "$FAKE_DIR/merge.failed" ]; then : > "$FAKE_DIR/merge.failed"; echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2; exit 1; fi ;;
+      # race: another PR merged a second earlier (boss-os#518), every time; race-once: the first call only.
+      # On a race, race-then-<file> (checks, head) replaces that answer: the PR changed between tries.
+      race|race-once) if [ "$(cat "$FAKE_DIR/merge")" = race ] || [ ! -f "$FAKE_DIR/merge.failed" ]; then
+          : > "$FAKE_DIR/merge.failed"; for f in checks head; do [ -f "$FAKE_DIR/race-then-$f" ] && cp "$FAKE_DIR/race-then-$f" "$FAKE_DIR/$f"; done
+          echo 'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)' >&2; exit 1; fi ;;
     esac; : > "$FAKE_DIR/merged"; exit 0 ;;
   "pr view "*"--json state "*) merged && echo MERGED || echo OPEN; exit 0 ;;
   "pr view "*mergeCommit*) echo "$MERGESHA"; exit 0 ;;
@@ -395,6 +402,32 @@ fixture approvalprep; echo ratelimit-once > "$FAKE/base"; echo ratelimit > "$FAK
 OUT="$(cd "$W/approvalprep" && PATH="$W/clock:$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=12 timeout 60 bash "$LAND" 7 2>&1)"; RC=$?
 check "two rate-limited reads, 8 s each, under a 12 s bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
 check "…one wait in the whole land, not one per read" [ "$(grep -c "allowance is spent; waiting" <<<"$OUT")" -eq 1 ]
+
+echo "=== 10e. a merge race (another PR merged a second earlier, boss-os#518) is tried again, verified each time ==="
+merges() { grep -c '^pr merge' "$FAKE/calls"; }
+fixture approvalprep; echo race-once > "$FAKE/merge"
+run_land approvalprep
+check "the base moved under the first try: verified again, merged on the second, rc 0" eval '[ "$RC" -eq 0 ] && [ -f "$FAKE/merged" ] && [ "$(merges)" -eq 2 ] && has "main moved under the merge"'
+check "…the checks were read again between the tries" [ "$(grep -c '^pr checks' "$FAKE/calls")" -ge 2 ]
+check "…every try pinned to the verified head, never --admin, --auto or a bypass" eval '! grep "^pr merge" "$FAKE/calls" | grep -v -- "--match-head-commit $HEADSHA" | grep -q . && ! grep "^pr merge" "$FAKE/calls" | grep -qE -- "--admin|--auto|--disable-auto"'
+fixture approvalprep; echo race > "$FAKE/merge"
+run_land approvalprep
+check "the base keeps moving: 3 tries, then rc 1, nothing merged, says so" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/merged" ] && [ "$(merges)" -eq 3 ] && has "main moved under all 3 tries"'
+fixture approvalprep; echo race-once > "$FAKE/merge"
+echo '[{"name":"test","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/1"}]' > "$FAKE/race-then-checks"
+run_land approvalprep
+check "abuse: the checks went red between tries -> rc 1, no second try, nothing merged" eval '[ "$RC" -eq 1 ] && [ "$(merges)" -eq 1 ] && [ ! -f "$FAKE/merged" ] && has "no longer green"'
+fixture approvalprep; echo race-once > "$FAKE/merge"; echo 3333333333333333333333333333333333333333 > "$FAKE/race-then-head"
+run_land approvalprep
+check "abuse: a new head was pushed between tries -> rc 1, no second try, nothing merged" eval '[ "$RC" -eq 1 ] && [ "$(merges)" -eq 1 ] && [ ! -f "$FAKE/merged" ] && has "head moved"'
+for code in 403 502; do
+  fixture approvalprep; echo race-once > "$FAKE/merge"; echo "$code" > "$FAKE/race-then-checks"
+  run_land approvalprep
+  check "outage: GitHub answers $code when re-verifying -> exit 75 could not verify, no second try, never LANDED" eval '[ "$RC" -eq 75 ] && has "could not verify" && [ "$(merges)" -eq 1 ] && [ ! -f "$FAKE/merged" ] && ! has "LANDED"'
+done
+fixture approvalprep; echo refused > "$FAKE/merge"
+run_land approvalprep
+check "any other merge error is not retried: one try, rc 1" eval '[ "$RC" -eq 1 ] && [ "$(merges)" -eq 1 ]'
 
 echo "=== 10c. a stacked PR (base is not main) is refused (22 Nov 2026, westpeek-live #122) ==="
 fixture approvalprep; echo work/random-role-codes > "$FAKE/base"

@@ -10,11 +10,14 @@ T=$(cd "$(mktemp -d)" && pwd -P)  # real path: the mover only runs as a CLI when
 fail=0; bad(){ echo "FAIL: $1"; fail=1; }
 
 # The one mover, from boss-os (a local checkout, else main on GitHub; boss-os is public).
-BOSS="$T/boss"; mkdir -p "$BOSS/scripts/ops"
-src="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/scripts/ops/plist-central.mjs"
-if [ -f "$src" ]; then cp "$src" "$BOSS/scripts/ops/"
-else curl -fsSL https://raw.githubusercontent.com/seq23/boss-os/main/scripts/ops/plist-central.mjs -o "$BOSS/scripts/ops/plist-central.mjs" \
-  || { echo "FAIL: could not fetch plist-central.mjs; nothing was tested"; exit 1; }; fi
+# The mover reads the Schedule manifest beside it (each Mac job's macWindow), so both come together.
+BOSS="$T/boss"; mkdir -p "$BOSS/scripts/ops" "$BOSS/src/shared/boss/schedule"
+for rel in scripts/ops/plist-central.mjs src/shared/boss/schedule/manifest.json; do
+  src="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/$rel"
+  if [ -f "$src" ]; then cp "$src" "$BOSS/$rel"
+  else curl -fsSL "https://raw.githubusercontent.com/seq23/boss-os/main/$rel" -o "$BOSS/$rel" \
+    || { echo "FAIL: could not fetch boss-os $rel; nothing was tested"; exit 1; }; fi
+done
 
 mkdir -p "$T/src" "$T/agents" "$T/state" "$T/stubbin"
 cp "$BIN/launchd/com.seq.drive-backup.plist" "$BIN/launchd/com.seq.ci-sweep.plist" "$T/src/"
@@ -61,7 +64,7 @@ boots(){ grep -c bootstrap "$T/lctl.log" 2>/dev/null || echo 0; }
 
 run America/New_York || bad "first Eastern run exited non-zero: $(tail -8 "$T/out")"
 [ "$(hour com.seq.drive-backup)" = 23 ] || bad "Eastern: 22:00 Central should be Hour 23, got $(hour com.seq.drive-backup)"
-[ "$(hour com.seq.ci-sweep)" = 23 ] || bad "Eastern: Monday 22:15 Central should be Hour 23, got $(hour com.seq.ci-sweep)"
+[ "$(hour com.seq.ci-sweep)" = 23 ] || bad "Eastern: Tuesday 22:15 Central should be Hour 23, got $(hour com.seq.ci-sweep)"
 [ "$(cat "$T/state/seq-bin")" = "America/New_York 1" ] || bad "zone not recorded: $(cat "$T/state/seq-bin" 2>/dev/null)"
 b=$(boots); sum=$(cat "$T"/agents/*.plist | cksum)
 

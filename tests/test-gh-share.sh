@@ -203,4 +203,19 @@ out="$(timeout 15 "$GH_UNDER_TEST" run list </dev/null 2>"$T/err")"; rc=$?
 timeout 10 "$GH_UNDER_TEST" pr merge 19 --squash </dev/null >/dev/null || fail "a merge was held when the allowance was unreadable"
 pass=$((pass + 1))
 
-echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers back off, a share per poller"
+# 20. login shells find the wrapper (22 Nov 2026: launchd's `bash -lc`, Codex's `zsh -lc` and every script they
+#     ran got Homebrew's gh, since path_helper and `brew shellenv` put /opt/homebrew/bin ahead of ~/bin)
+H20="$T/home"; mkdir -p "$H20/bin"; printf '#!/bin/sh\n' > "$H20/bin/gh"; chmod +x "$H20/bin/gh"
+printf 'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' > "$H20/.zprofile"   # what brew shellenv does
+mkdir -p "$T/hb"; INSTALL="${GH_SHARE_INSTALL_UNDER_TEST:-$HERE/install-gh-share.sh}"
+GH_SHARE_HOME="$H20" "$INSTALL" --check >/dev/null 2>&1 && fail "--check passed before the line was installed"
+GH_SHARE_HOME="$H20" "$INSTALL" >/dev/null || fail "install-gh-share.sh did not leave login shells on the wrapper"
+for sh in /bin/bash /bin/zsh; do
+  got="$(env -i HOME="$H20" PATH=/usr/bin:/bin "$sh" -lc 'command -v gh')"
+  [ "$got" = "$H20/bin/gh" ] || fail "$sh -lc finds '$got', not the wrapper"
+done
+grep -q '^export PATH="/opt/homebrew/bin' "$H20/.zprofile" || fail "the installer dropped what .zprofile already had"
+GH_SHARE_HOME="$H20" "$INSTALL" >/dev/null; [ "$(grep -c 'gh-share:' "$H20/.zprofile")" = 1 ] || fail "a second install added the line twice"
+pass=$((pass + 1))
+
+echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers poll through it, a share per poller, an unreadable allowance stops, login shells find it"

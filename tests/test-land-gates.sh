@@ -153,6 +153,29 @@ gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked 
 check "a PASS that names no commit -> refused STALE_PASS, with the head to name" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "names no commit" <<<"$MSG" && grep -q " at ${PR_HEAD:0:8}; Engineering: PASS" <<<"$MSG"'
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at deadbeef1; Engineering: PASS' "$SITE")"
 check "a PASS naming a commit not on the PR -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "names no commit" <<<"$MSG"'
+# Review F1 of #137: a re-check line names the old commit first ("the diff A..B", "diff since A … at B").
+stale_pr; echo '<h1>fixed after the fail</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the fix"; publish_pr
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff ${PASSED:0:8}..${PR_HEAD:0:8} at 390 px; Engineering: PASS" "$SITE")"
+check "a re-check PASS on 'the diff <old>..<head>' -> allowed (the newest commit it names)" [ "$RC" -eq 0 ]
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since ${PASSED:0:8}, tests at ${PR_HEAD:0:8}; Engineering: PASS" "$SITE")"
+check "a re-check PASS on 'diff since <old> … at <head>' -> allowed" [ "$RC" -eq 0 ]
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since ${PASSED:0:8}; Engineering: PASS" "$SITE")"
+check "…naming only the old commit, with work after it -> still STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+# Review F2 of #137: the reviewer template's line names no commit; its time decides, where it is known.
+SHALESS='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS'
+at_comment() { jq --arg c "$SHALESS" --arg at "$2" '.comments = [{authorAssociation: "OWNER", createdAt: $at, body: $c}]' <<<"$1"; }
+stale_pr; git -C "$W/r" commit -q --amend --no-edit --date 2026-01-02T00:00:00Z; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; publish_pr
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "a PASS naming no commit, in an owner comment posted after the PR's last commit -> allowed" [ "$RC" -eq 0 ]
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-01T12:00:00Z)"
+check "…posted before the PR's last commit -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "posted before" <<<"$MSG"'
+gate "$(jq '.comments[0] |= del(.createdAt)' <<<"$(at_comment "$(meta 'Tweaks the page.' "$SITE")" x)")"
+check "…a comment whose time is missing -> refused STALE_PASS (unknown is never a pass)" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+stale_pr; GIT_COMMITTER_DATE=2026-01-02T00:00:00Z git -C "$W/r" commit -q --amend --no-edit; git -C "$W/r" checkout -q main
+echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"; git -C "$W/r" push -q origin HEAD:main
+git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "…a main merge after that comment -> still allowed (the PASS survives updates)" [ "$RC" -eq 0 ]
 
 echo "=== ship-ready-baseline (row 18 hook) ==="
 eval "$BLOCK"

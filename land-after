@@ -94,7 +94,7 @@ load_land_blocks() {
   block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p; /^# --- open_loops begin/,/^# --- open_loops end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  declare -F review_text pass_line covers_engineering owner_override signoff builders is_builder open_loops_post >/dev/null
+  declare -F review_text pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in open_loops_post >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -184,10 +184,10 @@ status() {
 # ============================== worker (detached) ==============================
 # One GitHub read that keeps asking through a short outage (22 Nov 2026 review F2: three tries 2 s apart
 # turned a one-minute rate limit into a FAIL). Backoff from RETRY s, doubling to 60 s, for PATIENCE s; a
-# spent allowance is slept out once to the reset GitHub reports when that falls before the deadline.
+# spent allowance is slept out to the reset GitHub reports (land's rate_reset_in) when that falls before the deadline.
 # stdout the answer; rc 0 answered | 3 "no checks reported" | 1 gave up (why: first line of $ERRF, set by the caller).
 patient() { # $1 deadline (epoch) $2 ERE an answer matches $3.. gh args
-  local deadline="$1" ok="$2" out delay give tries=0 reset left
+  local deadline="$1" ok="$2" out delay give tries=0 left
   shift 2
   delay="$RETRY"; [ "$delay" -ge 1 ] 2>/dev/null || delay=1
   give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
@@ -196,18 +196,14 @@ patient() { # $1 deadline (epoch) $2 ERE an answer matches $3.. gh args
     grep -qE "$ok" <<<"$out" && { printf '%s\n' "$out"; return 0; }
     grep -qi 'no checks reported' "$ERRF" && return 3
     tries=$((tries + 1))
-    if grep -qiE 'rate limit|abuse detection' "$ERRF"; then
-      reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
-      if [[ "$reset" =~ ^[0-9]+$ ]]; then
-        left=$(( reset + 5 - $(date +%s) ))
-        if [ "$left" -gt 0 ] && [ $(( $(date +%s) + left )) -le "$deadline" ]; then
-          echo "GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
-          sleep "$left"
-          give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
-          continue
-        fi
-        [ "$left" -le 0 ] || { echo "rate limit: GitHub's allowance resets in $(( (left + 59) / 60 )) min, after this wait ends" > "$ERRF"; return 1; }
-      fi
+    if is_rate_limit "$(cat "$ERRF")"; then # land's rate_reset_in: one reading of GitHub's reset for both scripts
+      left="$(rate_reset_in)"
+      [ $(( $(date +%s) + left )) -le "$deadline" ] \
+        || { echo "rate limit: GitHub's allowance resets in $(( (left + 59) / 60 )) min, after this wait ends" > "$ERRF"; return 1; }
+      echo "GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
+      sleep "$left"
+      give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
+      continue
     fi
     [ $(( $(date +%s) + delay )) -le "$give" ] || return 1
     echo "GitHub did not answer (try $tries: $(head -1 "$ERRF" | redact)); asking again in ${delay}s" >&2
@@ -361,6 +357,16 @@ main() {
       || refuse "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
     is_builder "$reviewer" "$(builders <<<"$VIEW")" \
       && refuse "$REPO#$PR's PASS line is signed by its builder ($reviewer); a fresh reviewer signs it. Nothing started"
+    # The PASS must be for this head (land's own fresh_pass), checked now: refused at the start, never after the CI wait (review F2).
+    local fresh frc
+    [[ "$HEADSHA" =~ ^[0-9a-f]{40}$ ]] || { say "could not verify $REPO#$PR (no head commit in GitHub's answer); nothing started"; exit 75; }
+    fresh="$(cd "$DIR" && { git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; exit 75; }; } \
+      && fresh_pass Ship-ready "$PR" "$HEADSHA" "$VIEW")"; frc=$?
+    case $frc in
+      0) : ;;
+      75) say "could not verify $REPO#$PR ($fresh); nothing started"; exit 75 ;;
+      *) refuse "$fresh; nothing started" ;;
+    esac
   fi
 
   SHEET_REPO="$REPO"; SHEET_PR="$PR"

@@ -164,10 +164,11 @@ LAND_RC_UNVERIFIED=75
 unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing was merged by this step; land again when GitHub answers.\033[0m\n' "$1" "$2"; exit "$LAND_RC_UNVERIFIED"; }
 # gh_read runs inside $( ), so what went wrong is left in a file, not a variable the subshell loses.
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
+RATE_UNTIL_FILE="$(mktemp -t land-rate-until.XXXXXX)" || { rm -f "$GH_ERR_FILE"; exit 1; } # rate_wait's deadline, below
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
 land_exit() { # $1 exit code. A land that ended green under her bypass files its engineering check.
   [ "$1" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ] && file_bypass_check
-  rm -f "$GH_ERR_FILE"
+  rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
 }
 trap 'land_exit $?' EXIT
 gh_kind() { # stderr text -> network | auth | api
@@ -182,20 +183,18 @@ gh_kind() { # stderr text -> network | auth | api
   else echo api; fi
 }
 # A SPENT ALLOWANCE IS A WAIT, NOT A FAILURE (22 Nov 2026: #134's land chain died at 09:35 CT on
-# "API rate limit exceeded", read as "could not verify (auth)"). GitHub says when the allowance comes back
-# (`gh api rate_limit`, which costs nothing); land sleeps to that reset and asks again, within
-# LAND_RATE_WAIT for the whole land (65 min: an hourly allowance always fits). A secondary limit names no
-# reset: a minute's pause. Past the bound it stops as "could not verify (rate limit)", exit 75.
-is_rate_limit() { grep -qiE 'rate limit|abuse detection' <<<"$1"; }
-RATE_UNTIL=""
-rate_wait() { # $1 gh's error text -> rc 0 after sleeping to the reset | 1 not a rate limit, or past the bound
+# "API rate limit exceeded", read as "could not verify (auth)"). land sleeps to GitHub's reset (rate_reset_in, in
+# the gates block: land-after's patient() uses the same one) and asks again, within LAND_RATE_WAIT for the WHOLE
+# land (65 min: an hourly allowance always fits). The deadline lives in a file, like GH_ERR_FILE: gh_read runs in
+# $( ), and a deadline kept in a variable was a fresh 65 min for every read (review F3). Past it: "could not
+# verify (rate limit)", exit 75.
+rate_wait() { # $1 gh's error text -> rc 0 after sleeping to the reset | 1 not a rate limit, or past the land's bound
   is_rate_limit "$1" || return 1
-  local reset left
-  [ -n "$RATE_UNTIL" ] || RATE_UNTIL=$(( $(date +%s) + ${LAND_RATE_WAIT:-3900} ))
-  reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
-  if [[ "$reset" =~ ^[0-9]+$ ]]; then left=$(( reset + 5 - $(date +%s) )); [ "$left" -gt 0 ] || left=5
-  else left=60; fi
-  [ $(( $(date +%s) + left )) -le "$RATE_UNTIL" ] || return 1
+  local until left
+  until="$(cat "$RATE_UNTIL_FILE" 2>/dev/null)"
+  [[ "$until" =~ ^[0-9]+$ ]] || { until=$(( $(date +%s) + ${LAND_RATE_WAIT:-3900} )); printf '%s' "$until" > "$RATE_UNTIL_FILE"; }
+  left="$(rate_reset_in)"
+  [ $(( $(date +%s) + left )) -le "$until" ] || return 1
   echo "     GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
   sleep "$left"
 }
@@ -867,6 +866,14 @@ recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the 
 # --- queue end ---
 
 # --- gates begin (tests/test-land-gates.sh evals this block verbatim) ---
+is_rate_limit() { grep -qiE 'rate limit|abuse detection' <<<"$1"; }
+rate_reset_in() { # -> seconds until GitHub's spent allowance comes back (its reported reset + 5 s; 5 when that has
+  # passed); 60 when it names no reset (a secondary limit). One definition for land's rate_wait and land-after's patient().
+  local reset left
+  reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
+  if [[ "$reset" =~ ^[0-9]+$ ]]; then left=$(( reset + 5 - $(date +%s) )); [ "$left" -gt 0 ] || left=5; else left=60; fi
+  echo "$left"
+}
 # TWO QUESTIONS EVERY PR ANSWERS BEFORE IT MERGES (owner, 19-20 Nov 2026: "would a 20 yr veteran do
 # this?" and "nothing looks and feels and sounds like AI created it"). Skills no code reads are wishes,
 # so both live here, read from the PR body, each refusal one plain line saying what to add.
@@ -909,16 +916,22 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
 }
-review_text() { # stdin: PR view JSON -> where a reviewer's PASS line may stand: the body, then each comment by the
-  # repo's OWNER account (oldest first). Every agent posts as the owner's login; a comment from any other account
-  # (a passer-by on a public repo, a bot) is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
+review_entries() { # stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
+  # stand: the body (no time), then each comment by the repo's OWNER account (oldest first, with its createdAt).
+  # Every agent posts as the owner's login; a comment from any other account (a passer-by on a public repo, a bot)
+  # is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
   # The newest verdict wins: from the last text that says `VERDICT: fail` on, so a later fail comment voids an
   # earlier PASS (review N9); a PASS posted after that fail still counts.
   # A fail verdict is the comment's FIRST line only, `VERDICT: fail` as a whole word (review R5): a later
   # note that quotes an earlier fail, "failsafe" or "failed checks fixed" never voids a PASS.
-  jq -r '[(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))]
-    | ([to_entries[] | select(.value | test("\\A\\W*verdict:\\W*fail\\b"; "i")) | .key] | last // 0) as $from
-    | .[$from:][]' 2>/dev/null
+  jq -r '[{at: "", b: (.body // "")}, (.comments[]? | select(.authorAssociation == "OWNER")
+          | {at: ((.createdAt // "") | (try (fromdateiso8601 | tostring) catch "")), b: (.body // "")})]
+    | ([to_entries[] | select(.value.b | test("\\A\\W*verdict:\\W*fail\\b"; "i")) | .key] | last // 0) as $from
+    | .[$from:][] | "\(.at)|\(.b | @base64)"' 2>/dev/null
+}
+review_text() { # stdin: PR view JSON -> the texts of review_entries, one after another
+  local at b64
+  review_entries | while IFS='|' read -r at b64; do base64 -d <<<"$b64"; echo; done
 }
 owner_text() { # stdin: PR view JSON -> the body, then every comment by the repo's OWNER account: where a builder's
   # own answer (Patch or rebuild) may stand. Not a verdict, so a later fail never voids it (review R4).
@@ -960,13 +973,34 @@ baseline_red() { # $1 the PR's checks JSON -> prints "<name>: <bucket>" and rc 0
 # it refuses with STALE_PASS. A merge from main that keeps either side does not count (her ruling: "a PASS
 # survives updates"). A merge's own new lines do count: `diff-tree --cc` lists only the files a merge changed
 # against every parent.
-pass_sha() { # $1 one PASS line  $2 head sha -> the full sha of the commit it names (rc 1 none on the PR's history)
-  local t
+# A re-check line names two commits, the old one first ("the diff A..B", "diff since A, tests at B"), so the
+# NEWEST commit the line names is the one it passed (review F1).
+# A PASS line that names no commit (the reviewer template's own shape) counts only where its time is known: an
+# OWNER comment posted after the newest commit of the PR's own work. In the body, or older than that work, it is
+# STALE_PASS (review F2). A commit date is the builder's to set, so a named commit stays the strong form.
+pass_sha() { # $1 one PASS line  $2 head sha -> the full sha of the newest commit it names (rc 1 none on the PR's history)
+  local t best=""
   for t in $(tr -cs '[:alnum:]' '\n' <<<"$1" | tr '[:upper:]' '[:lower:]' | grep -E '^[0-9a-f]{7,40}$' | grep '[a-f]'); do
-    git rev-parse -q --verify "$t^{commit}" >/dev/null 2>&1 || continue
-    git merge-base --is-ancestor "$t" "$2" 2>/dev/null && { git rev-parse "$t^{commit}"; return 0; }
+    t="$(git rev-parse -q --verify "$t^{commit}" 2>/dev/null)" || continue
+    git merge-base --is-ancestor "$t" "$2" 2>/dev/null || continue
+    { [ -z "$best" ] || git merge-base --is-ancestor "$best" "$t" 2>/dev/null; } && best="$t"
   done
-  return 1
+  [ -n "$best" ] && printf '%s\n' "$best"
+}
+pass_posted() { # $1 Ship-ready|Launch-ready; stdin: PR view JSON -> epoch of the OWNER comment holding the last $1 PASS line
+  # (rc 1 when that line stands in the body, or its time is unknown)
+  local at b64 last=""
+  while IFS='|' read -r at b64; do
+    base64 -d <<<"$b64" | pass_line "$1" >/dev/null && last="${at:-none}"
+  done < <(review_entries)
+  [[ "$last" =~ ^[0-9]+$ ]] && echo "$last"
+}
+own_work_at() { # $1 head -> committer time (epoch) of the newest commit of the PR's own work: main's commits and
+  # merges that keep a side excluded, as in changed_since_pass (rc 1 when there is none)
+  { git log --no-merges --format=%ct "$1" --not origin/main
+    git rev-list --merges "$1" --not origin/main | while IFS= read -r m; do
+      [ -n "$(git diff-tree --no-commit-id --cc --name-only "$m")" ] && git log -1 --format=%ct "$m"; done
+  } | sort -n | tail -1 | grep -E '^[0-9]+$'
 }
 changed_since_pass() { # $1 the PASS's sha  $2 head -> the PR's own files changed after it (main's commits excluded)
   { git log --no-merges --format= --name-only "$1..$2" --not origin/main
@@ -977,12 +1011,16 @@ have_head() { # $1 PR  $2 head -> 0 once the head commit is here (rc 1 with one 
   git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
   git cat-file -e "$2^{commit}" 2>/dev/null || { echo "PR #$1's head ${2:0:7} could not be fetched to read its commits"; return 1; }
 }
-fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  stdin: review text -> rc 1 with one plain line when stale
-  local line sha stale
-  line="$(pass_line "$1")" || return 0
+fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (body, comments) -> rc 1 with one plain line
+  # when stale | 75 the head could not be read. Run in the repo, after origin/main is fetched.
+  local line sha stale posted own
+  line="$(review_text <<<"$4" | pass_line "$1")" || return 0
   have_head "$2" "$3" || return 75
-  sha="$(pass_sha "$line" "$3")" \
-    || { echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR, so what it passed is unknown: the reviewer posts it again with the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
+  if ! sha="$(pass_sha "$line" "$3")"; then
+    posted="$(pass_posted "$1" <<<"$4")" && own="$(own_work_at "$3")" && [ "$posted" -gt "$own" ] && return 0
+    echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR$([ -n "$posted" ] && echo " and was posted before its last commit" || echo " and stands where its time is unknown (the body)"), so what it passed is unknown: the reviewer posts it again as a PR comment, naming the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"
+    return 1
+  fi
   stale="$(changed_since_pass "$sha" "$3")"
   [ -z "$stale" ] && return 0
   echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names (${sha:0:8}): the reviewer re-checks git diff ${sha:0:8}..${3:0:8} and posts a new PASS line naming ${3:0:8}"
@@ -1001,7 +1039,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 hea
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
     || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
-  msg="$(fresh_pass Ship-ready "$1" "$3" <<<"$body")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+  msg="$(fresh_pass Ship-ready "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
   launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
@@ -1010,7 +1048,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 hea
     || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
-  msg="$(fresh_pass Launch-ready "$1" "$3" <<<"$body")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+  msg="$(fresh_pass Launch-ready "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   return 0
 }
 patch_code() { # stdin: paths -> those that hold code (functions), not data, docs, media or lockfiles

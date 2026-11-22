@@ -181,8 +181,27 @@ gh_kind() { # stderr text -> network | auth | api
   # which fell through to `api`, so land died rc=1 and the sweep read it as a refusal
   # instead of exit 75 and landing again after a pause.
   if grep -qiE 'timeout|timed out|connection (reset|refused)|no such host|dial tcp|EOF|TLS|i/o|network is unreachable|HTTP 5[0-9][0-9]|temporarily unavailable|Something went wrong while executing your query|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out' <<<"$1"; then echo network
-  elif grep -qiE 'HTTP 401|HTTP 403|authentication|gh auth login|rate limit' <<<"$1"; then echo auth
+  elif is_rate_limit "$1"; then echo "rate limit"
+  elif grep -qiE 'HTTP 401|HTTP 403|authentication|gh auth login' <<<"$1"; then echo auth
   else echo api; fi
+}
+# A SPENT ALLOWANCE IS A WAIT, NOT A FAILURE (22 Nov 2026: #134's land chain died at 09:35 CT on
+# "API rate limit exceeded", read as "could not verify (auth)"). GitHub says when the allowance comes back
+# (`gh api rate_limit`, which costs nothing); land sleeps to that reset and asks again, within
+# LAND_RATE_WAIT for the whole land (65 min: an hourly allowance always fits). A secondary limit names no
+# reset: a minute's pause. Past the bound it stops as "could not verify (rate limit)", exit 75.
+is_rate_limit() { grep -qiE 'rate limit|abuse detection' <<<"$1"; }
+RATE_UNTIL=""
+rate_wait() { # $1 gh's error text -> rc 0 after sleeping to the reset | 1 not a rate limit, or past the bound
+  is_rate_limit "$1" || return 1
+  local reset left
+  [ -n "$RATE_UNTIL" ] || RATE_UNTIL=$(( $(date +%s) + ${LAND_RATE_WAIT:-3900} ))
+  reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
+  if [[ "$reset" =~ ^[0-9]+$ ]]; then left=$(( reset + 5 - $(date +%s) )); [ "$left" -gt 0 ] || left=5
+  else left=60; fi
+  [ $(( $(date +%s) + left )) -le "$RATE_UNTIL" ] || return 1
+  echo "     GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
+  sleep "$left"
 }
 gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = valid answer, 1 = none after retries
   local want="$1" out err_f GH_ERR try=1 backoff="${LAND_RETRY_SECS:-2}"; shift
@@ -192,6 +211,7 @@ gh_read() { # $1 validation regex for stdout; rest: gh args. Prints stdout; 0 = 
     if [ -n "$out" ] && grep -qE "$want" <<<"$out"; then rm -f "$err_f"; printf '%s\n' "$out"; return 0; fi
     GH_ERR="$(head -3 "$err_f" | paste -sd' ' -)"; [ -n "$GH_ERR" ] || GH_ERR="empty answer from gh $1 $2"
     printf '%s' "$GH_ERR" > "$GH_ERR_FILE"
+    rate_wait "$GH_ERR" && continue
     [ "$try" -ge 3 ] && { rm -f "$err_f"; return 1; }
     echo "     gh $1 $2 did not answer ($GH_ERR) — attempt $try of 3, again in ${backoff}s" >&2
     sleep "$backoff"; try=$((try + 1)); backoff=$((backoff * 2))
@@ -939,27 +959,62 @@ is_builder() { # $1 reviewer, $2 builder identities -> 0 when the reviewer is (o
 baseline_red() { # $1 the PR's checks JSON -> prints "<name>: <bucket>" and rc 0 when ship-ready-baseline is present and not green
   jq -er '[.[] | select(.name | test("(^|[ /])ship-ready-baseline$")) | select(.bucket != "pass" and .bucket != "skipping") | "\(.name): \(.bucket)"] | select(length > 0) | join("; ")' <<<"$1" 2>/dev/null
 }
-gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 1 with one plain line on stdout
-  local tree re files added launch body reviewer ids
+# A PASS IS FOR THE COMMIT IT LOOKED AT (22 Nov 2026: a stale PASS still landed). The PASS line names that
+# commit (7-40 hex characters, at least one a-f, on the PR's history). New work in the PR's own commits after
+# it refuses with STALE_PASS. A merge from main that keeps either side does not count (her ruling: "a PASS
+# survives updates"). A merge's own new lines do count: `diff-tree --cc` lists only the files a merge changed
+# against every parent.
+pass_sha() { # $1 one PASS line  $2 head sha -> the full sha of the commit it names (rc 1 none on the PR's history)
+  local t
+  for t in $(tr -cs '[:alnum:]' '\n' <<<"$1" | tr '[:upper:]' '[:lower:]' | grep -E '^[0-9a-f]{7,40}$' | grep '[a-f]'); do
+    git rev-parse -q --verify "$t^{commit}" >/dev/null 2>&1 || continue
+    git merge-base --is-ancestor "$t" "$2" 2>/dev/null && { git rev-parse "$t^{commit}"; return 0; }
+  done
+  return 1
+}
+changed_since_pass() { # $1 the PASS's sha  $2 head -> the PR's own files changed after it (main's commits excluded)
+  { git log --no-merges --format= --name-only "$1..$2" --not origin/main
+    git rev-list --merges "$1..$2" --not origin/main | while IFS= read -r m; do git diff-tree --no-commit-id --cc --name-only "$m"; done
+  } | grep . | sort -u
+}
+have_head() { # $1 PR  $2 head -> 0 once the head commit is here (rc 1 with one line: it could not be fetched)
+  git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
+  git cat-file -e "$2^{commit}" 2>/dev/null || { echo "PR #$1's head ${2:0:7} could not be fetched to read its commits"; return 1; }
+}
+fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  stdin: review text -> rc 1 with one plain line when stale
+  local line sha stale
+  line="$(pass_line "$1")" || return 0
+  have_head "$2" "$3" || return 75
+  sha="$(pass_sha "$line" "$3")" \
+    || { echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR, so what it passed is unknown: the reviewer posts it again with the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
+  stale="$(changed_since_pass "$sha" "$3")"
+  [ -z "$stale" ] && return 0
+  echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names (${sha:0:8}): the reviewer re-checks git diff ${sha:0:8}..${3:0:8} and posts a new PASS line naming ${3:0:8}"
+  return 1
+}
+gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
+  local tree re files added launch body reviewer ids msg
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   [ -n "$files" ] || return 0
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames>; Engineering: PASS"; return 1; }
+    || { echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames> at <head sha>; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>; Engineering: PASS"; return 1; }
+    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
     || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
+  msg="$(fresh_pass Ship-ready "$1" "$3" <<<"$body")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
   launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
   [ -n "$launch" ] || return 0
   reviewer="$(signoff Launch-ready <<<"$body")" \
-    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets>"; return 1; }
+    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
   is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what>"; return 1; }
+    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
+  msg="$(fresh_pass Launch-ready "$1" "$3" <<<"$body")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   return 0
 }
 patch_code() { # stdin: paths -> those that hold code (functions), not data, docs, media or lockfiles
@@ -1045,12 +1100,11 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
   local base body msg
   jq -r '.body // ""' <<<"$3" | owner_override && return 0
   git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; return 75; }
-  msg="$(gate_quality "$1" "$3")" || { echo "$msg"; return 1; }
+  msg="$(gate_quality "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   msg="$(gate_proof "$1" "$3" "$(owner_text <<<"$3")")" || { echo "$msg"; return 1; }
   # The patch check needs the PR's commits only when it changes code that is already on main.
   jq -r '.files[]?.path' <<<"$3" | patch_code | while IFS= read -r p; do git cat-file -e "origin/main:$p" 2>/dev/null && echo "$p"; done | grep -q . || return 0
-  git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
-  git cat-file -e "$2^{commit}" 2>/dev/null || { echo "PR #$1's head ${2:0:7} could not be fetched for the patch-history check"; return 75; }
+  have_head "$1" "$2" || return 75
   base="$(git merge-base origin/main "$2")" || { echo "PR #$1 has no merge base with main"; return 75; }
   body="$(owner_text <<<"$3")"
   msg="$(gate_patch "$1" "$base" "$2" "$body")" || { echo "$msg"; return 1; }
@@ -1104,14 +1158,32 @@ fi
 
 if [ -z "$ALREADY_MERGED" ]; then
 say "1/5  verifying PR #$PR myself"
+# A STACKED PR IS NOT LANDED (22 Nov 2026, westpeek-live #122: its base was work/random-role-codes, so the
+# merge went into that branch, main never moved, and land cried PUSH_DROPPED). land merges into main only.
+BASE="$(gh_read '^[^[:space:]]+$' pr view "$PR" --json baseRefName -q .baseRefName)" \
+  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's base branch could not be read: $(gh_err)"
+[ "$BASE" = main ] || die "NAMED STOP [STACKED_PR] PR #$PR merges into $BASE, not main, so landing it would ship nothing. Land the PR for $BASE first, or retarget this one: gh pr edit $PR --base main, then land $PR again."
 # Never take an agent's word that CI is green: two reported green on red on
 # 17 Sep, and one had read `mergeable` (merge conflicts) rather than the checks.
 # The checks are read as JSON and judged here, never by gh's exit code, which is 1 both for a
 # failing check and for a network error. A valid JSON array IS the answer; anything else is no answer.
-if ! CHECKS="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)"; then
-  grep -qi 'no checks reported' <<<"$(gh_err)" && die "PR #$PR has no checks at all — green cannot be verified"
-  unverified "$(gh_kind "$(gh_err)")" "the checks on PR #$PR could not be read: $(gh_err)"
-fi
+# PENDING IS A WAIT, NOT A STOP (22 Nov 2026: land stopped at once on a queued check, and every caller grew
+# its own wait). While any check is pending or queued, land waits, bounded by LAND_PENDING_WAIT (30 min);
+# a failure among them stops at once, and past the bound it is a named stop.
+PENDING_UNTIL=$(( $(date +%s) + ${LAND_PENDING_WAIT:-1800} ))
+while :; do
+  if ! CHECKS="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)"; then
+    grep -qi 'no checks reported' <<<"$(gh_err)" && die "PR #$PR has no checks at all — green cannot be verified"
+    unverified "$(gh_kind "$(gh_err)")" "the checks on PR #$PR could not be read: $(gh_err)"
+  fi
+  PENDING="$(jq -r '.[] | select(.bucket == "pending") | .name' <<<"$CHECKS")"
+  [ -n "$PENDING" ] || break
+  jq -e 'any(.[]; .bucket == "fail" or .bucket == "cancel")' <<<"$CHECKS" >/dev/null && break
+  [ "$(date +%s)" -lt "$PENDING_UNTIL" ] \
+    || die "NAMED STOP [CHECKS_PENDING] PR #$PR still has checks pending after $(( ${LAND_PENDING_WAIT:-1800} / 60 )) min ($(paste -sd',' - <<<"$PENDING")): GitHub has no free runner or the run hung. Nothing was merged; land $PR again once they finish."
+  echo "     waiting for $(grep -c . <<<"$PENDING") pending check(s): $(head -3 <<<"$PENDING" | paste -sd',' -)"
+  sleep "${LAND_PENDING_POLL:-30}"
+done
 jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 [ "$(jq 'length' <<<"$CHECKS")" -gt 0 ] || die "PR #$PR has no checks at all — green cannot be verified"
 # EVERY BUCKET, NOT THE EXIT CODE. 21 Sep 2026, boss-os #35: the Playwright job had been CANCELLED
@@ -1187,7 +1259,11 @@ RECENT="$(recent_lands "$PR")"
 queue_wait || die "PR #$PR was NOT merged: main's post-merge run is past its ceiling (above)."
 say "2/5  merging"
 # Pinned to the head verified above: a push after the check cannot ride in unverified.
-if ! MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)"; then
+# A spent allowance refuses the merge without making it: wait for the reset and ask again (rate_wait).
+until MERGE_OUT="$(gh pr merge "$PR" --squash --match-head-commit "$HEAD" 2>&1)"; MERGE_RC=$?; [ "$MERGE_RC" -eq 0 ]; do
+  rate_wait "$MERGE_OUT" || break
+done
+if [ "$MERGE_RC" -ne 0 ]; then
   echo "$MERGE_OUT"
   # A merge whose ANSWER was lost may still have happened; ask before calling it a failure.
   MSTATE="$(gh_read '^(OPEN|CLOSED|MERGED)$' pr view "$PR" --json state -q .state)" || MSTATE=""

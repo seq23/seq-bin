@@ -52,6 +52,8 @@ case "$1 $2" in
     if [ -f "$F/reset-at" ]; then jq -n --argjson r "$(cat "$F/reset-at")" '{resources: {core: {remaining: 0, reset: $r}, graphql: {remaining: 5000, reset: $r}}}' | jq -r "${4:-.}"
     else echo 0 | jq -r '.'; fi; exit 0 ;;
   "pr view")
+    [ "$(mode view-mode)" = ratelimit-until ] && [ "$(date +%s)" -lt "$(cat "$F/reset-at")" ] \
+      && { echo "GraphQL: API rate limit exceeded for user ID 1." >&2; exit 1; }
     { [ "$(mode view-mode)" = down ] || { [ "$(mode view-mode)" = down-after-land ] && [ -f "$F/land-ran" ]; }; } \
       && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
@@ -178,6 +180,9 @@ check "F2: two network failures reading checks are asked again with backoff, the
 reset; echo ratelimit-until > "$FAKE/checks-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
 LAND_AFTER_READ_PATIENCE_SECS=1 la 24 --task waitreset; lockgone
 check "F2: allowance spent, resetting inside the wait: one sleep to the reset (past the 1 s patience), then PASS" eval 'line1 "$T/done/waitreset.md" | grep -q "^STATUS: PASS" && grep -q "waiting [0-9]*s for its reset" "$T/logs/waitreset-24.log"'
+reset; echo ratelimit-until > "$FAKE/view-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
+la 25 --task ratelaunch; lockgone
+check "allowance spent when land-after starts (22 Nov 2026, #134): waits for the reset, then lands; no FAIL, no row" eval 'line1 "$T/done/ratelaunch.md" | grep -q "^STATUS: PASS" && [ -f "$FAKE/land-ran" ] && ! posts | jq -e "select(.cleared != true)" >/dev/null'
 reset; echo unverified > "$FAKE/land-mode"
 la 11 --task netdown; lockgone
 check "land exit 75 (network down mid-land): FAIL unknown" eval 'line1 "$T/netdown.md" | grep -q "^STATUS: FAIL .*unknown: STOPPED: could not verify"'

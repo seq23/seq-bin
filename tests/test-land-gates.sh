@@ -47,12 +47,13 @@ meta() { # body [files json] [extra json] -> PR view JSON
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
 }
 gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "$1")"; RC=$?
+  MSG="$(cd "$W/r" && bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/${PR_HEAD:0:8}}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
 SITE='[{"path":"site/index.html"}]'
-GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px; Engineering: PASS'
+# @HEAD@ is the PR head's short sha, filled in by gate(): a PASS names the commit it looked at (STALE_PASS).
+GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px at @HEAD@; Engineering: PASS'
 
 run_cases() {
 echo "=== ship-ready: a PR that changes what people see ==="
@@ -107,7 +108,7 @@ gate "$(meta "$(printf 'Owner override: <her words> (date)')" "$SITE")"
 check "a placeholder override is not her words -> refused" [ "$RC" -eq 1 ]
 gate "$(meta "$(printf 'Owner override: ok')" "$SITE")"
 check "a one-word override is refused" [ "$RC" -eq 1 ]
-gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px; engineering: pass')" '[{"path":"src/mail/welcome.ts"}]')"
+gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px at @HEAD@; engineering: pass')" '[{"path":"src/mail/welcome.ts"}]')"
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]
@@ -117,13 +118,42 @@ check "server code, tests and docs need no line (rc 0)" [ "$RC" -eq 0 ]
 echo "=== launch-ready: something new goes public ==="
 gate "$(meta "$GOOD" '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "a new site (wrangler.toml added) with only Ship-ready -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "Launch-ready: PASS — " <<<"$MSG"'
-gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — launch reviewer session_01LAUNCH looked at logo, banner, bio, links, starter posts, 404' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
+gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — launch reviewer session_01LAUNCH looked at logo, banner, bio, links, starter posts, 404 at @HEAD@' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "…with a fresh Launch-ready PASS -> allowed" [ "$RC" -eq 0 ]
 gate "$(meta "$GOOD"$'\n''Launch-ready: PASS — builder looked at the 404' '[{"path":"site/index.html"},{"path":"wrangler.toml"}]')"
 check "…signed by the builder -> refused" [ "$RC" -eq 1 ]
 rm -f "$W/r/site/index.html"; git -C "$W/r" commit -qam "no pages"; git -C "$W/r" push -q origin HEAD:main
 gate "$(meta "$GOOD" '[{"path":"app/screens/Home.tsx"}]')"
 check "the repo's first surface ever needs Launch-ready" eval '[ "$RC" -eq 1 ] && grep -q "first surface" <<<"$MSG"'
+
+echo "=== a PASS is for the commit it names: STALE_PASS (22 Nov 2026) ==="
+# stale_pr: main pushed; the PR's commit A changes the page and is what the reviewer passed (PASSED).
+stale_pr() {
+  repo; git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q -b pr
+  echo '<h1>reviewed</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the page"; PASSED="$(git -C "$W/r" rev-parse HEAD)"
+}
+publish_pr() { PR_HEAD="$(git -C "$W/r" rev-parse HEAD)"; git -C "$W/r" push -q -f origin "HEAD:refs/pull/9/head"; git -C "$W/r" checkout -q main; git -C "$W/r" branch -q -D pr; }
+passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "${PASSED:0:9}"; }
+stale_pr; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "a PASS naming the head -> allowed (rc 0)" [ "$RC" -eq 0 ]
+stale_pr; echo '<h1>changed after the review</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "after the PASS"; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "new code after the PASS -> refused STALE_PASS (rc 1)" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "site/index.html" <<<"$MSG"'
+stale_pr; git -C "$W/r" checkout -q main; echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"
+git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "a main merge after the PASS -> allowed, the PASS survives (rc 0)" [ "$RC" -eq 0 ]
+stale_pr; git -C "$W/r" checkout -q main; echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"
+git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-commit main
+echo '<h1>slipped into the merge</h1>' > "$W/r/site/index.html"; git -C "$W/r" add -A; git -C "$W/r" commit -qm "merge main"; publish_pr
+gate "$(meta "$(passed_at)" "$SITE")"
+check "new lines inside a merge commit -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
+stale_pr; publish_pr
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS' "$SITE")"
+check "a PASS that names no commit -> refused STALE_PASS, with the head to name" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "names no commit" <<<"$MSG" && grep -q " at ${PR_HEAD:0:8}; Engineering: PASS" <<<"$MSG"'
+gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at deadbeef1; Engineering: PASS' "$SITE")"
+check "a PASS naming a commit not on the PR -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "names no commit" <<<"$MSG"'
 
 echo "=== ship-ready-baseline (row 18 hook) ==="
 eval "$BLOCK"
@@ -198,6 +228,9 @@ neg "a patch check that never reads history" '/^patch_fixes()/a\
   return 0'
 neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering()/a\
   return 0'
+neg "a PASS that is never checked against its commit" '/^fresh_pass()/a\
+  return 0'
+neg "main's own commits counted as the PR's new code" 's/ --name-only "\$1\.\.\$2" --not origin\/main$/ --name-only "$1..$2"/; s/git rev-list --merges "\$1\.\.\$2" --not origin\/main/git rev-list --merges "$1..$2"/; s/--cc --name-only/-m --name-only/'
 neg "a quality gate that sees no surfaces" 's/^  \[ -n "\$files" \] || return 0$/  return 0/'
 neg "a mutation gate that never reads the body" '/^proof_listed()/a\
   return 0'

@@ -182,6 +182,39 @@ status() {
 }
 
 # ============================== worker (detached) ==============================
+# One GitHub read that keeps asking through a short outage (22 Nov 2026 review F2: three tries 2 s apart
+# turned a one-minute rate limit into a FAIL). Backoff from RETRY s, doubling to 60 s, for PATIENCE s; a
+# spent allowance is slept out once to the reset GitHub reports when that falls before the deadline.
+# stdout the answer; rc 0 answered | 3 "no checks reported" | 1 gave up (why: first line of $ERRF, set by the caller).
+patient() { # $1 deadline (epoch) $2 ERE an answer matches $3.. gh args
+  local deadline="$1" ok="$2" out delay give tries=0 reset left
+  shift 2
+  delay="$RETRY"; [ "$delay" -ge 1 ] 2>/dev/null || delay=1
+  give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
+  while :; do
+    out="$(GH_SHARE_UNTIL="$deadline" gh "$@" 2>"$ERRF")"   # ~/bin/gh never sleeps past this deadline
+    grep -qE "$ok" <<<"$out" && { printf '%s\n' "$out"; return 0; }
+    grep -qi 'no checks reported' "$ERRF" && return 3
+    tries=$((tries + 1))
+    if grep -qiE 'rate limit|abuse detection' "$ERRF"; then
+      reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
+      if [[ "$reset" =~ ^[0-9]+$ ]]; then
+        left=$(( reset + 5 - $(date +%s) ))
+        if [ "$left" -gt 0 ] && [ $(( $(date +%s) + left )) -le "$deadline" ]; then
+          echo "GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
+          sleep "$left"
+          give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
+          continue
+        fi
+        [ "$left" -le 0 ] || { echo "rate limit: GitHub's allowance resets in $(( (left + 59) / 60 )) min, after this wait ends" > "$ERRF"; return 1; }
+      fi
+    fi
+    [ $(( $(date +%s) + delay )) -le "$give" ] || return 1
+    echo "GitHub did not answer (try $tries: $(head -1 "$ERRF" | redact)); asking again in ${delay}s" >&2
+    sleep "$delay"; delay=$(( delay * 2 )); [ "$delay" -le 60 ] || delay=60
+  done
+}
+
 worker() {
   local DIR="$1" REPO="$2" PR="$3" SLUG="$4" LOG="$5" LOCK="$6" SLOCK="$7" HEADSHA="$8"
   local THENS=() FINISHED="" ERRF LANDOUT c
@@ -203,39 +236,6 @@ worker() {
     file_fail_row "$REPO" "$PR" "$SLUG" "$reason" "$LOG"
     echo "OUTPUT land-after $REPO#$PR FAIL — $reason"
     exit 1
-  }
-
-  # One GitHub read that keeps asking through a short outage (22 Nov 2026 review F2: three tries 2 s apart
-  # turned a one-minute rate limit into a FAIL). Backoff from RETRY s, doubling to 60 s, for PATIENCE s; a
-  # spent allowance is slept out once to the reset GitHub reports when that falls before the deadline.
-  # stdout the answer; rc 0 answered | 3 "no checks reported" | 1 gave up (why: first line of $ERRF).
-  patient() { # $1 deadline (epoch) $2 ERE an answer matches $3.. gh args
-    local deadline="$1" ok="$2" out delay give tries=0 reset left
-    shift 2
-    delay="$RETRY"; [ "$delay" -ge 1 ] 2>/dev/null || delay=1
-    give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
-    while :; do
-      out="$(GH_SHARE_UNTIL="$deadline" gh "$@" 2>"$ERRF")"   # ~/bin/gh never sleeps past this deadline
-      grep -qE "$ok" <<<"$out" && { printf '%s\n' "$out"; return 0; }
-      grep -qi 'no checks reported' "$ERRF" && return 3
-      tries=$((tries + 1))
-      if grep -qiE 'rate limit|abuse detection' "$ERRF"; then
-        reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(select(.remaining == 0) | .reset) | max // empty' 2>/dev/null)"
-        if [[ "$reset" =~ ^[0-9]+$ ]]; then
-          left=$(( reset + 5 - $(date +%s) ))
-          if [ "$left" -gt 0 ] && [ $(( $(date +%s) + left )) -le "$deadline" ]; then
-            echo "GitHub's allowance is spent; waiting ${left}s for its reset, then asking again" >&2
-            sleep "$left"
-            give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
-            continue
-          fi
-          [ "$left" -le 0 ] || { echo "rate limit: GitHub's allowance resets in $(( (left + 59) / 60 )) min, after this wait ends" > "$ERRF"; return 1; }
-        fi
-      fi
-      [ $(( $(date +%s) + delay )) -le "$give" ] || return 1
-      echo "GitHub did not answer (try $tries: $(head -1 "$ERRF" | redact)); asking again in ${delay}s" >&2
-      sleep "$delay"; delay=$(( delay * 2 )); [ "$delay" -le 60 ] || delay=60
-    done
   }
 
   # 1. the PR's checks, bounded. Pending is waited for; red, past the ceiling or unreadable is a FAIL.
@@ -345,20 +345,18 @@ main() {
   fi
 
   # The PR and its PASS line. A read that never answers starts nothing (exit 75, "could not verify").
-  local VIEW="" try errf; errf="$(mktemp)"
-  for try in 1 2 3; do
-    VIEW="$(gh pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits 2>"$errf")" && grep -q '"state"' <<<"$VIEW" && break
-    VIEW=""; [ "$try" -lt 3 ] && sleep "$RETRY"
-  done
-  [ -n "$VIEW" ] || { say "could not verify $REPO#$PR ($(head -1 "$errf")); nothing started"; rm -f "$errf"; exit 75; }
-  rm -f "$errf"
+  # Asked patiently: a spent allowance is slept out to its reset (22 Nov 2026, #134), never "nothing started".
+  local VIEW="" ERRF; ERRF="$(mktemp)"
+  VIEW="$(patient $(( $(date +%s) + ${LAND_AFTER_RATE_WAIT_SECS:-3900} )) '"state"' pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits)" \
+    || { say "could not verify $REPO#$PR ($(head -1 "$ERRF")); nothing started"; rm -f "$ERRF"; exit 75; }
+  rm -f "$ERRF"
   local state body review reviewer HEADSHA
   state="$(jq -r .state <<<"$VIEW")"; body="$(jq -r '.body // ""' <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
   review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
   if ! owner_override <<<"$body"; then
     reviewer="$(signoff Ship-ready <<<"$review")" \
-      || refuse "$REPO#$PR has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output>; Engineering: PASS"
+      || refuse "$REPO#$PR has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"
     pass_line Ship-ready <<<"$review" | covers_engineering \
       || refuse "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
     is_builder "$reviewer" "$(builders <<<"$VIEW")" \

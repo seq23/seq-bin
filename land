@@ -860,7 +860,8 @@ recent_lands() { # $1 this PR -> "#N" for each other PR merged into main in the 
 #     `Ship-ready: PASS — <reviewer> looked at <real output>` from a reviewer who is not the builder
 #     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
 #     public (a launch marker added, or the repo's first surface) also needs `Launch-ready: PASS — ...`.
-#     The same Ship-ready line carries `Engineering: PASS` (or "engineering.md 1–6"): the reviewer who
+#     The same Ship-ready line carries `Engineering: PASS` (every automatic fail in engineering.md; no
+#     numbered range, which went stale the day fail 7 was added): the reviewer who
 #     passed what people see also passed how it is built (her ruling 21 Nov 2026: "our rules dont allow
 #     things to be built cheaply and horribly"; a keyword guess shipped in West Peek OS that day).
 #     A CI check named `ship-ready-baseline` (row 18), when the PR has one, must be green.
@@ -887,8 +888,8 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
 }
-covers_engineering() { # stdin: one PASS line -> 0 when it also passes engineering.md's automatic fails 1–6
-  grep -qiE 'engineering: *pass|engineering\.md *(fails? *)?1 *(–|—|-|to) *6'
+covers_engineering() { # stdin: one PASS line -> 0 when it also passes every automatic fail in engineering.md
+  grep -qiE 'engineering: *pass'
 }
 signoff() { # $1 Ship-ready|Launch-ready; stdin: PR body -> the reviewer on its last PASS line (rc 1 none)
   local line
@@ -930,7 +931,7 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  -> rc 
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
-    || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks the automatic fails 1–6 in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
+    || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
   added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
   launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
@@ -1015,15 +1016,15 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
 # landed under `Owner override:` skipped its engineering review, so once it is green and deployed land
 # files ONE Open Loops row (one per repo#PR, the intake upserts) for the next day: the merged diff is
-# checked against engineering.md 1–6. It never blocks or fails the land; a failed post is printed loudly
+# checked against every automatic fail in engineering.md. It never blocks or fails the land; a failed post is printed loudly
 # with the command that files it by hand.
 file_bypass_check() {
   local slug body out poster="${LAND_DIR:-$HOME/bin}/open-loops.mjs" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
     title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",
-    finish_line: "engineering.md 1–6 checked on the merged diff; fails fixed or dated",
-    next_step: "Read the merged change against the six automatic fails in engineering.md; fix each fail now or give it a dated row."}')"
+    finish_line: "every automatic fail in engineering.md checked on the merged diff; fails fixed or dated",
+    next_step: "Read the merged change against the automatic fails in engineering.md; fix each fail now or give it a dated row."}')"
   if [ "${LAND_OPEN_LOOPS_NO_VAULT:-}" = 1 ]; then out="$(node "$poster" "$body" 2>&1)"
   else out="$(cd "$boss" 2>/dev/null && npm run -s vault:run -- node "$poster" "$body" 2>&1)"; fi
   if [ $? -eq 0 ]; then echo "     engineering check of $slug#$PR filed on Open Loops for tomorrow ($(tail -1 <<<"$out"))"; return 0; fi

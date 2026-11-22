@@ -68,9 +68,9 @@ check "a fresh reviewer's PASS -> allowed (rc 0)" [ "$RC" -eq 0 ]
 echo "=== engineering rides on the Ship-ready PASS (her ruling 21 Nov 2026) ==="
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px' "$SITE")"
 check "a PASS that says nothing of engineering -> refused (rc 1)" [ "$RC" -eq 1 ]
-check "…in one line naming engineering.md 1–6 and exactly what to add" eval 'one_line && grep -q "engineering.md" <<<"$MSG" && grep -q "1–6" <<<"$MSG" && grep -q "; Engineering: PASS" <<<"$MSG"'
+check "…in one line naming engineering.md and exactly what to add" eval 'one_line && grep -q "every automatic fail in ~/.claude/skills/ship-ready/engineering.md" <<<"$MSG" && grep -q "; Engineering: PASS" <<<"$MSG"'
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; checked engineering.md 1–6' "$SITE")"
-check "the words \"engineering.md 1–6\" on the line -> allowed" [ "$RC" -eq 0 ]
+check "a numbered range (\"engineering.md 1–6\") is not a sign-off: it skips fails added since -> refused" eval '[ "$RC" -eq 1 ] && grep -q "; Engineering: PASS" <<<"$MSG"'
 gate "$(meta "$(printf 'Engineering: PASS\nShip-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px')" "$SITE")"
 check "Engineering: PASS on another line is not this reviewer's -> refused" [ "$RC" -eq 1 ]
 gate "$(meta 'Ship-ready: PASS — builder looked at the home page at 390 px; Engineering: PASS' "$SITE")"
@@ -84,7 +84,7 @@ gate "$(meta "$(printf 'Owner override: <her words> (date)')" "$SITE")"
 check "a placeholder override is not her words -> refused" [ "$RC" -eq 1 ]
 gate "$(meta "$(printf 'Owner override: ok')" "$SITE")"
 check "a one-word override is refused" [ "$RC" -eq 1 ]
-gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px, engineering.md 1-6 clean')" '[{"path":"src/mail/welcome.ts"}]')"
+gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looked at the rendered welcome email at 390 px; engineering: pass')" '[{"path":"src/mail/welcome.ts"}]')"
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]

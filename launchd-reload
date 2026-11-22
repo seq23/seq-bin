@@ -32,7 +32,9 @@ mkdir -p "$STATE/good" "$STATE/pending"
 FAILED=0
 
 is_loaded()   { "$LCTL" print "$DOM/$1" >/dev/null 2>&1; }
-is_disabled() { "$LCTL" print-disabled "$DOM" 2>/dev/null | grep -Eq "\"$1\" => (disabled|true)"; }
+# Read the whole list first: under pipefail, `print-disabled | grep -q` fails when grep exits on the
+# match and launchctl is still writing (SIGPIPE), so a disabled job read as enabled (CI, 22 Nov 2026).
+is_disabled() { local all; all="$("$LCTL" print-disabled "$DOM" 2>/dev/null)"; grep -Eq "\"$1\" => (disabled|true)" <<<"$all"; }
 is_running()  { "$LCTL" list 2>/dev/null | awk -v l="$1" '$3 == l && $1 != "-" { f = 1 } END { exit !f }'; }
 youtube_held() {
   case "$1" in com.howweknow.*|com.seq.shorts-arm|com.seq.boss-comment-watch|com.seq.oneshot.hwk-money) [ -e "$FILL" ] ;; *) return 1 ;; esac

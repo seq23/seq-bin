@@ -1,11 +1,11 @@
 #!/bin/bash
-# CI sweep retry gate — fired Tuesday and Saturday at 09:00 CT by launchd
+# CI sweep retry gate — fired Monday and Friday at 22:20 CT by launchd
 # (launchd/com.seq.ci-sweep-retry.plist), exactly one hour after the primary
-# 08:00 run (launchd/com.seq.ci-sweep.plist, ci-sweep.sh).
+# 22:15 run (launchd/com.seq.ci-sweep.plist, ci-sweep.sh).
 #
 # THE DESIGN (her instruction, 24 Sep 2026): if the primary run does not end
 # MAIN-GREEN, try again once, an hour later. Not more than once — a second
-# non-green ending still waits for the next Tue/Sat 08:00 run.
+# non-green ending still waits for the next Mon/Fri 22:15 run.
 # 13 Nov 2026, owner: Wed+Sat (Mon+Fri from 2 Oct to 13 Nov) 08:00 (retry 09:00), first run Sat 14 Nov — was
 # daily 07:00 (+08:00 retry). This gate reads the ledger BY DAY, so the
 # weekday change needs nothing here: a run day is whichever day the plist fires.
@@ -30,12 +30,12 @@
 #                                     past it is handed to ci-sweep.sh, whose lock
 #                                     reclaims it and records MAIN-RED-RECLAIMED.
 #                                     12 Oct 2026: also when today already has a row —
-#                                     an INTERRUPTED 08:00 run resumed after sleep
+#                                     an INTERRUPTED 22:15 run resumed after sleep
 #                                     (ci-sweep-resume-on-wake.sh, launchd com.seq.ci-sweep-resume
 #                                     every 300 s) keeps that one row and
-#                                     may be in flight at 09:00; launching beside it
+#                                     may be in flight at 22:20; launching beside it
 #                                     would be no-oped by the lock and lose the retry.
-#   no run recorded, nothing in flight -> run (the 08:00 slot was missed, or the run
+#   no run recorded, nothing in flight -> run (the 22:15 slot was missed, or the run
 #                                     died without a row — ci-sweep.sh's reclaim
 #                                     writes that row)
 #   today already has a GREEN run  -> nothing to do, exit 0
@@ -83,7 +83,7 @@ if holder="$(holder_pid)"; then
 fi
 
 if [ "$count" -eq 0 ]; then
-  say "no run recorded for $TODAY and none in flight — running (the 08:00 slot was missed, or its run died without a row; ci-sweep.sh records that one)."
+  say "no run recorded for $TODAY and none in flight — running (the 22:15 slot was missed, or its run died without a row; ci-sweep.sh records that one)."
 elif printf '%s\n' "$rows" | awk -F'\t' '$3=="MAIN-GREEN"{f=1} END{exit !f}'; then
   say "$TODAY already has a MAIN-GREEN run — nothing to retry. Exiting."
   exit 0
@@ -91,7 +91,7 @@ elif printf '%s\n' "$rows" | awk -F'\t' '$3=="PAUSED"{f=1} END{exit !f}'; then
   say "$TODAY's run was PAUSED by the owner (state/pause-until) — terminal for the day, no retry. Exiting."
   exit 0
 elif [ "$count" -ge 2 ]; then
-  say "$TODAY already has $count runs (the retry already happened, still not green) — waiting for the next Tue/Sat 08:00 run. Exiting."
+  say "$TODAY already has $count runs (the retry already happened, still not green) — waiting for the next Mon/Fri 22:15 run. Exiting."
   exit 0
 else
   say "$TODAY's only run so far was not green — this is the one retry. Running."

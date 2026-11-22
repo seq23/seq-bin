@@ -112,7 +112,7 @@ while IFS='|' read -r name cmd; do
   if [ $rc -ne 0 ]; then
     say "NAMED STOP [TZ_WATCH_INSTALL_FAILED] $name exited $rc; its jobs may still be on the old zone. Retried hourly."
     failed="$failed $name"
-  elif printf '%s\n' "$out" | grep -q '^DEFERRED'; then
+  elif printf '%s\n' "$out" | grep -qE '^DEFERRED( |:|$)'; then   # launchd-reload's DEFERRED_* are applied by --pending below
     say "NOTE [TZ_WATCH_DEFERRED] $name deferred a running job itself; not recorded, retried hourly."
     deferred="$deferred $name"
   else
@@ -122,6 +122,10 @@ while IFS='|' read -r name cmd; do
 done < <(installers)
 
 [ -n "$deferred" ] || rm -f "$STATE/pending-since"
+# RELOADS DEFERRED BY launchd-reload (21 Nov 2026): a job whose new file was written while it was paused
+# (disabled), running or held for the PBS fill is reloaded here, hourly, once it is enabled, idle and not
+# held. Never enables, disables or kickstarts anything.
+if [ -z "${TZ_WATCH_INSTALLERS:-}" ]; then "$BIN/launchd-reload" --pending | sed 's/^/  /'; fi
 if [ -n "$failed" ]; then
   if [ "$(cat "$STATE/open-row" 2>/dev/null)" != "$failed" ]; then
     body=$(printf '{"repo":"seq23/seq-bin","owner":"claude","business":"personal","stop":"TZ_WATCH_INSTALL_FAILED","title":"Jobs not moved to the Mac'"'"'s new time zone (%s)","finish_line":"every installer reinstalled for %s","next_step":"Read ~/Library/Logs/tz-watch.log, fix the failing installer(s):%s. tz-watch retries every hour."}' "$zone" "$zone" "$failed")

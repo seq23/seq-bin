@@ -1,7 +1,7 @@
 #!/bin/bash
 # MONTHLY RESTORE DRILL (owner, 19 Nov 2026, phase 1 of the veteran quality bar: "restore one real backup
-# into a scratch location and prove it reads"). launchd com.seq.restore-drill, the 1st at 13:00 Central
-# (after the 10:00 snapshot; the Mac is usually awake then, and a missed run fires on wake).
+# into a scratch location and prove it reads"). launchd com.seq.restore-drill, the 2nd at 22:05 Central
+# (the night after the 1st's 22:05 snapshot; heavy work runs at night from 21 Nov 2026; a missed run fires on wake).
 #
 # A backup nobody has restored is a hope. Three drills, each on the newest REAL copy, in a private scratch
 # folder that is deleted at the end, whatever happens:
@@ -70,7 +70,7 @@ drill_drive() {
   rclone copy "$DRIVE/bin" "$dest" --transfers 8 --log-file "$LOG" --log-level ERROR || { log "drive: the copy back from $DRIVE/bin failed"; return 1; }
   local n; n=$(find "$dest" -type f | wc -l | tr -d ' ')
   [ "$n" -ge 20 ] || { log "drive: only $n files came back from $DRIVE/bin (fewer than 20)"; return 1; }
-  # Files the Mac has not touched in 26 h were in last night's 01:40 backup as they are now.
+  # Files the Mac has not touched in 26 h were in the 22:00 backup as they are now.
   while IFS= read -r f; do
     rel=${f#"$dest/"}
     [ -f "$H/bin/$rel" ] || continue

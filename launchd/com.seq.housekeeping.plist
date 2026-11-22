@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
-<!-- Daily 03:30 CT: after the 01:40 CT drive backup, so its stops and held-back folders are read the same night. -->
+<!-- Daily 03:30 CT: after the 22:00 CT drive backup, so its stops and held-back folders are read the same night. -->
 <dict>
 	<key>Label</key>
 	<string>com.seq.housekeeping</string>

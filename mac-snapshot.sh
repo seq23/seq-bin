@@ -2,7 +2,7 @@
 # Twice-monthly ENCRYPTED full snapshot of what lives only on this Mac (her rulings 8 Nov 2026):
 # one AES-256 disk image, uploaded to sequoialtaylor@gmail.com's Drive (rclone remote "gdrive-sl",
 # scope drive.file), folder Mac-Snapshots, newest 2 kept. launchd com.seq.mac-snapshot, 1st and 15th
-# at 10:00 Central. Unlike the nightly drive-backup.sh (seq.taylor's Drive), this one carries the Boss OS
+# at 22:05 Central (night, from 21 Nov 2026). Unlike the nightly drive-backup.sh (seq.taylor's Drive), this one carries the Boss OS
 # vault AND its master key, which otherwise exists only in this Mac's login Keychain.
 #
 #   ~/bin/mac-snapshot.sh --now        # a run now (the scheduled run is the same thing)

@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
-<!-- 1st and 15th at 10:00 CT, when the Mac is usually awake (her rulings 8 Nov 2026). Encrypted snapshot to sequoialtaylor's Drive. -->
+<!-- 1st and 15th at 22:05 CT (her rulings 8 Nov 2026; moved from 10:00 on 21 Nov 2026: a big upload is heavy work, so it runs at night, ahead of the PBS fill's 22:30 ramp). Encrypted snapshot to sequoialtaylor's Drive. -->
 <dict>
 	<key>Label</key>
 	<string>com.seq.mac-snapshot</string>
@@ -17,23 +17,9 @@
 	<key>StandardErrorPath</key>
 	<string>/Users/sequoiataylor/Library/Logs/mac-snapshot/launchd.err</string>
 	<key>StartCalendarInterval</key>
-	<array>
-		<dict>
-			<key>Day</key>
-			<integer>1</integer>
-			<key>Hour</key>
-			<integer>10</integer>
-			<key>Minute</key>
-			<integer>0</integer>
-		</dict>
-		<dict>
-			<key>Day</key>
-			<integer>15</integer>
-			<key>Hour</key>
-			<integer>10</integer>
-			<key>Minute</key>
-			<integer>0</integer>
-		</dict>
-	</array>
+  <array>
+    <dict><key>Day</key><integer>1</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Day</key><integer>15</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>5</integer></dict>
+  </array>
 </dict>
 </plist>

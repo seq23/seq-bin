@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
-<!-- The 1st at 13:00 CT, after the 10:00 snapshot (owner, 19 Nov 2026, phase 1: monthly restore drills). Restores the newest Drive backup, Mac snapshot and a Boss OS database export into scratch and proves they read. -->
+<!-- The 2nd at 22:05 CT, the night after the 1st's 22:05 snapshot (moved from the 1st at 13:00 on 21 Nov 2026: a restore is heavy, so it runs at night) (owner, 19 Nov 2026, phase 1: monthly restore drills). Restores the newest Drive backup, Mac snapshot and a Boss OS database export into scratch and proves they read. -->
 <dict>
 	<key>Label</key>
 	<string>com.seq.restore-drill</string>
@@ -17,13 +17,6 @@
 	<key>StandardErrorPath</key>
 	<string>/Users/sequoiataylor/Library/Logs/restore-drill/launchd.err</string>
 	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Day</key>
-		<integer>1</integer>
-		<key>Hour</key>
-		<integer>13</integer>
-		<key>Minute</key>
-		<integer>0</integer>
-	</dict>
+  <dict><key>Day</key><integer>2</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>5</integer></dict>
 </dict>
 </plist>

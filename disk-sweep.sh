@@ -6,8 +6,8 @@
 #     ~1.4 GB (21 GB), one per Chrome launch that day; Chrome leaves them after force-quits.
 #   · repair-fixture-* scratch worktrees (~500 MB each) from killed sprylabs-hpc-site validator runs
 #     (fixed at source in sprylabs-hpc-site #221; this catches anything older or anything else).
-# Boss OS's Kendra duty (boss-os scripts/ops/mac-cleanup.mjs, 09:00 CT) cleans caches and old
-# renders; this runs earlier (07:15 CT) and owns only what is listed below.
+# Boss OS's Kendra duty (boss-os scripts/ops/mac-cleanup.mjs, 11:05 CT) cleans caches and old
+# renders; this runs after it (11:25 CT) and owns only what is listed below.
 #
 # What it removes, and only this:
 #   · code_sign_clone folders older than 24 h, never the newest one (a running Chrome uses it);

@@ -1,0 +1,122 @@
+#!/bin/bash
+# THE ONE WAY A LAUNCHD JOB IS RELOADED (21 Nov 2026, the Mac's day).
+#
+# WHY. Every installer did `bootout || true; bootstrap` (or unload/load). That is fine for an idle,
+# enabled job and wrong for three others, found while moving every job to her new Mac day:
+#   - a DISABLED job (her pauses: ~/.config/paused-*.txt): launchd refuses to bootstrap it
+#     ("Bootstrap failed: 5", CONFIRMED on a test label 21 Nov 2026), so after the bootout the job is
+#     simply gone, and the planned `launchctl enable` that ends the pause has nothing to enable;
+#   - a RUNNING job: bootout kills it mid-run (why ~/bin/command-guard.mjs refuses a hand bootout);
+#   - a PAUSED YouTube job (held while the Peace Be Still fill runs, owner 21 Nov 2026): it must not be
+#     loaded or started until the pause ends.
+# So this never changes a job's pause state: the new file is written, launchd keeps the old schedule
+# in memory, and the reload is recorded as pending. `launchd-reload --pending` (tz-watch, hourly)
+# applies it once the job is enabled, idle and not held. A reload that fails puts the last good
+# file back and loads it: the old schedule keeps running and the line says so; never a missing job.
+#
+#   launchd-reload <file.plist>...   the file in ~/Library/LaunchAgents is already the new version
+#   launchd-reload --pending         apply the deferred ones that can be applied now
+#   launchd-reload --seed            keep a copy of every loaded job's file as its last good version
+#                                     (installers run this first, before they write anything)
+#   launchd-reload --status          the pending list
+#
+# Never enables, disables, kickstarts or moves a held file. Test: tests/test-launchd-reload.sh
+# (LAUNCHCTL / LAUNCH_AGENTS_DIR / LAUNCHD_RELOAD_STATE / PBS_FILL_FILE exist for it only).
+set -uo pipefail
+LCTL="${LAUNCHCTL:-launchctl}"
+AGENTS="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+STATE="${LAUNCHD_RELOAD_STATE:-$HOME/.local/state/launchd-reload}"
+FILL="${PBS_FILL_FILE:-$HOME/.peace-be-still/library-fill.active}"
+DOM="gui/$(id -u)"
+mkdir -p "$STATE/good" "$STATE/pending"
+FAILED=0
+
+is_loaded()   { "$LCTL" print "$DOM/$1" >/dev/null 2>&1; }
+is_disabled() { "$LCTL" print-disabled "$DOM" 2>/dev/null | grep -Eq "\"$1\" => (disabled|true)"; }
+is_running()  { "$LCTL" list 2>/dev/null | awk -v l="$1" '$3 == l && $1 != "-" { f = 1 } END { exit !f }'; }
+youtube_held() {
+  case "$1" in com.howweknow.*|com.seq.shorts-arm|com.seq.boss-comment-watch|com.seq.oneshot.hwk-money) [ -e "$FILL" ] ;; *) return 1 ;; esac
+}
+
+seed() {
+  local f l n=0
+  for f in "$AGENTS"/com.seq.*.plist "$AGENTS"/com.howweknow.*.plist; do
+    [ -f "$f" ] || continue
+    l="$(basename "$f" .plist)"
+    [ -f "$STATE/good/$l.plist" ] && continue
+    is_loaded "$l" || continue
+    cp "$f" "$STATE/good/$l.plist" && n=$((n + 1))
+  done
+  echo "OUTPUT launchd-reload seed: $n last-good file(s) kept"
+}
+
+defer() {  # label reason
+  echo "$2" > "$STATE/pending/$1"
+  echo "DEFERRED_$2 $1: new file written, the old schedule stays loaded; applied by launchd-reload --pending"
+}
+
+reload_one() {
+  local p="$1" l good
+  l="$(basename "$p" .plist)"
+  good="$STATE/good/$l.plist"
+  if ! plutil -lint "$p" >/dev/null 2>&1; then
+    if [ -f "$good" ]; then
+      cp "$good" "$p"
+      echo "NAMED STOP [PLIST_MALFORMED] $l: not loaded; the last good file is back in place"
+    else
+      rm -f "$p"
+      echo "NAMED STOP [PLIST_MALFORMED] $l: not loaded and removed from LaunchAgents (there was no good file to put back)"
+    fi
+    FAILED=$((FAILED + 1)); return
+  fi
+  if ! is_loaded "$l"; then
+    if is_disabled "$l"; then defer "$l" DISABLED; return; fi
+    if youtube_held "$l"; then defer "$l" PAUSED; return; fi
+    if "$LCTL" bootstrap "$DOM" "$p" 2>/dev/null && is_loaded "$l"; then
+      cp "$p" "$good"; rm -f "$STATE/pending/$l"; echo "LOADED $l (new)"
+    else
+      echo "NAMED STOP [NOT_LOADED] $l could not be loaded"; FAILED=$((FAILED + 1))
+    fi
+    return
+  fi
+  if is_disabled "$l"; then defer "$l" DISABLED; return; fi
+  if is_running "$l"; then defer "$l" RUNNING; return; fi
+  if youtube_held "$l"; then defer "$l" PAUSED; return; fi
+  if [ -f "$good" ] && cmp -s "$p" "$good"; then rm -f "$STATE/pending/$l"; echo "UNCHANGED $l"; return; fi
+  "$LCTL" bootout "$DOM/$l" 2>/dev/null || true
+  if "$LCTL" bootstrap "$DOM" "$p" 2>/dev/null && is_loaded "$l"; then
+    cp "$p" "$good"; rm -f "$STATE/pending/$l"; echo "RELOADED $l"; return
+  fi
+  FAILED=$((FAILED + 1))
+  if [ -f "$good" ]; then
+    cp "$p" "$STATE/pending/$l.rejected.plist"
+    cp "$good" "$p"
+    if "$LCTL" bootstrap "$DOM" "$p" 2>/dev/null && is_loaded "$l"; then
+      echo "RELOAD_FAILED $l: the new file would not load (kept as $STATE/pending/$l.rejected.plist); the OLD schedule is loaded again and still runs"
+      return
+    fi
+  fi
+  echo "NAMED STOP [JOB_MISSING] $l: neither the new nor the last good file would load. Load it by hand: launchctl bootstrap $DOM $p"
+}
+
+pending() {
+  local f l n=0 done=0
+  for f in "$STATE/pending"/*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.plist) continue ;; esac
+    l="$(basename "$f")"; n=$((n + 1))
+    [ -f "$AGENTS/$l.plist" ] || { rm -f "$f"; echo "PENDING_DROPPED $l: its file is gone"; continue; }
+    reload_one "$AGENTS/$l.plist"
+    [ -f "$f" ] || done=$((done + 1))
+  done
+  echo "OUTPUT launchd-reload pending: $done of $n applied, $((n - done)) still waiting (paused, running or failed)"
+}
+
+case "${1:-}" in
+  --seed) seed ;;
+  --pending) pending ;;
+  --status) ls "$STATE/pending" 2>/dev/null | grep -v '\.plist$' | while read -r l; do echo "$l $(cat "$STATE/pending/$l")"; done ;;
+  ""|-h|--help) sed -n 2,26p "$0"; exit 2 ;;
+  *) for p in "$@"; do reload_one "$p"; done ;;
+esac
+[ "$FAILED" = 0 ] || exit 1

@@ -52,7 +52,7 @@ import { createServer } from "node:http";
 createServer((req, res) => {
   const inn = /(^|;\s*)s=ok(;|$)/.test(req.headers.cookie || "");
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Studio</title></head><body style="font:16px sans-serif;color:#111;background:#fff">${inn ? '<nav aria-label="Main"><a href="/">Home</a></nav><h1>Your clips</h1>' : "<h1>Sign in</h1><p>Type your email.</p>"}</body></html>`);
+  res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Studio</title></head><body style="font:16px sans-serif;color:#111;background:#fff">${inn ? '<nav aria-label="Main" style="display:none"><a href="/">Desktop</a></nav><nav aria-label="Main"><a href="/">Home</a></nav><h1>Your clips</h1>' : "<h1>Sign in</h1><p>Type your email.</p>"}</body></html>`);
 }).listen(Number(process.argv[2]), "127.0.0.1");
 JS
   printf 'const u = new URL(process.env.SHIP_READY_BASE_URL); require("fs").writeFileSync(process.env.SHIP_READY_STATE, JSON.stringify({ cookies: [{ name: "s", value: process.argv[2], domain: u.hostname, path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }], origins: [] }));\n' > "$1/sign-in.cjs"

@@ -135,7 +135,8 @@ async function judge(browser, origin, target, viewport, opts) {
   await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
   T("settled");
   // A signed-in render that shows the login screen has judged nothing: a fail by name, never a pass.
-  if (opts.signedIn && !(await page.locator(opts.signedIn).first().isVisible().catch(() => false)))
+  // Any visible match counts: a console often has one nav for phones and another for desktops.
+  if (opts.signedIn && !(await page.locator(opts.signedIn).locator("visible=true").count().catch(() => 0)))
     fail(row, `${target.label} did not render signed in (no ${opts.signedIn} on screen)`);
   const shot = `${target.label.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "home"}-${viewport.width}.png`;
   await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => {});

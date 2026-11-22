@@ -2,15 +2,20 @@
 // ship-ready-baseline: renders a repo's real output and fails on the automatic fails (row 18, 20 Nov 2026).
 // Called by .github/workflows/ship-ready-baseline.yml (workflow_call) with the caller repo checked out.
 // The caller's ship-ready.json says what to render:
-//   { "kind": "site|app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
+//   { "kind": "site|app|web-app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
 //     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"] (omitted: "/" + 7 from sitemap.xml),
 //     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"],
 //     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>",
-//     "allow": { "<placeholder phrase true for this repo>": "<why>" } }
+//     "allow": { "<placeholder phrase true for this repo>": "<why>" },
+//     "sign_in": { "cmd": "<signs in against $SHIP_READY_BASE_URL, writes a Playwright storageState to $SHIP_READY_STATE>",
+//                  "signed_in": "<CSS selector only a signed-in screen has>" } }
+// kind web-app is a console behind a sign-in: sign_in is required, every page renders with that session
+// at 390 and 1280 px, and a page without the signed_in selector is a fail (it rendered the login screen).
 // or a list of those (a site and an app in one repo).
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
 // one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync, statSync, readdirSync, appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { join, extname, resolve } from "node:path";
 import { spawn, execSync } from "node:child_process";
@@ -46,7 +51,11 @@ if (cfg.not_yet) {
   console.log("OUTPUT NOT_YET"); process.exit(0);
 }
 const kind = cfg.kind;
-if (!["site", "app", "email"].includes(kind)) stop(`kind must be site, app or email (got ${kind})`);
+if (!["site", "app", "web-app", "email"].includes(kind)) stop(`kind must be site, app, web-app or email (got ${kind})`);
+const signIn = cfg.sign_in;
+if (kind === "web-app" && !signIn) stop("kind web-app needs sign_in: { cmd, signed_in } (or not_yet with its reason)");
+if (signIn && (typeof signIn.cmd !== "string" || !signIn.cmd.trim() || typeof signIn.signed_in !== "string" || !signIn.signed_in.trim()))
+  stop("sign_in needs cmd (writes $SHIP_READY_STATE) and signed_in (a selector only a signed-in screen has)");
 mkdirSync(join(OUT, "shots"), { recursive: true });
 
 // The shared word list: words that read as machine-written, plus emoji and sparkle glyphs (from PBS phase 1).
@@ -107,7 +116,7 @@ async function judge(browser, origin, target, viewport, opts) {
   const row = { page: target.label, viewport: `${viewport.width}x${viewport.height}`, fails: [] };
   const t0 = Date.now(); const T = (s) => process.env.SRB_DEBUG && console.log(`    ${s} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   results.push(row);
-  const context = await browser.newContext({ viewport });
+  const context = await browser.newContext({ viewport, ...(opts.state ? { storageState: opts.state } : {}) });
   // Third-party analytics cannot answer a localhost origin (CORS); they are not the page's own errors.
   await context.route(/(cloudflareinsights\.com|clarity\.ms|googletagmanager\.com|google-analytics\.com|plausible\.io|connect\.facebook\.net)/, (r) => r.fulfill({ status: 204, body: "" }));
   const page = await context.newPage();
@@ -125,6 +134,10 @@ async function judge(browser, origin, target, viewport, opts) {
   await page.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
   T("settled");
+  // A signed-in render that shows the login screen has judged nothing: a fail by name, never a pass.
+  // Any visible match counts: a console often has one nav for phones and another for desktops.
+  if (opts.signedIn && !(await page.locator(opts.signedIn).locator("visible=true").count().catch(() => 0)))
+    fail(row, `${target.label} did not render signed in (no ${opts.signedIn} on screen)`);
   const shot = `${target.label.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "home"}-${viewport.width}.png`;
   await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => {});
   row.shot = `shots/${shot}`; T("shot");
@@ -193,14 +206,27 @@ if (kind === "email") {
   }
   for (const p of pages) targets.push({ label: p, url: `${srv.url}${p}` });
 }
-const viewports = kind === "site" ? [{ width: 390, height: 844 }, { width: 1280, height: 800 }] : [{ width: 390, height: 844 }];
+const viewports = kind === "site" || kind === "web-app" ? [{ width: 390, height: 844 }, { width: 1280, height: 800 }] : [{ width: 390, height: 844 }];
+// Signing in: the repo's own command, run against the server just started, writes the session.
+let state;
+const signInFails = [];
+if (signIn) {
+  // Outside OUT: the session is never part of the uploaded artifact.
+  state = join(mkdtempSync(join(tmpdir(), "ship-ready-")), "session.json");
+  try { execSync(signIn.cmd, { stdio: "inherit", shell: "/bin/bash", env: { ...process.env, SHIP_READY_BASE_URL: srv.url, SHIP_READY_STATE: state } }); }
+  catch (e) { signInFails.push(`the sign-in command failed (exit ${e.status ?? "?"}): ${signIn.cmd}`); }
+  let ok = false;
+  try { const st = JSON.parse(readFileSync(state, "utf8")); ok = (st.cookies?.length || 0) + (st.origins?.length || 0) > 0; } catch {}
+  if (!signInFails.length && !ok) signInFails.push(`the sign-in command wrote no session to $SHIP_READY_STATE: ${signIn.cmd}`);
+  if (signInFails.length) targets.length = 0; // nothing signed out is judged as if it were the app
+}
 const browser = await chromium.launch();
 const linkSet = new Set();
 for (const t of targets) for (const vp of viewports) {
   const t0 = Date.now();
   // A page that has not finished in PAGE_SECS is a fail by name, never a hung job.
   const row = await Promise.race([
-    judge(browser, srv.url, t, vp, { site: kind === "site" }),
+    judge(browser, srv.url, t, vp, { site: kind === "site", state, signedIn: signIn?.signed_in }),
     new Promise((r) => setTimeout(() => { const x = { page: t.label, viewport: `${vp.width}x${vp.height}`, fails: [`${t.label} did not finish rendering at ${vp.width} px within ${PAGE_SECS} s`] }; results.push(x); r(x); }, PAGE_SECS * 1000)),
   ]);
   console.log(`  ${t.label} @${vp.width}: ${row.fails.length} fail(s), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
@@ -223,7 +249,7 @@ if (kind === "site" && targets.length) {
 await browser.close(); srv.close();
 
 const rendered = results.filter((r) => r.shot).length;
-const lines = [...new Set(results.flatMap((r) => r.fails))];
+const lines = [...signInFails, ...new Set(results.flatMap((r) => r.fails))];
 if (rendered === 0) lines.unshift("ZERO pages rendered: list pages (or emails) in ship-ready.json that this check can open");
 writeFileSync(join(OUT, "baseline.json"), JSON.stringify({ kind, rendered, pass: lines.length === 0, pages: results.map(({ links, ...r }) => r) }, null, 2));
 const summary = [`## ship-ready-baseline: ${lines.length ? "FAIL" : "PASS"} (${rendered} page renders)`, ...lines.map((l) => `- ${l}`)].join("\n");

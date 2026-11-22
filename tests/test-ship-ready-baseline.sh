@@ -23,7 +23,7 @@ case_ "a clean page passes" '<h1>Tables and chairs for your party</h1><p>Deliver
 d="$W/dark"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important;color:#eee!important}}</style><h1>Tables and chairs</h1>'
 rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ] && grep -q '"dark": "shots/home-390-dark.png"' "$d/out/baseline.json"; } && ok "a page with a dark mode gets a -dark screenshot" || bad "dark shot (rc $rc)"
 d="$W/nodark"; page "$d/site" '<style>@keyframes s{to{transform:rotate(360deg)}}.s{display:inline-block;animation:s 1s linear infinite}</style><h1>Tables and chairs <span class="s">*</span></h1>'
-rc=$(judge "$d"); { [ "$rc" = 0 ] && ! ls "$d/out/shots" | grep -q dark && grep -q '"dark": "none"' "$d/out/baseline.json"; } && ok "an animated page with no dark mode says dark: none, no extra screenshot" || bad "no-dark (rc $rc)"
+rc=$(judge "$d"); { [ "$rc" = 0 ] && [ ! -e "$d/out/shots/home-390-dark.png" ] && grep -q '"dark": "none"' "$d/out/baseline.json"; } && ok "an animated page with no dark mode says dark: none, no extra screenshot" || bad "no-dark (rc $rc)"
 d="$W/jsdark"; page "$d/site" '<style>.dk{background:#111!important;color:#eee!important}</style><script>if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.className="dk"</script><h1>Tables and chairs</h1>'
 rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ]; } && ok "a theme picked in script at load is read after a reload" || bad "js dark (rc $rc)"
 d="$W/darkbudget"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important}}</style><h1>Tables and chairs</h1>'

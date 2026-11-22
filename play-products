@@ -1,0 +1,4 @@
+#!/bin/bash
+# Google Play one-time products from an app's code. How it decides and what it never does: store/play-products.mjs.
+#   cd ~/GitHub/boss-os && npm run -s vault:run -- ~/bin/play-products <repo>/apps/mobile/scripts/store/play-products.mjs [--apply]
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/store/app-tsx.sh" play-products "$@"

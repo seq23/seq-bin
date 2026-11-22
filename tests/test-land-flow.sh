@@ -81,7 +81,10 @@ case "$a" in
   "run list --workflow "*"--status in_progress"*|"run list --workflow "*"--status queued"*|"pr list --state merged"*) exit 0 ;;
   "pr view "*"state,mergeCommit"*) merged && echo "MERGED/$MERGESHA" || echo "OPEN/"; exit 0 ;;
   # pending-reads N: the next N checks reads answer pending (a queued run), then the normal answer.
-  "pr checks "*) n="$(cat "$FAKE_DIR/pending-reads" 2>/dev/null || echo 0)"
+  # no-checks: GitHub ran no CI; mergeable answers what the PR's merge state is (default MERGEABLE).
+  "pr view "*"--json mergeable "*) cat "$FAKE_DIR/mergeable" 2>/dev/null || echo MERGEABLE; exit 0 ;;
+  "pr checks "*) [ -f "$FAKE_DIR/no-checks" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }
+    n="$(cat "$FAKE_DIR/pending-reads" 2>/dev/null || echo 0)"
     if [ "$n" = forever ] || [ "$n" -gt 0 ] 2>/dev/null; then
       [ "$n" = forever ] || echo $((n - 1)) > "$FAKE_DIR/pending-reads"
       echo "[{\"name\":\"test\",\"bucket\":\"pending\",\"link\":\"https://github.com/o/r/actions/runs/555/job/1\"}$(cat "$FAKE_DIR/pending-also" 2>/dev/null)]"; exit 0
@@ -383,6 +386,15 @@ LAND_PENDING_WAIT=2 run_land approvalprep   # bounded: a land that ignored the f
 check "a failure beside a pending check stops at once: rc 1, not green — lint: fail" eval '[ "$RC" -eq 1 ] && has "lint: fail"'
 check "…after one read, no waiting" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
 check "…and nothing was merged" eval '! merge_called'
+
+echo "=== 10f. no checks on a conflicted PR is named a merge conflict (22 Nov 2026, boss-os #539) ==="
+fixture approvalprep; touch "$FAKE/no-checks"; echo CONFLICTING > "$FAKE/mergeable"
+run_land approvalprep
+check "conflicted, no checks: rc 1, NAMED STOP [MERGE_CONFLICT]" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [MERGE_CONFLICT]"'
+check "…and nothing was merged" eval '! merge_called'
+fixture approvalprep; touch "$FAKE/no-checks"
+run_land approvalprep
+check "mergeable, no checks: still 'no checks at all', never called a conflict" eval '[ "$RC" -eq 1 ] && has "no checks at all" && ! has MERGE_CONFLICT'
 
 echo "=== 10d. a spent allowance is waited out, then the land carries on (22 Nov 2026, #134 died at 09:35 CT) ==="
 fixture approvalprep; echo ratelimit-once > "$FAKE/checks"

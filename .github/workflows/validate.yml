@@ -129,6 +129,8 @@ jobs:
 
       - name: the dangerous-command guard refuses each irreversible command and lets a harmless one through
         run: ./tests/test-command-guard.sh
+      - name: the agent launch gate refuses general agents and full re-reviews of a failed PR, and never caps agents
+        run: ./tests/test-brief-gate.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the
       # Marketplace listings job, against a stand-in for wrangler. A store it cannot read is a named stop.
       - name: pnp-real-work.mjs lists real job photos newest first and never passes quietly on an unread store

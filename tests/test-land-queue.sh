@@ -92,6 +92,22 @@ printf '#!/bin/bash\necho "HTTP 502: Bad Gateway" >&2; exit 1\n' > "$W/bin/gh"
 out="$(queue_wait 2>&1)"; rc=$?
 { [ $rc -eq 75 ] && [ ! -e "$W/rate-waits" ] && ! grep -q "resets at" <<<"$out"; } || { echo "FAIL: a 502 in the queue was not could-not-verify (rc $rc): $out"; fail=1; }
 rm -f "$W/bin/date"
+# wait_run_bounded (e2e, deploy, promote waits): a refused read stops at once, rc 75, and never cancels
+# a run it could not see. (Before 22 Nov 2026 the read swallowed errors: "still running" to the ceiling, then a cancel.)
+cat > "$W/bin/gh" <<'SH'
+#!/bin/bash
+case "$*" in "run cancel"*) touch "$STATE/cancelled" ;; *) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;; esac
+SH
+chmod +x "$W/bin/gh"; rm -f "$W/cancelled" "$W/rate-waits" "$W/clock"
+cat > "$W/bin/date" <<'SH'
+#!/bin/bash
+if [ "$1" = "+%s" ]; then n=$(cat "$STATE/clock" 2>/dev/null || echo 1000); echo $((n+400)) > "$STATE/clock"; echo $n; else /bin/date "$@"; fi
+SH
+chmod +x "$W/bin/date"
+out="$(wait_run_bounded 904 600 2>"$W/err")"; rc=$?
+{ [ $rc -eq 75 ] && [ "$out" = unreadable ] && [ ! -e "$W/cancelled" ] && grep -q "NAMED STOP \[RUN_UNREADABLE\] .*the result of run 904 is unknown" "$W/err"; } \
+  || { echo "FAIL: wait_run_bounded read a refused run as still running (rc $rc, out '$out', cancelled: $([ -e "$W/cancelled" ] && echo yes || echo no)): $(cat "$W/err")"; fail=1; }
+rm -f "$W/bin/date"
 # recent lands
 cat > "$W/bin/gh" <<'SH'
 #!/bin/bash

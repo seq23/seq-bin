@@ -95,6 +95,7 @@ case "$a" in
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
   "pr view "*"files,body,comments"*) sed "s/@HEAD@/${HEADSHA:0:8}/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
+  "run view 555 "*headSha*) answer runsha "$HEADSHA" ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
   # merge=graphql500: GitHub's own 5xx answer to the merge mutation (30 Oct 2026), nothing merged.
@@ -157,7 +158,10 @@ case "$a" in
   "api -X POST repos/{owner}/{repo}/deployments "*) cat > "$FAKE_DIR/deploy-record"; echo 4242; exit 0 ;;   # …and the deployment (its JSON is kept)
   "run list "*) echo 900; exit 0 ;;
   "run watch "*) exit 0 ;;
-  "run view 900 "*conclusion*) echo success; exit 0 ;;
+  # main-pending N: main's run is still going for the next N conclusion reads (an empty conclusion), then success.
+  "run view 900 "*conclusion*) n="$(cat "$FAKE_DIR/main-pending" 2>/dev/null || echo 0)"
+    if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$FAKE_DIR/main-pending"; echo ""; exit 0; fi
+    echo success; exit 0 ;;
   "run view 900 "*status*) echo completed; exit 0 ;;
   "api "*) exit 0 ;;   # no Cloudflare check-runs posted
   *) echo "fake gh: unhandled: $a" >&2; exit 1 ;;
@@ -391,6 +395,22 @@ fixture approvalprep; echo ratelimit-once > "$FAKE/base"; echo ratelimit > "$FAK
 OUT="$(cd "$W/approvalprep" && PATH="$W/clock:$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=12 bash "$LAND" 7 2>&1)"; RC=$?
 check "two rate-limited reads, 8 s each, under a 12 s bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
 check "…one wait in the whole land, not one per read" [ "$(grep -c "allowance is spent; waiting" <<<"$OUT")" -eq 1 ]
+
+echo "=== 10e. the green run's sha read, rate-limited, is a wait, never the auth stop (22 Nov 2026: 4 lands stopped) ==="
+fixture approvalprep; echo ratelimit-once > "$FAKE/runsha"
+run_land approvalprep
+check "green-run sha read rate-limited once: waited for the reset, merged, rc 0" eval '[ "$RC" -eq 0 ] && merge_called && has "allowance is spent; waiting"'
+check "…and never called it an auth failure" eval '! has "could not verify (auth)"'
+fixture approvalprep; echo ratelimit > "$FAKE/runsha"
+OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=1 bash "$LAND" 7 2>&1)"; RC=$?
+check "spent past the bound at the green-run sha: exit 75, could not verify (rate limit), not (auth), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! has "could not verify (auth)" && ! merge_called'
+
+echo "=== 10f. main's run is polled with one read per poll, never gh run watch (22 Nov 2026: the hourly allowance hit 0) ==="
+fixture approvalprep; echo 3 > "$FAKE/main-pending"
+run_land approvalprep
+check "watched to success after 3 polls: rc 0" eval '[ "$RC" -eq 0 ] && has "completed success"'
+check "…never gh run watch (it asks every 3 s)" eval '! grep -q "^run watch" "$FAKE/calls"'
+check "…4 conclusion reads and ONE status read, not one of each per poll" eval '[ "$(grep -c "^run view 900 .*conclusion" "$FAKE/calls")" -eq 4 ] && [ "$(grep -c "^run view 900 .*status" "$FAKE/calls")" -eq 1 ]'
 
 echo "=== 10c. a stacked PR (base is not main) is refused (22 Nov 2026, westpeek-live #122) ==="
 fixture approvalprep; echo work/random-role-codes > "$FAKE/base"

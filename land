@@ -606,7 +606,7 @@ wait_run_bounded() { # $1 run id  $2 ceiling seconds
       gh run cancel "$rid" >/dev/null 2>&1 || true
       echo "cancelled-at-ceiling"; return 1
     fi
-    sleep 20
+    sleep "${LAND_RUN_POLL:-30}"
   done
   echo "$conc"
 }
@@ -852,7 +852,7 @@ queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 o
     deadline=$(( $(date +%s) + ceil ))
     while [ -z "$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)" ]; do
       [ "$(date +%s)" -lt "$deadline" ] || { echo "NAMED STOP [QUEUE_RUN_PAST_CEILING] $wf run $rid on main ran past $((ceil / 60)) min; nothing was merged. Read it: gh run view $rid"; return 1; }
-      sleep 20
+      sleep "${LAND_RUN_POLL:-30}"
     done
     echo "     queue: $wf run $rid finished: $(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
   done
@@ -1425,16 +1425,18 @@ fi
 # A transient API error must not end the wait either — that is the same "silence looks like
 # failure" trap one layer down. Read errors are tolerated for a while and only become an answer
 # if they persist to the deadline.
-gh run watch "$RID" >/dev/null 2>&1 || true
+# ONE READ PER POLL, 30 s apart (22 Nov 2026: the 5,000-call hourly allowance hit 0 twice, and 4 lands stopped).
+# `gh run watch` asked GitHub every 3 s (the run and its jobs, each poll) for the whole run; this loop asks for
+# the conclusion alone every LAND_RUN_POLL seconds. Status is read once, for the line below.
 CONC=""; STAT=""
 DEADLINE=$(( $(date +%s) + 2700 ))   # 45 min: CI here runs ~14 min, twice over is ample
 while :; do
   CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
-  STAT="$(gh run view "$RID" --json status -q '.status' 2>/dev/null)"
   [ -n "$CONC" ] && break
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
-  sleep 20
+  sleep "${LAND_RUN_POLL:-30}"
 done
+STAT="$(gh run view "$RID" --json status -q '.status' 2>/dev/null)"
 echo "     ${STAT:-unknown} ${CONC:-unreadable}"
 case "$CONC" in
   success) : ;;
@@ -1456,13 +1458,12 @@ case "$CONC" in
       say "     cancelled with NO later commit on main — nothing superseded it. Re-running $RID."
       gh run rerun "$RID" >/dev/null 2>&1 || die "could not re-run $RID. #$PR IS MERGED and NOT deployed; main has no green run for $MSHA. Re-run it by hand: gh run rerun $RID"
       sleep 15
-      gh run watch "$RID" >/dev/null 2>&1 || true
       CONC=""; DEADLINE=$(( $(date +%s) + 2700 ))
       while :; do
         CONC="$(gh run view "$RID" --json conclusion -q '.conclusion' 2>/dev/null)"
         [ -n "$CONC" ] && [ "$CONC" != "cancelled" ] && break
         [ "$(date +%s)" -ge "$DEADLINE" ] && break
-        sleep 20
+        sleep "${LAND_RUN_POLL:-30}"
       done
       echo "     re-run: ${CONC:-unreadable}"
       case "$CONC" in

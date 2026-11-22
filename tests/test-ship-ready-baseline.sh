@@ -34,6 +34,9 @@ case_ "an emoji fails" '<h1>Party time 🎉</h1>' 1 'emoji or sparkle'
 case_ "© is text, not an emoji" '<p>© 2026 Porch and Party</p>' 0 "OUTPUT PASS"
 case_ "sideways scroll at 390 px fails" '<div style="width:900px">wide</div>' 1 'scrolls sideways at 390'
 case_ "a broken image fails" '<img src="/missing.png" alt="x">' 1 'missing.png'
+case_ "text under 12 px fails" '<p style="font-size:11px">Small print</p>' 1 'text under 12 px: 11px "Small print"'
+case_ "a ::before label under 12 px fails (how-we-know #416 phone tables)" '<style>td::before{content:attr(data-label);display:block;font-size:11.5px}</style><table><tr><td data-label="Cadence">Weekly</td></tr></table>' 1 'text under 12 px: 11.5px "Cadence"'
+case_ "a ::before label at 12 px passes, and an icon glyph is not text" '<style>td::before{content:attr(data-label);display:block;font-size:12px}i::after{content:"→";font-size:8px}</style><table><tr><td data-label="Cadence">Weekly</td></tr></table><p>Next <i></i></p>' 0 "OUTPUT PASS"
 d="$W/nodesc"; page "$d/site" '<p>Hello</p>'; sed -i.bak 's#<meta name="description" content="Party rentals in Memphis.">##' "$d/site/index.html"
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'no meta description' "$d/log"; } && ok "a missing meta description fails" || bad "no description (rc $rc)"
 d="$W/no404"; page "$d/site" '<p>Hello</p>'; rm "$d/site/404.html"

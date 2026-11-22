@@ -261,7 +261,7 @@ gh pr merge 1 --squash >/dev/null; a3="$(gh api repos/o/r/actions/runs/1)"
 [ "$a3" = "$a1" ] && [ "$(grep -c ' 304 api' "$T/share/calls.log")" = 2 ] || fail "after a write the read did not revalidate its ETag (a 304): $(tail -2 "$T/share/calls.log")"
 export FAKE_ETAG=e2; a4="$(gh api repos/o/r/actions/runs/1)"
 [ "$a4" != "$a1" ] && grep -q '^answer' <<<"$a4" || fail "a changed ETag was served the old answer: '$a4'"
-export FAKE_ETAG=e2; rm -f "$(ls "$T"/share/resp/* | grep -v '\.etag$')"; : > "$T/calls"
+export FAKE_ETAG=e2; for f in "$T"/share/resp/*; do [[ $f == *.etag ]] || rm -f "$f"; done; : > "$T/calls"
 a5="$(gh api repos/o/r/actions/runs/1)"
 [ -n "$a5" ] && grep -q '^answer' <<<"$a5" && ! grep -q 'If-None-Match' "$T/calls" || fail "a missing body with a kept ETag gave '$a5' ($(cat "$T/calls"))"
 pass=$((pass + 1))

@@ -27,8 +27,9 @@ if used is None and d.get("transcript_path"):
 parts = [c(model, "1")]
 if used is not None:
     k = f"{used//1000}K/{size//1000}K ({pct:.0f}%)"
-    col = "31;1" if used >= 700_000 else "33" if used >= 450_000 else "32"
-    tag = "  ← HAND OFF" if used >= 450_000 else ""
+    # 22 Nov 2026 (her ask, token review): yellow from 150K, red + HAND OFF at 200K.
+    col = "31;1" if used >= 200_000 else "33" if used >= 150_000 else "32"
+    tag = "  ← HAND OFF" if used >= 200_000 else ""
     parts.append("ctx " + c(k + tag, col))
 rl = d.get("rate_limits") or {}
 wk = rl.get("seven_day") or {}

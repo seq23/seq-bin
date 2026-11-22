@@ -1018,16 +1018,24 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # files ONE Open Loops row (one per repo#PR, the intake upserts) for the next day: the merged diff is
 # checked against every automatic fail in engineering.md. It never blocks or fails the land; a failed post is printed loudly
 # with the command that files it by hand.
+# --- open_loops begin (land-after evals this block verbatim: the ONE way ~/bin's bash posts a row) ---
+# open_loops_post '<json body>' -> prints the poster's output; rc 0 posted | non-zero not posted.
+# The token comes from the Boss OS vault at run time (LAND_OPEN_LOOPS_NO_VAULT=1: from the environment, tests).
+OPEN_LOOPS_POSTER="${LAND_DIR:-$HOME/bin}/open-loops.mjs"
+open_loops_post() {
+  local boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
+  if [ "${LAND_OPEN_LOOPS_NO_VAULT:-}" = 1 ]; then node "$OPEN_LOOPS_POSTER" "$1" 2>&1
+  else (cd "$boss" 2>/dev/null && npm run -s vault:run -- node "$OPEN_LOOPS_POSTER" "$1" 2>&1); fi
+}
+# --- open_loops end ---
 file_bypass_check() {
-  local slug body out poster="${LAND_DIR:-$HOME/bin}/open-loops.mjs" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
+  local slug body out poster="$OPEN_LOOPS_POSTER" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
     title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",
     finish_line: "every automatic fail in engineering.md checked on the merged diff; fails fixed or dated",
     next_step: "Read the merged change against the automatic fails in engineering.md; fix each fail now or give it a dated row."}')"
-  if [ "${LAND_OPEN_LOOPS_NO_VAULT:-}" = 1 ]; then out="$(node "$poster" "$body" 2>&1)"
-  else out="$(cd "$boss" 2>/dev/null && npm run -s vault:run -- node "$poster" "$body" 2>&1)"; fi
-  if [ $? -eq 0 ]; then echo "     engineering check of $slug#$PR filed on Open Loops for tomorrow ($(tail -1 <<<"$out"))"; return 0; fi
+  if out="$(open_loops_post "$body")"; then echo "     engineering check of $slug#$PR filed on Open Loops for tomorrow ($(tail -1 <<<"$out"))"; return 0; fi
   printf '\n\033[31;1mNAMED STOP [BYPASS_CHECK_NOT_FILED] #%s LANDED, but its engineering check was NOT filed on Open Loops: %s\nFile it by hand:  cd %s && npm run -s vault:run -- node %s '"'"'%s'"'"'\033[0m\n' \
     "$PR" "$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")" "$boss" "$poster" "$body"
   return 0

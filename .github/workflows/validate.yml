@@ -137,6 +137,11 @@ jobs:
       # 9 Nov 2026: the compaction hook overwrote a hand-written Today status in ~/HANDOFF.md.
       - name: handoff-on-compact.sh keeps a same-day hand-written status and replaces only its own note
         run: ./tests/test-handoff-keeps-curated.sh
+      # 22 Nov 2026 (her words: "Hand waiting to a script, not an agent"): land-after lands a PASSed PR
+      # detached and writes the result to the task sheet. Refuses no-PASS / twice / bad slugs; never PASS
+      # on an unread answer or a land that merged nothing; cleanup only done/ and logs/ past 14 days.
+      - name: land-after lands detached, refuses what it should, never reads could-not-check as PASS
+        run: ./land-after --self-test
 
       - name: ci-sweep-audit.sh must catch a weakening
         run: ./tests/test-audit-guard.sh

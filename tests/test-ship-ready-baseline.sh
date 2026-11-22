@@ -43,6 +43,24 @@ case_ "Spanish \"todo\" is not a placeholder" '<p lang="es">Para todo el mundo</
 case_ "a page's /api call is server code, not a broken asset" '<p>Hi</p><script>fetch("/api/track-event", { method: "POST" })</script>' 0 "OUTPUT PASS"
 d="$W/allow"; page "$d/site" '<p>App coming soon. TODO</p>'; echo '{ "kind": "site", "serve": "site", "pages": ["/"], "allow": { "coming soon": "the app is not in the stores yet" } }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'placeholder text: "TODO"' "$d/log" && ! grep -q '"coming soon"' "$d/log"; } && ok "an allowed phrase (with its reason) passes; the TODO beside it still fails" || bad "allow (rc $rc)"
+# live_origin: the site's own API on another host answers CORS for the live origin only. Without live_origin the
+# local render is refused (a console error); with it the page passes; naming an origin the API refuses still fails.
+API_PORT=$((20000 + RANDOM % 20000))
+node -e 'require("http").createServer((q,r)=>{r.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"https://x.test"});r.end("{\"left\":7}")}).listen(+process.argv[1],"127.0.0.1")' "$API_PORT" & API_PID=$!
+for _ in $(seq 1 50); do curl -s "http://127.0.0.1:$API_PORT/" >/dev/null && break; sleep 0.1; done
+API_BODY="<p id=n>Places left</p><script>fetch('http://127.0.0.1:$API_PORT/count').then(r=>r.json()).then(j=>{document.getElementById('n').textContent=j.left+' places left'})</script>"
+for want in none https://x.test https://other.test; do
+  d="$W/live-${want//[^a-z]/}"; page "$d/site" "$API_BODY"
+  [ "$want" = none ] || echo "{ \"kind\": \"site\", \"serve\": \"site\", \"pages\": [\"/\"], \"live_origin\": \"$want\" }" > "$d/ship-ready.json"
+  rc=$(judge "$d")
+  case "$want" in
+    https://x.test) { [ "$rc" = 0 ] && grep -q 'OUTPUT PASS' "$d/log"; } && ok "live_origin: the API that allows the live origin answers the render" || bad "live_origin allowed (rc $rc): $(grep -E '^- ' "$d/log" | head -2 | tr '\n' ' ')" ;;
+    *) { [ "$rc" = 1 ] && grep -q 'console error' "$d/log"; } && ok "live_origin $want: a CORS refusal still fails" || bad "live_origin $want (rc $rc)" ;;
+  esac
+done
+kill "$API_PID" 2>/dev/null
+d="$W/badlive"; mkdir -p "$d"; echo '{ "kind": "site", "serve": ".", "live_origin": "http://x.test" }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'live_origin must be an https origin' "$d/log"; } && ok "a non-https live_origin is a named stop" || bad "bad live_origin (rc $rc)"
 d="$W/badcfg"; mkdir -p "$d"; echo '{ "kind": "poster" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'SHIP_READY_CONFIG' "$d/log"; } && ok "a bad config is a named stop (exit 2)" || bad "bad config (rc $rc)"
 [ "$fails" = 0 ] && echo "test-ship-ready-baseline: every automatic fail is caught and a clean page passes" || exit 1

@@ -1,0 +1,199 @@
+#!/bin/bash
+# gh — THE SHARED GITHUB ALLOWANCE (owner, 22 Nov 2026: "landing shit takes fucking forever").
+#
+# WHY THIS EXISTS. On 22 Nov 2026 every agent on this Mac polled GitHub on its own: `gh pr checks --watch`
+# (every 10 s by default), `gh run watch` (every 3 s), `until gh run view …; do sleep 20` loops, and `land`
+# itself. Together they spent the account's 5,000 REST calls an hour before 13:37Z and again from 13:35Z,
+# so nothing on the Mac could read CI state, and `land` could not tell green from red for an hour.
+#
+# This file sits first on PATH (~/bin) and stands in front of the real gh, so EVERY caller (agents, land,
+# land-after, ci-sweep, scripts) shares one allowance without changing a line of theirs:
+#   1. ONE SHARED CACHE. A read (gh api GET, run view/list, pr view/list/checks, issue/workflow/repo/
+#      release view/list) with the same words, in the same repo, inside GH_SHARE_TTL seconds (20) is
+#      answered from ~/.cache/gh-share, so ten agents watching one PR cost one call, not ten. Only a
+#      successful answer is kept, and never past its TTL: an expired entry is fetched again, and if that
+#      fetch fails the failure is returned, never the old answer ("green" is never served stale).
+#   2. WATCHERS BACK OFF. `gh run watch` and `gh pr checks --watch` poll no faster than every
+#      GH_SHARE_WATCH_SECS (30) seconds; a shorter --interval is raised to it.
+#   3. LOW ALLOWANCE WAITS, IT DOES NOT FAIL. Before a read reaches GitHub, the allowance left (from
+#      GitHub's free rate_limit endpoint, re-read every 30 s and shared) is checked; at or under
+#      GH_SHARE_FLOOR (300) the read waits for the reset in ONE bounded sleep, then runs. The floor is
+#      kept for writes: a merge, a cancel, a deploy dispatch or a PR comment is never held (landing first).
+#      A reset further away than GH_SHARE_MAX_WAIT (3700 s) is a NAMED STOP, exit 75 (could not verify).
+#   4. NO POLLER TAKES MORE THAN ITS SHARE. Each caller (its process group: one agent's Bash call, one
+#      land run) may send GH_SHARE_PER_CALLER (500, a tenth of the hour) reads to GitHub in any hour;
+#      over that it waits until its oldest call in the window is an hour old. Cache hits are free.
+# Every call is logged, one line, to ~/.cache/gh-share/calls.log (epoch, caller, kind, subcommand), so
+# calls per hour are measured, not guessed:
+#   awk -v c="$(( $(date +%s) - 3600 ))" '$1 > c {n[$3]++} END {for (k in n) print k, n[k]}' ~/.cache/gh-share/calls.log
+# (miss, write, watch and graphql reached GitHub; hit was answered here; wait/share/stop are holds).
+#
+# FAIL TOWARD WORKING. Anything this wrapper cannot do (no cache dir, no real gh found twice, a TTY
+# caller) passes the command straight to the real gh unchanged. A terminal on stdout is never cached
+# (her own Terminal gets gh exactly as it is).
+#
+# Settings (env): GH_SHARE_REAL (the real gh), GH_SHARE_DIR, GH_SHARE_TTL, GH_SHARE_WATCH_SECS,
+# GH_SHARE_FLOOR, GH_SHARE_MAX_WAIT, GH_SHARE_PER_CALLER, GH_SHARE_OFF=1 (plain pass-through).
+set -u
+
+real_gh() {
+  if [ -n "${GH_SHARE_REAL:-}" ]; then printf '%s' "$GH_SHARE_REAL"; return; fi
+  local self dir
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  local IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$self" ] && continue
+    [ -x "$dir/gh" ] && [ ! -d "$dir/gh" ] && { printf '%s' "$dir/gh"; return; }
+  done
+}
+REAL="$(real_gh)"
+[ -n "$REAL" ] || { echo "gh: the real gh is not on PATH (only ~/bin/gh, the shared-allowance wrapper)" >&2; exit 127; }
+[ "${GH_SHARE_OFF:-}" = 1 ] && exec "$REAL" "$@"
+
+DIR="${GH_SHARE_DIR:-$HOME/.cache/gh-share}"
+mkdir -p "$DIR/resp" "$DIR/callers" 2>/dev/null && [ -w "$DIR" ] || exec "$REAL" "$@"
+TTL="${GH_SHARE_TTL:-20}"
+WATCH_SECS="${GH_SHARE_WATCH_SECS:-30}"
+FLOOR="${GH_SHARE_FLOOR:-300}"
+MAX_WAIT="${GH_SHARE_MAX_WAIT:-3700}"
+PER_CALLER="${GH_SHARE_PER_CALLER:-500}"
+NOW="$(date +%s)"
+CALLER="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"; [ -n "$CALLER" ] || CALLER=$$
+
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+log() { printf '%s %s %s %s\n' "$(date +%s)" "$CALLER" "$1" "${2:-}" >> "$DIR/calls.log" 2>/dev/null || true; }
+
+# --- classify: read (cacheable) | watch | graphql | write ---------------------------------------------
+classify() { # args -> one word
+  local sub="${1:-}" verb="${2:-}" a method="" body=0
+  case "$sub" in
+    api)
+      [ "$verb" = graphql ] && { echo graphql; return; }
+      shift
+      while [ $# -gt 0 ]; do
+        a="$1"
+        case "$a" in
+          -X|--method) method="${2:-}"; shift ;;
+          -X*) method="${a#-X}" ;;
+          --method=*) method="${a#--method=}" ;;
+          -f|-F|--field|--raw-field|--input) body=1; shift ;;
+          -f*|-F*|--field=*|--raw-field=*|--input=*) body=1 ;;
+          rate_limit|/rate_limit) echo free; return ;;
+        esac
+        shift
+      done
+      method="$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')"
+      if [ "$method" = GET ] || { [ -z "$method" ] && [ "$body" = 0 ]; }; then echo read; else echo write; fi ;;
+    run)
+      case "$verb" in view|list) has_flag --web "$@" && echo write || echo read ;; watch) echo watch ;; *) echo write ;; esac ;;
+    pr)
+      case "$verb" in
+        checks) if has_flag --watch "$@"; then echo watch; else echo read; fi ;;
+        view|list|diff) has_flag --web "$@" && echo write || echo read ;;
+        *) echo write ;;
+      esac ;;
+    issue|workflow|repo|release)
+      case "$verb" in view|list) has_flag --web "$@" && echo write || echo read ;; *) echo write ;; esac ;;
+    *) echo write ;;
+  esac
+}
+has_flag() { local f="$1" a; shift; for a in "$@"; do [ "$a" = "$f" ] && return 0; done; return 1; }
+
+# --- the allowance ------------------------------------------------------------------------------------
+# rate file: "<remaining> <reset epoch> <read at epoch>", from the rate_limit endpoint (costs nothing).
+allowance() { # -> "<remaining> <reset>"
+  local f="$DIR/rate" rem reset at line
+  line="$(cat "$f" 2>/dev/null)"
+  read -r rem reset at <<<"$line"
+  if [ -z "${at:-}" ] || [ $(( NOW - at )) -ge 30 ]; then
+    line="$("$REAL" api rate_limit --jq '"\(.resources.core.remaining) \(.resources.core.reset)"' 2>/dev/null)"
+    read -r rem reset <<<"$line"
+    if [[ "${rem:-}" =~ ^[0-9]+$ && "${reset:-}" =~ ^[0-9]+$ ]]; then
+      printf '%s %s %s\n' "$rem" "$reset" "$NOW" > "$f.$$" && mv -f "$f.$$" "$f"
+    else
+      echo "unknown 0"; return   # unreadable: the call goes ahead and GitHub answers for itself
+    fi
+  fi
+  echo "$rem $reset"
+}
+wait_for_reset() { # holds a read while the allowance is at or under the floor (one bounded sleep)
+  local rem reset secs
+  read -r rem reset <<<"$(allowance)"
+  [[ "$rem" =~ ^[0-9]+$ ]] || return 0
+  [ "$rem" -gt "$FLOOR" ] && return 0
+  secs=$(( reset - NOW + 5 )); [ "$secs" -ge 1 ] || secs=1
+  if [ "$secs" -gt "$MAX_WAIT" ]; then
+    echo "NAMED STOP [GH_ALLOWANCE_SPENT] GitHub's hourly allowance is down to $rem and resets in ${secs}s (over the ${MAX_WAIT}s wait); run again after $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M)" >&2
+    log stop "$*"; exit 75
+  fi
+  echo "gh-share: GitHub allowance is down to $rem (floor $FLOOR, kept for merges and deploys); this read waits ${secs}s for the $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M) reset" >&2
+  log wait "$secs"
+  sleep "$secs"
+  rm -f "$DIR/rate"; NOW="$(date +%s)"
+}
+hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
+  local f="$DIR/callers/$CALLER" n oldest secs
+  [ -f "$f" ] && awk -v c=$(( NOW - 3600 )) '$1 > c' "$f" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f"
+  n=0; [ -f "$f" ] && n="$(wc -l < "$f" | tr -d ' ')"
+  if [ "$n" -ge "$PER_CALLER" ]; then
+    oldest="$(head -1 "$f")"; secs=$(( oldest + 3600 - NOW + 1 )); [ "$secs" -ge 1 ] || secs=1
+    [ "$secs" -le "$MAX_WAIT" ] || secs="$MAX_WAIT"
+    echo "gh-share: this caller has sent $n GitHub reads this hour (its share is $PER_CALLER); waiting ${secs}s — poll less often or wait in one bounded call" >&2
+    log share "$secs"
+    sleep "$secs"; NOW="$(date +%s)"
+  fi
+  echo "$NOW" >> "$f"
+  # callers gone for an hour are forgotten
+  find "$DIR/callers" -type f -mmin +60 -delete 2>/dev/null || true
+}
+
+KIND="$(classify "$@")"
+
+case "$KIND" in
+  free|graphql|write)
+    log "$KIND" "${1:-} ${2:-}"
+    exec "$REAL" "$@" ;;
+  watch)
+    # Raise the poll interval to the floor; leave every other word alone.
+    args=() iv="" i=0
+    for a in "$@"; do args+=("$a"); done
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      case "${args[$i]}" in
+        -i|--interval) iv="${args[$((i + 1))]:-}"; [[ "$iv" =~ ^[0-9]+$ ]] && [ "$iv" -lt "$WATCH_SECS" ] && args[i + 1]="$WATCH_SECS" ;;
+        --interval=*) iv="${args[$i]#--interval=}"; [[ "$iv" =~ ^[0-9]+$ ]] && [ "$iv" -lt "$WATCH_SECS" ] && args[i]="--interval=$WATCH_SECS" ;;
+      esac
+    done
+    [ -n "$iv" ] || args+=(--interval "$WATCH_SECS")
+    wait_for_reset "$@"
+    log watch "${1:-} ${2:-}"
+    exec "$REAL" "${args[@]}" ;;
+esac
+
+# --- a read ----------------------------------------------------------------------------------------------
+[ -t 1 ] && { wait_for_reset "$@"; log read-tty "${1:-} ${2:-}"; exec "$REAL" "$@"; }
+repo_hint=""
+has_flag -R "$@" || has_flag --repo "$@" || repo_hint="$(git config --get remote.origin.url 2>/dev/null)"
+key="$(printf '%s\0' "$@" "${GH_REPO:-}" "${GH_HOST:-}" "$repo_hint" | shasum -a 256 2>/dev/null | cut -c1-40)"
+[ -n "$key" ] || exec "$REAL" "$@"
+cache="$DIR/resp/$key"
+if [ -f "$cache" ] && [ $(( NOW - $(mtime "$cache") )) -lt "$TTL" ]; then
+  log hit "${1:-} ${2:-}"
+  # the first line is the exit code the answer came with; the rest is its stdout, byte for byte
+  { IFS= read -r crc; cat; } < "$cache"; exit "${crc:-0}"
+fi
+wait_for_reset "$@"
+hold_share
+log miss "${1:-} ${2:-}"
+tmp="$cache.$$"
+"$REAL" "$@" > "$tmp"; rc=$?
+# A real answer is kept: 0, and 8 from `gh pr checks` (checks still pending). Anything else (an error, a
+# failed check list, GitHub down) is never cached, and it removes the old answer too.
+if [ "$rc" -eq 0 ] || { [ "$rc" -eq 8 ] && [ "${1:-}" = pr ]; }; then
+  cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"; rm -f "$tmp"
+else
+  cat "$tmp"; rm -f "$tmp" "$cache"
+fi
+# responses older than an hour are cleared now and then (a cheap sweep, about one call in fifty)
+[ $(( NOW % 50 )) -eq 0 ] && find "$DIR/resp" -type f -mmin +60 -delete 2>/dev/null
+exit "$rc"

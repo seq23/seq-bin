@@ -19,7 +19,8 @@ pass=0
 fail() { echo "FAIL: $*"; exit 1; }
 fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER FAKE_RC; }
 real_calls() { grep -vc '^api rate_limit' "$T/calls"; }
-gh() { "$HERE/gh" "$@" </dev/null; }
+GH_UNDER_TEST="${GH_SHARE_UNDER_TEST:-$HERE/gh}"
+gh() { "$GH_UNDER_TEST" "$@" </dev/null; }
 
 # 1. ten agents asking the same thing inside the TTL cost GitHub one call
 fresh
@@ -55,7 +56,7 @@ pass=$((pass + 1))
 
 # 5. a write is never held: a merge at 0 allowance goes straight through
 fresh; export FAKE_REM=0 FAKE_RESET=$(( $(date +%s) + 3000 ))
-t0=$(date +%s); gh pr merge 5 --squash >/dev/null; rc=$?; t1=$(date +%s)
+t0=$(date +%s); timeout 10 "$GH_UNDER_TEST" pr merge 5 --squash </dev/null >/dev/null; rc=$?; t1=$(date +%s)
 [ "$rc" = 0 ] && [ $((t1 - t0)) -le 1 ] || fail "a merge was held at a spent allowance (rc $rc, $((t1 - t0)) s)"
 grep -q '^pr merge 5' "$T/calls" || fail "the merge never reached gh"
 gh api -X POST repos/x/y/dispatches -f event_type=go >/dev/null || fail "a dispatch (POST) was held"
@@ -63,7 +64,7 @@ pass=$((pass + 1))
 
 # 6. a reset beyond the bounded wait is a named stop, exit 75, never a hang or a fake answer
 fresh; export FAKE_REM=0 FAKE_RESET=$(( $(date +%s) + 3000 )) GH_SHARE_MAX_WAIT=60
-out="$(gh run list 2>"$T/err")"; rc=$?
+out="$(timeout 10 "$GH_UNDER_TEST" run list </dev/null 2>"$T/err")"; rc=$?
 [ "$rc" = 75 ] && grep -q 'NAMED STOP \[GH_ALLOWANCE_SPENT\]' "$T/err" && [ -z "$out" ] || fail "spent allowance: rc $rc, want 75 + named stop and no answer"
 pass=$((pass + 1))
 
@@ -94,4 +95,14 @@ fresh; gh run view 2 >/dev/null; gh run view 2 >/dev/null; gh pr merge 2 >/dev/n
 [ "$(awk '{print $3}' "$T/share/calls.log" | sort | paste -sd, -)" = "hit,miss,write" ] || fail "calls.log: $(cat "$T/share/calls.log")"
 pass=$((pass + 1))
 
-echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held, watchers back off, a share per poller"
+# 11. a write drops every kept answer: land's "did it merge?" read after the merge reaches GitHub
+fresh
+gh pr view 6 --json state >/dev/null; gh pr view 6 --json state >/dev/null
+[ "$(real_calls)" = 1 ] || fail "the second read inside the TTL was not shared ($(real_calls) calls)"
+FAKE_RC=3 gh pr merge 6 --squash >/dev/null; rc=$?
+[ "$rc" = 3 ] || fail "the write's own exit code was lost (rc $rc, want 3)"
+out="$(gh pr view 6 --json state)"
+[ "$(real_calls)" = 3 ] && ! grep -q answer-1 <<<"$out" || fail "a read after a merge was answered from before it ($(real_calls) calls): $out"
+pass=$((pass + 1))
+
+echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers back off, a share per poller"

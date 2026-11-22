@@ -151,9 +151,18 @@ hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
 KIND="$(classify "$@")"
 
 case "$KIND" in
-  free|graphql|write)
+  free|graphql)
     log "$KIND" "${1:-} ${2:-}"
     exec "$REAL" "$@" ;;
+  write)
+    # A write changes what the reads would say (a merge makes the PR MERGED, a dispatch adds a run), so
+    # every kept answer is dropped before it and again after it: a read that ran during the write is not
+    # kept either, and land's own "did it merge?" read after the merge always reaches GitHub.
+    log write "${1:-} ${2:-}"
+    rm -f "$DIR"/resp/* 2>/dev/null
+    "$REAL" "$@"; rc=$?
+    rm -f "$DIR"/resp/* 2>/dev/null
+    exit "$rc" ;;
   watch)
     # Raise the poll interval to the floor; leave every other word alone.
     args=() iv="" i=0
@@ -188,11 +197,11 @@ log miss "${1:-} ${2:-}"
 tmp="$cache.$$"
 "$REAL" "$@" > "$tmp"; rc=$?
 # A real answer is kept: 0, and 8 from `gh pr checks` (checks still pending). Anything else (an error, a
-# failed check list, GitHub down) is never cached, and it removes the old answer too.
+# failed check list, GitHub down) is never cached; an expired answer is never served, so none is kept.
 if [ "$rc" -eq 0 ] || { [ "$rc" -eq 8 ] && [ "${1:-}" = pr ]; }; then
   cat "$tmp"; { echo "$rc"; cat "$tmp"; } > "$tmp.k" && mv -f "$tmp.k" "$cache"; rm -f "$tmp"
 else
-  cat "$tmp"; rm -f "$tmp" "$cache"
+  cat "$tmp"; rm -f "$tmp"
 fi
 # responses older than an hour are cleared now and then (a cheap sweep, about one call in fifty)
 [ $(( NOW % 50 )) -eq 0 ] && find "$DIR/resp" -type f -mmin +60 -delete 2>/dev/null

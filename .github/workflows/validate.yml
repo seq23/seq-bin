@@ -96,6 +96,10 @@ jobs:
       # and one that patches a function fixed in the last 30 days without "Patch or rebuild:".
       - name: land's gates refuse what they should (ship-ready, launch-ready, baseline, patch history)
         run: ./tests/test-land-gates.sh
+      # 22 Nov 2026: agents polling GitHub one by one spent the account's 5,000 REST calls an hour twice in a
+      # morning. ~/bin/gh shares one cache and one allowance; writes are never held and drop the cache.
+      - name: gh shares one GitHub allowance (cache, floor wait, writes never held, watchers back off)
+        run: ./tests/test-gh-share.sh
       # Row 18 (20 Nov 2026): the shared ship-ready-baseline tool catches every automatic fail on a
       # fixture site, passes a clean one, and fails on zero pages rendered.
       - name: ship-ready-baseline catches each automatic fail and passes a clean page

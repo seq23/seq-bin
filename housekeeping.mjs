@@ -39,10 +39,9 @@ const dayIn = (ms, tz) => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year:
 // Overridable for the test only; the job itself reads the clock.
 const TODAY_CT = process.env.HOUSEKEEPING_TODAY || dayIn(NOW, "America/Chicago");
 const TODAY_LOCAL = process.env.HOUSEKEEPING_TODAY || dayIn(NOW, undefined); // drive-backup names its log in the Mac's zone
-const TOMORROW = dayIn(Date.parse(`${TODAY_CT}T12:00:00Z`) + DAY, "UTC");
 const tilde = (p) => (p.startsWith(HOME + "/") ? "~/" + p.slice(HOME.length + 1) : p);
 const slug = (p) => tilde(p).replace(/^~\//, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase().slice(0, 70) || "HOME";
-const base = { repo: REPO, owner: "claude", business: "personal", next_date: TOMORROW };
+const base = { repo: REPO, owner: "claude", business: "personal", next_date: TODAY_CT }; // due today: what it finds can be fixed the day it is found (22 Nov 2026)
 
 function readState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch { return { unsaved: [], rules: [] }; }

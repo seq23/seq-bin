@@ -189,7 +189,8 @@ status() {
 # ============================== worker (detached) ==============================
 worker() {
   local DIR="$1" REPO="$2" PR="$3" SLUG="$4" LOG="$5" LOCK="$6" SLOCK="$7" HEADSHA="$8"
-  local THENS=() FINISHED="" ERRF LANDOUT c WORKER_ARGS=("$@") BEFORE_MERGE=1
+  local THENS=() FINISHED="" ERRF LANDOUT c WORKER_ARGS=("$@") BEFORE_MERGE=1 RATE_TRY="${LAND_AFTER_RATE_TRY:-1}"
+  unset LAND_AFTER_RATE_TRY   # this start's count only; never handed on to land or a --then
   # The --then commands come in a file only this user can read, never on the command line (where ps shows them).
   if [ -f "$LOCK/then" ]; then while IFS= read -r -d '' c; do THENS+=("$c"); done < "$LOCK/then"; fi
   SHEET_REPO="$REPO"; SHEET_PR="$PR"; SHEET_TITLE="(sheet recreated at finish)"
@@ -208,14 +209,16 @@ worker() {
     # a PR already merged, so starting over never merges twice), the worker waits for the reset and starts over, up to RATE_TRIES times, and files no Open Loops row. Out of
     # tries, line 1 says FAIL (rate limit) for the next reader; still no row, nothing is broken.
     if grep -qiE 'rate limit|abuse detection' <<<"$reason"; then
-      local try="${LAND_AFTER_RATE_TRY:-1}" reset left
+      local try="$RATE_TRY" reset left
       if [ -n "$BEFORE_MERGE" ] && [ "$try" -lt "$RATE_TRIES" ]; then
         reset="$(gh api rate_limit --jq '[.resources.core, .resources.graphql] | map(.reset) | max // empty' 2>/dev/null)"
         left="$RATE_HOLD"; [[ "$reset" =~ ^[0-9]+$ ]] && left=$(( reset + 5 - $(date +%s) ))
         [ "$left" -ge 1 ] || left=1; [ "$left" -le "$RATE_HOLD_MAX" ] || left="$RATE_HOLD_MAX"
         set_status "$SLUG" "STATUS: landing $REPO#$PR $HEADSHA $(now) — GitHub's allowance is spent; landing again in $(( (left + 59) / 60 )) min (try $((try + 1)) of $RATE_TRIES); log $LOG"
         echo "=== rate limit ($reason): waiting ${left}s for GitHub's reset, then starting over (try $((try + 1)) of $RATE_TRIES); no Open Loops row"
-        sleep "$left"
+        # a kill during the wait is a kill, not a reason to start over: the TERM/HUP/INT trap fires again
+        FINISHED=""; sleep "$left" & wait $! || { FINISHED=1; fail "unknown: land-after was stopped by a signal while waiting for GitHub's reset; run land-after $PR --task $SLUG again"; }
+        FINISHED=1
         rm -f "$ERRF" "$LANDOUT"
         LAND_AFTER_RATE_TRY=$((try + 1)) exec "$SELF" --worker "${WORKER_ARGS[@]}"
       fi

@@ -84,6 +84,7 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   ratelimit-once) # GitHub's allowance spent on the first land only (22 Nov 2026: land stopped 4 PRs this way)
     [ -f "$F/land-limited" ] || { : > "$F/land-limited"; printf '\033[31mSTOPPED: could not verify (auth) — the sha of green run 1 could not be read: HTTP 403: API rate limit exceeded\033[0m\n'; exit 1; }
     echo "1/5  verifying PR #$1 myself"; : > "$F/merged"; echo "LANDED"; exit 0 ;;
+  badcreds) printf '\033[31mSTOPPED: could not verify (auth) — HTTP 401: Bad credentials\033[0m\n'; exit 1 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"
           echo "npm npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 google AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
@@ -186,6 +187,18 @@ check "…started over after each reset wait, 3 starts in all, one checks read e
 reset; echo ratelimit-once > "$FAKE/land-mode"; echo $(( $(date +%s) + 1 )) > "$FAKE/reset-at"
 LAND_AFTER_RATE_HOLD_MAX_SECS=10 la 31 --task landlimited; lockgone
 check "land stopped by a spent allowance (the 22 Nov 403): waits for the reset, lands again, PASS, no row" eval 'line1 "$T/done/landlimited.md" | grep -q "^STATUS: PASS" && [ "$(grep -c . "$FAKE/land-log")" -eq 2 ] && [ -z "$(posts | jq -c "select(.cleared != true)")" ]'
+reset; echo badcreds > "$FAKE/land-mode"
+la 32 --task badcreds; lockgone
+check "a 401 (bad credentials) is a failure, not a wait: one land, a row due today in Central" eval '[ "$(grep -c . "$FAKE/land-log")" -eq 1 ] && posts | jq -e --arg d "$(TZ=America/Chicago date +%F)" "select(.stop == \"LAND_AFTER_PR_32\" and .next_date == \$d)" >/dev/null'
+reset
+la 33 --task thenlimited --then "echo x >> $W/thenruns; echo rate limit; exit 1"; lockgone
+check "a rate limit after the merge is confirmed: no start-over, land once, the --then once" eval '[ "$(grep -c . "$FAKE/land-log")" -eq 1 ] && [ "$(grep -c . "$W/thenruns")" -eq 1 ] && ! grep -q "starting over" "$T/logs/thenlimited-33.log"'
+rm -f "$W/thenruns"
+reset; echo ratelimit > "$FAKE/checks-mode"; echo $(( $(date +%s) + 7200 )) > "$FAKE/reset-at"
+LAND_AFTER_RATE_HOLD_MAX_SECS=30 la 34 --task killwait
+for _ in $(seq 1 50); do grep -q "starting over" "$T/logs/killwait-34.log" 2>/dev/null && break; sleep 0.2; done
+kill -TERM "$(cat "$T/locks/slugs/killwait.lock/pid")" 2>/dev/null; lockgone
+check "F4: a kill during the reset wait stops the worker (FAIL, stopped by a signal), never a fresh start" eval 'line1 "$T/killwait.md" | grep -q "^STATUS: FAIL .*stopped by a signal" && [ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 1 ]'
 reset; echo flaky > "$FAKE/checks-mode"
 LAND_AFTER_READ_PATIENCE_SECS=10 la 23 --task flaky; lockgone   # 1+2 s of backoff; 10 s so a slow second never gives up early
 check "F2: two network failures reading checks are asked again with backoff, then PASS" eval 'line1 "$T/done/flaky.md" | grep -q "^STATUS: PASS" && grep -q "asking again in" "$T/logs/flaky-23.log"'

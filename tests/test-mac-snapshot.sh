@@ -60,6 +60,7 @@ grep -q 'SNAPSHOT_DRIVE_NOT_CONNECTED.*rclone config create gdrive-sl drive scop
 MAC_SNAPSHOT_TEST_TAMPER=1 run; rc=$?
 [ $rc -ne 0 ] || bad "tampered image passed (is the verify step still there?)"
 grep -q SNAPSHOT_VERIFY_FAILED "$T/stdout" || bad "no SNAPSHOT_VERIFY_FAILED stop"
+grep -q 'NOTIFY .*"stop":"MAC_SNAPSHOT","next_date":"today"' "$T/stdout" || bad "a failed snapshot row is not due today"
 [ -e "$IMG" ] && bad "a tampered image was uploaded"
 # 4. The real run, with two older snapshots on "Drive": newest 2 kept.
 echo old > "$T/drive/Mac-Snapshots/mac-snapshot-2001-01-01.dmg"; echo old > "$T/drive/Mac-Snapshots/mac-snapshot-2001-02-01.dmg"

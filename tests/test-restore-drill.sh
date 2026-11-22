@@ -61,6 +61,7 @@ echo "tampered" > "$T/drive/bin/f5.sh"
 [ "$(run)" = 1 ] || bad "a backup file that differs from the Mac passed"
 grep -q 'NAMED STOP \[RESTORE_DRILL_FAILED\] drive' "$T/out" || bad "the drive failure was not named"
 grep -q '"stop":"RESTORE_DRILL"' "$T/out" && ! grep -q '"cleared":true' "$T/out" || bad "a failed drill did not open the row"
+grep -q '"stop":"RESTORE_DRILL".*"next_date":"today"' "$T/out" || bad "a failed drill row is not due today"
 cp "$T/home/bin/f5.sh" "$T/drive/bin/f5.sh"
 
 printf 'wrong\n' > "$T/pass"

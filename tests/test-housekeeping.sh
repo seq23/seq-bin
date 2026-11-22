@@ -48,7 +48,7 @@ out=$(bash "$S" 2>&1); rc=$?
 [ $rc -eq 0 ] || bad "run 1 exit $rc: $out"
 opened UNSAVED_GITHUB_DIRTY || bad "old unsaved edits opened no row"
 row UNSAVED_GITHUB_DIRTY | grep -q 'Unsaved edits in ~/GitHub/dirty (2 files, oldest 2019-12-31\|Unsaved edits in ~/GitHub/dirty (2 files, oldest 2020-01-01' || bad "row title lacks path, count or oldest date: $(row UNSAVED_GITHUB_DIRTY)"
-row UNSAVED_GITHUB_DIRTY | grep -q '"owner":"claude".*"business":"personal".*"next_date":"2026-11-03"' || bad "row owner/business/next_date wrong"
+row UNSAVED_GITHUB_DIRTY | grep -q '"owner":"claude".*"business":"personal".*"next_date":"2026-11-02"' || bad "row owner/business/next_date wrong (due today, not tomorrow)"
 grep -q PRIVATE-CONTENT "$T/posts.jsonl" && bad "file contents were posted"
 cleared UNSAVED_GITHUB_CLEAN || bad "clean checkout did not clear its row"
 cleared UNSAVED_BIN || bad "clean ~/bin did not clear its row"

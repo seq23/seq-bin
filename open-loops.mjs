@@ -1,4 +1,4 @@
-// The ONE poster to Boss OS Open Loops for ~/bin (housekeeping.mjs and tz-watch.sh). Boss OS upserts a
+// The ONE poster to Boss OS Open Loops for ~/bin (land, land-after, housekeeping.mjs, mac-snapshot.sh, restore-drill.sh, tz-watch.sh). Boss OS upserts a
 // row on repo#stop; `cleared: true` closes it. Retries a 5xx once; a 4xx is final.
 //
 //   node open-loops.mjs '<json body>'   # posts with BOSS_OPEN_LOOPS_TOKEN; prints the action
@@ -14,10 +14,14 @@ export const OPEN_LOOPS_URL = process.env.OPEN_LOOPS_URL || "https://boss.sequoi
 export function withDay(body, now = Date.now()) {
   if (body.cleared === true) return body;
   const ct = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(ms);
+  // Tomorrow = noon UTC of today's Central date plus a day, so a clock change (a 23 h or 25 h day) never
+  // skips or repeats a date the way now + 24 h does.
+  const nextDay = (ymd) => new Date(Date.parse(`${ymd}T12:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
   const d = body.next_date;
-  const day = d === "today" ? ct(now) : d === "tomorrow" ? ct(now + 86_400_000) : d;
-  if (typeof day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-    throw new Error(`NAMED STOP [OPEN_LOOPS_NO_DAY] the row ${body.stop ?? "?"} names no day (next_date "today", "tomorrow" or YYYY-MM-DD); nothing was posted`);
+  const day = d === "today" ? ct(now) : d === "tomorrow" ? nextDay(ct(now)) : d;
+  const real = typeof day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(`${day}T12:00:00Z`)) && new Date(`${day}T12:00:00Z`).toISOString().slice(0, 10) === day;
+  if (!real) {
+    throw new Error(`NAMED STOP [OPEN_LOOPS_NO_DAY] the row ${body.stop ?? "?"} names no real day (next_date "today", "tomorrow" or YYYY-MM-DD); nothing was posted`);
   }
   return { ...body, next_date: day };
 }

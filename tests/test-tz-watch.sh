@@ -89,6 +89,7 @@ run America/New_York || bad "back-to-Eastern run exited non-zero"
 run America/Chicago "broken|exit 7" && bad "a failing installer exited 0"
 grep -q "NAMED STOP \[TZ_WATCH_INSTALL_FAILED\] broken" "$T/out" || bad "a failing installer was not a named stop"
 grep -q '"stop":"TZ_WATCH_INSTALL_FAILED"' "$T/posts.jsonl" 2>/dev/null || bad "a failing installer opened no Open Loops row"
+grep -q "\"stop\":\"TZ_WATCH_INSTALL_FAILED\".*\"next_date\":\"$(TZ=America/Chicago date +%F)\"" "$T/posts.jsonl" 2>/dev/null || bad "the failing-installer row is not due today in Central"
 run America/Chicago "broken|true" || bad "the repaired installer exited non-zero"
 grep -q '"cleared":true' "$T/posts.jsonl" 2>/dev/null || bad "success did not close the Open Loops row"
 

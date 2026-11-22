@@ -9,7 +9,7 @@
 //     "allow": { "<placeholder phrase true for this repo>": "<why>" } }
 // or a list of those (a site and an app in one repo).
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
-// one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
+// one screenshot per page and viewport (plus a -dark one where the page has a dark mode), and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync, appendFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, extname, resolve } from "node:path";
@@ -126,7 +126,7 @@ async function judge(browser, origin, target, viewport, opts) {
   await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
   T("settled");
   const shot = `${target.label.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "home"}-${viewport.width}.png`;
-  await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => {});
+  const light = await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => null);
   row.shot = `shots/${shot}`; T("shot");
   const facts = await page.evaluate(() => {
     const vis = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0; };
@@ -168,6 +168,17 @@ async function judge(browser, origin, target, viewport, opts) {
   for (const v of axe) for (const n of v.nodes.slice(0, 3)) fail(row, `${target.label} has text below 4.5:1 contrast: ${n.target.join(" ")}`);
   T("axe");
   row.links = facts.links;
+  // Dark mode: the same page reloaded with prefers-color-scheme: dark. Kept only when it differs, so a
+  // reviewer sees every dark page there is, and baseline.json says "none" for a page with no dark mode.
+  if (light) {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.reload({ waitUntil: "load", timeout: 30000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+    const dark = await page.screenshot({ fullPage: true }).catch(() => null);
+    if (dark && !dark.equals(light)) { const d = shot.replace(/\.png$/, "-dark.png"); writeFileSync(join(OUT, "shots", d), dark); row.dark = `shots/${d}`; }
+    else row.dark = dark ? "none" : "not read";
+    T("dark");
+  }
   await context.close();
   return row;
 }

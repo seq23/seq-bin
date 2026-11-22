@@ -20,6 +20,10 @@ case_() { # label body expected-rc grep-for
   if [ "$rc" = "$3" ] && { [ -z "$4" ] || grep -qF -- "$4" "$d/log"; }; then ok "$1"; else bad "$1 (rc $rc): $(grep -E '^- |OUTPUT|STOP' "$d/log" | head -4 | tr '\n' ' ')"; fi
 }
 case_ "a clean page passes" '<h1>Tables and chairs for your party</h1><p>Delivered and set up.</p>' 0 "OUTPUT PASS"
+d="$W/dark"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important;color:#eee!important}}</style><h1>Tables and chairs</h1>'
+rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ] && grep -q '"dark": "shots/home-390-dark.png"' "$d/out/baseline.json"; } && ok "a page with a dark mode gets a -dark screenshot" || bad "dark shot (rc $rc)"
+d="$W/nodark"; page "$d/site" '<h1>Tables and chairs</h1>'
+rc=$(judge "$d"); { [ "$rc" = 0 ] && ! ls "$d/out/shots" | grep -q dark && grep -q '"dark": "none"' "$d/out/baseline.json"; } && ok "a page with no dark mode says dark: none, no extra screenshot" || bad "no-dark (rc $rc)"
 case_ "placeholder text fails" '<h1>Lorem ipsum dolor</h1>' 1 'placeholder text'
 case_ "a banned word fails" '<h1>Unlock a seamless party</h1>' 1 'banned word'
 case_ "an emoji fails" '<h1>Party time 🎉</h1>' 1 'emoji or sparkle'

@@ -7,6 +7,8 @@
 //     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"],
 //     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>",
 //     "allow": { "<placeholder phrase true for this repo>": "<why>" },
+//     "live_origin": "https://example.com" (the site's public origin: its own cross-origin APIs answer the
+//       local render exactly as they answer that origin, so CORS is judged as production sees it),
 //     "sign_in": { "cmd": "<signs in against $SHIP_READY_BASE_URL, writes a Playwright storageState to $SHIP_READY_STATE>",
 //                  "signed_in": "<CSS selector only a signed-in screen has>" } }
 // kind web-app is a console behind a sign-in: sign_in is required, every page renders with that session
@@ -66,6 +68,12 @@ const glyphRe = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|[✦✧]
 const placeholderRe = /[Ll]orem ipsum|\bTODO\b|\bTBD\b|[Cc]oming [Ss]oon|COMING SOON|\{\{|\}\}|\bundefined\b|\bNaN\b|\[object Object\]/;
 // A repo may allow a phrase that is true for it, with the reason: { "allow": { "coming soon": "the app is not in the stores yet" } }.
 const allowed = Object.keys(cfg.allow || {}).map((k) => k.toLowerCase());
+// A page that calls its own API on another host (api.example.com) is refused by CORS on 127.0.0.1, which is
+// the render's address, not a fault in the page. With live_origin, each cross-origin fetch/XHR is sent as
+// that origin and the answer's Access-Control-Allow-Origin is honoured only if it names live_origin
+// (rewritten to the local address); an API that would refuse the real site still fails here.
+const LIVE = cfg.live_origin;
+if (LIVE !== undefined && (typeof LIVE !== "string" || !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(LIVE))) stop(`live_origin must be an https origin such as https://example.com (got ${JSON.stringify(LIVE)})`);
 for (const [k, why] of Object.entries(cfg.allow || {})) if (!String(why).trim()) stop(`allow "${k}" needs its reason`);
 
 const run = (cmd) => { console.log(`$ ${cmd}`); execSync(cmd, { stdio: "inherit", shell: "/bin/bash" }); };
@@ -117,6 +125,14 @@ async function judge(browser, origin, target, viewport, opts) {
   const t0 = Date.now(); const T = (s) => process.env.SRB_DEBUG && console.log(`    ${s} ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   results.push(row);
   const context = await browser.newContext({ viewport, ...(opts.state ? { storageState: opts.state } : {}) });
+  if (LIVE && origin) await context.route((u) => u.origin !== origin && /^https?:$/.test(u.protocol), async (r) => {
+    if (!["fetch", "xhr", "eventsource"].includes(r.request().resourceType())) return r.fallback();
+    let resp;
+    try { resp = await r.fetch({ headers: { ...r.request().headers(), origin: LIVE } }); } catch { return r.abort("failed"); }
+    const headers = resp.headers();
+    if (headers["access-control-allow-origin"] === LIVE) headers["access-control-allow-origin"] = origin;
+    return r.fulfill({ response: resp, headers });
+  });
   // Third-party analytics cannot answer a localhost origin (CORS); they are not the page's own errors.
   await context.route(/(cloudflareinsights\.com|clarity\.ms|googletagmanager\.com|google-analytics\.com|plausible\.io|connect\.facebook\.net)/, (r) => r.fulfill({ status: 204, body: "" }));
   const page = await context.newPage();

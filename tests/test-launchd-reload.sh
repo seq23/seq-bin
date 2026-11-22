@@ -3,7 +3,8 @@
 # job is not killed, a YouTube job held for the PBS fill is not loaded, an idle enabled job is reloaded,
 # a reload that fails puts the old schedule back (never a missing job), and --pending applies the
 # deferred ones once they can be, without touching the pause. A fake launchctl that behaves like
-# launchd's refusal to bootstrap a disabled label (CONFIRMED 21 Nov 2026: "Bootstrap failed: 5").
+# launchd's refusal to bootstrap a disabled label (CONFIRMED 21 Nov 2026: "Bootstrap failed: 5"). Its print-disabled
+# lists thousands of labels after ours, like the real one, so a reader that stops early (SIGPIPE) is caught.
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -14,7 +15,7 @@ cat > "$T/launchctl" <<EOF
 L="$T/ld"; echo "\$*" >> "$T/calls.log"
 case "\$1" in
   print) l="\${2##*/}"; [ -f "\$L/loaded/\$l" ] ;;
-  print-disabled) echo '{'; for f in "\$L"/disabled/*; do [ -f "\$f" ] && echo "	\"\$(basename "\$f")\" => disabled"; done; echo '}' ;;
+  print-disabled) echo '{'; for f in "\$L"/disabled/*; do [ -f "\$f" ] && echo "	\"\$(basename "\$f")\" => disabled"; done; for i in \$(seq 1 3000); do echo "	\"com.apple.filler\$i\" => enabled"; done; echo '}' ;;
   list) for f in "\$L"/loaded/*; do [ -f "\$f" ] || continue; l=\$(basename "\$f"); if [ -f "\$L/running/\$l" ]; then echo "123 0 \$l"; else echo "- 0 \$l"; fi; done ;;
   bootout) l="\${2##*/}"; [ -f "\$L/loaded/\$l" ] && rm "\$L/loaded/\$l" ;;
   bootstrap) l=\$(basename "\$3" .plist); [ -f "\$L/disabled/\$l" ] && { echo "Bootstrap failed: 5" >&2; exit 5; }

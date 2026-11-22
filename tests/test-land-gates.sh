@@ -149,7 +149,7 @@ check "tests, docs and data need no line (rc 0)" [ "$RC" -eq 0 ]
 echo "=== a reviewer's PASS on every code PR (22 Nov 2026, her words: make the reviewer gate real in land now) ==="
 CODE='[{"path":"worker/x.ts"},{"path":"README.md"}]'
 gate "$(meta "Adds the sync." "$CODE")"
-check "server code with no PASS -> refused in one line, naming the code and the line to post at the head" eval '[ "$RC" -eq 1 ] && one_line && grep -q "changes code (worker/x.ts" <<<"$MSG" && grep -q "Ship-ready: PASS — " <<<"$MSG" && grep -q "at $(short "$PR_HEAD" 8); Engineering: PASS" <<<"$MSG"'
+check "server code with no PASS -> refused in one line, naming the code and the line to post at the head" eval '[ "$RC" -eq 1 ] && one_line && grep -q "changes code (worker/x.ts" <<<"$MSG" && grep -q "Ship-ready: PASS — " <<<"$MSG" && grep -q "at $(sha_name "$PR_HEAD"); Engineering: PASS" <<<"$MSG"'
 gate "$(meta "$GOOD" "$CODE")"
 check "…with a fresh reviewer's PASS at the head -> allowed" [ "$RC" -eq 0 ]
 gate "$(meta 'Ship-ready: PASS — builder session_01BUILDER looked at the diff at @HEAD@; Engineering: PASS' "$CODE")"

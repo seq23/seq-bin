@@ -1133,8 +1133,8 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 hea
   else what="changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"; fi
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $what, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
-         echo "PR #$1 $what: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$look> at ${3:0:8}; Engineering: PASS"; return 1; }
+    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $what, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at $(sha_name "$3"); Engineering: PASS"; return 1; }
+         echo "PR #$1 $what: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$look> at $(sha_name "$3"); Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \

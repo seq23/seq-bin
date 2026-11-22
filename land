@@ -85,6 +85,10 @@
 # the fast check and the known-red rule itself before it moves production, and records the
 # GitHub Deployment.
 set -uo pipefail
+# ~/bin/gh (the shared allowance) never sleeps past the whole land's own wait (LAND_RATE_WAIT, 65 min):
+# a longer wait comes back as "rate limit: …" and land's own rate-limit handling decides. A caller's
+# tighter deadline (land-after's) is kept.
+export GH_SHARE_UNTIL="${GH_SHARE_UNTIL:-$(( $(date +%s) + ${LAND_RATE_WAIT:-3900} ))}"
 
 # RUN FROM A COPY. bash reads a script incrementally, so editing this file while a `land` is in
 # flight corrupts that run: on 21 Sep 2026 an edit landed mid-run and a live `land 152` died with

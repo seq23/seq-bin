@@ -215,7 +215,7 @@ worker() {
     delay="$RETRY"; [ "$delay" -ge 1 ] 2>/dev/null || delay=1
     give=$(( $(date +%s) + PATIENCE )); [ "$give" -le "$deadline" ] || give="$deadline"
     while :; do
-      out="$(gh "$@" 2>"$ERRF")"
+      out="$(GH_SHARE_UNTIL="$deadline" gh "$@" 2>"$ERRF")"   # ~/bin/gh never sleeps past this deadline
       grep -qE "$ok" <<<"$out" && { printf '%s\n' "$out"; return 0; }
       grep -qi 'no checks reported' "$ERRF" && return 3
       tries=$((tries + 1))

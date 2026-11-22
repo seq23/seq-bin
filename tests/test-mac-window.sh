@@ -171,7 +171,9 @@ wait
 EOF
 chmod +x "$T/parent.sh"
 MAC_WINDOW_NOW=06:30 MAC_WINDOW_STOP_IN=1 MAC_WINDOW_KILL_AFTER=3 "$MW" run HEAVY com.seq.t-group -- "$T/parent.sh" >/dev/null
-sleep 0.5; [ -e "$T/grandchild-term" ] && ok || no "grandchild never got TERM (process group not reached)"
+# bash runs the TERM trap only after its current sleep returns; on a slow runner that passes 0.5 s, so poll up to 5 s
+i=0; while [ ! -e "$T/grandchild-term" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ -e "$T/grandchild-term" ] && ok || no "grandchild never got TERM (process group not reached)"
 # a grandchild that IGNORES TERM, under a parent that exits on it: the guard still ends it (KILL),
 # so nothing of the job runs past 06:55 (a TERM to the child alone would leave it running)
 cat > "$T/parent2.sh" <<EOF

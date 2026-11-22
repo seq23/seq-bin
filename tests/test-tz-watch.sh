@@ -10,11 +10,14 @@ T=$(cd "$(mktemp -d)" && pwd -P)  # real path: the mover only runs as a CLI when
 fail=0; bad(){ echo "FAIL: $1"; fail=1; }
 
 # The one mover, from boss-os (a local checkout, else main on GitHub; boss-os is public).
-BOSS="$T/boss"; mkdir -p "$BOSS/scripts/ops"
-src="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/scripts/ops/plist-central.mjs"
-if [ -f "$src" ]; then cp "$src" "$BOSS/scripts/ops/"
-else curl -fsSL https://raw.githubusercontent.com/seq23/boss-os/main/scripts/ops/plist-central.mjs -o "$BOSS/scripts/ops/plist-central.mjs" \
-  || { echo "FAIL: could not fetch plist-central.mjs; nothing was tested"; exit 1; }; fi
+# The mover reads the Schedule manifest beside it (its macWindow guards, boss-os 22 Nov 2026): both come.
+BOSS="$T/boss"; mkdir -p "$BOSS/scripts/ops" "$BOSS/src/shared/boss/schedule"
+for f in scripts/ops/plist-central.mjs src/shared/boss/schedule/manifest.json; do
+  src="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/$f"
+  if [ -f "$src" ]; then cp "$src" "$BOSS/$f"
+  else curl -fsSL "https://raw.githubusercontent.com/seq23/boss-os/main/$f" -o "$BOSS/$f" \
+    || { echo "FAIL: could not fetch $f; nothing was tested"; exit 1; }; fi
+done
 
 mkdir -p "$T/src" "$T/agents" "$T/state" "$T/stubbin"
 cp "$BIN/launchd/com.seq.drive-backup.plist" "$BIN/launchd/com.seq.ci-sweep.plist" "$T/src/"

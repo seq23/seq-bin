@@ -171,7 +171,7 @@ la 10 --task ratelimited; lockgone
 check "allowance spent with its reset after the wait ends: FAIL unknown naming the reset, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit: GitHub.s allowance resets in 12[01] min" && [ ! -f "$FAKE/land-ran" ]'
 check "…and it did not burn the wait asking again (one checks read)" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 1 ]'
 reset; echo flaky > "$FAKE/checks-mode"
-la 23 --task flaky; lockgone
+LAND_AFTER_READ_PATIENCE_SECS=10 la 23 --task flaky; lockgone   # 1+2 s of backoff; 10 s so a slow second never gives up early
 check "F2: two network failures reading checks are asked again with backoff, then PASS" eval 'line1 "$T/done/flaky.md" | grep -q "^STATUS: PASS" && grep -q "asking again in" "$T/logs/flaky-23.log"'
 reset; echo ratelimit-until > "$FAKE/checks-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
 LAND_AFTER_READ_PATIENCE_SECS=1 la 24 --task waitreset; lockgone
@@ -213,7 +213,7 @@ sleep 0.5
 # shellcheck disable=SC2034 # read inside an eval below
 WP="$(cat "$T"/locks/slugs/thensecret.lock/pid 2>/dev/null)"
 check "--then text is never on the worker's command line (ps)" eval '[ -n "$WP" ] && ! ps -p "$WP" -o command= | grep -q thenvalue987'
-check "…its file is readable by this user only" eval '[ "$(stat -f %Lp "$T"/locks/t_fixture-19.lock/then 2>/dev/null || stat -c %a "$T"/locks/t_fixture-19.lock/then)" = 600 ]'
+check "…its file is readable by this user only" eval 'find "$T"/locks/t_fixture-19.lock/then -perm 600 | grep -q .'
 lockgone
 check "…and its echo in the log is masked" eval 'grep -q "^=== then: echo CLOUDFLARE_API_TOKEN=\[masked\]" "$T/logs/thensecret-19.log" && ! grep -q thenvalue987 "$T/logs/thensecret-19.log"'
 reset

@@ -892,7 +892,11 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
 review_text() { # stdin: PR view JSON -> where a reviewer's PASS line may stand: the body, then each comment by the
   # repo's OWNER account (oldest first). Every agent posts as the owner's login; a comment from any other account
   # (a passer-by on a public repo, a bot) is never read, so no one else can sign a PR off (22 Nov 2026 review N8).
-  jq -r '(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))' 2>/dev/null
+  # The newest verdict wins: from the last text that says `VERDICT: fail` on, so a later fail comment voids an
+  # earlier PASS (review N9); a PASS posted after that fail still counts.
+  jq -r '[(.body // ""), (.comments[]? | select(.authorAssociation == "OWNER") | (.body // ""))]
+    | ([to_entries[] | select(.value | test("verdict: *fail"; "i")) | .key] | last // 0) as $from
+    | .[$from:][]' 2>/dev/null
 }
 covers_engineering() { # stdin: one PASS line -> 0 when it also passes every automatic fail in engineering.md
   grep -qiE 'engineering: *pass'

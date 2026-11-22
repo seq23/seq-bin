@@ -47,6 +47,47 @@ chmod +x "$W/bin/gh"
 out="$(queue_wait)"; rc=$?
 { [ $rc -eq 1 ] && grep -q "QUEUE_RUN_PAST_CEILING" <<<"$out" && [ ! -f "$W/cancelled" ]; } || { echo "FAIL: ceiling not a named stop (rc $rc): $out"; fail=1; }
 rm -f "$W/bin/date"
+# A REFUSED READ IS NOT "STILL RUNNING": land's own rate helpers (gates block) and a rate_wait that records each wait
+eval "$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND")"
+rate_wait() { is_rate_limit "$1" || return 1; echo x >> "$W/rate-waits"; return 0; }
+waits() { cat "$W/rate-waits" 2>/dev/null | grep -c .; }
+cat > "$W/bin/gh" <<'SH'
+#!/bin/bash
+refuse() { echo "HTTP 403: API rate limit exceeded for installation ID 1." >&2; exit 1; }
+case "$*" in
+  "api rate_limit"*) echo $(( $(/bin/date +%s) + 600 )) ;;
+  "run list --workflow e2e --branch main --status in_progress"*) [ -f "$STATE/list-403" ] && refuse; [ -f "$STATE/finished" ] && exit 0; printf '903\te2e\t%s\n' abcdef1234567 ;;
+  "run list"*) echo "" ;;
+  "run view 903"*) n=$(cat "$STATE/v403" 2>/dev/null || echo 0); [ "$n" -gt 0 ] && { echo $((n-1)) > "$STATE/v403"; refuse; }
+                   if [ -f "$STATE/view-done" ]; then touch "$STATE/finished"; echo success; else touch "$STATE/view-done"; echo ""; fi ;;
+  *) echo "" ;;
+esac
+SH
+chmod +x "$W/bin/gh"
+cat > "$W/bin/date" <<'SH'
+#!/bin/bash
+if [ "$1" = "+%s" ]; then n=$(cat "$STATE/clock" 2>/dev/null || echo 1000); echo $((n+100)) > "$STATE/clock"; echo $n; else /bin/date "$@"; fi
+SH
+chmod +x "$W/bin/date"; last_duration() { echo 600; }
+# the run view refused every time: one wait for the reset, one more ask, then rc 75 naming the reset, never a blind wait
+rm -f "$W/rate-waits" "$W/view-done" "$W/clock" "$W/finished"; echo 99 > "$W/v403"
+out="$(queue_wait 2>&1)"; rc=$?
+{ [ $rc -eq 75 ] && grep -q "NAMED STOP \[QUEUE_UNREADABLE\]" <<<"$out" && grep -q "allowance resets at" <<<"$out" && [ "$(waits)" -eq 1 ]; } \
+  || { echo "FAIL: a refused run view was read as still running (rc $rc, $(waits) waits): $out"; fail=1; }
+# refused once: waits for the reset, asks again, and the queue goes on to the run's real end
+rm -f "$W/rate-waits" "$W/view-done" "$W/clock" "$W/finished"; echo 1 > "$W/v403"
+out="$(queue_wait 2>&1)"; rc=$?
+{ [ $rc -eq 0 ] && grep -q "finished: success" <<<"$out" && [ "$(waits)" -eq 1 ]; } || { echo "FAIL: one refusal then an answer did not carry on (rc $rc): $out"; fail=1; }
+# the run list refused: unknown, never "nothing in flight"
+rm -f "$W/rate-waits" "$W/view-done" "$W/clock" "$W/finished" "$W/v403"; touch "$W/list-403"
+out="$(queue_wait 2>&1)"; rc=$?
+{ [ $rc -eq 75 ] && grep -q "QUEUE_UNREADABLE" <<<"$out"; } || { echo "FAIL: a refused run list read as nothing in flight (rc $rc): $out"; fail=1; }
+# a 5xx is no rate limit: no wait, rc 75 at once
+rm -f "$W/list-403" "$W/rate-waits"
+printf '#!/bin/bash\necho "HTTP 502: Bad Gateway" >&2; exit 1\n' > "$W/bin/gh"
+out="$(queue_wait 2>&1)"; rc=$?
+{ [ $rc -eq 75 ] && [ ! -e "$W/rate-waits" ] && ! grep -q "resets at" <<<"$out"; } || { echo "FAIL: a 502 in the queue was not could-not-verify (rc $rc): $out"; fail=1; }
+rm -f "$W/bin/date"
 # recent lands
 cat > "$W/bin/gh" <<'SH'
 #!/bin/bash

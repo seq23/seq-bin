@@ -869,30 +869,51 @@ fi
 # main has a run of this repo's post-merge workflows (E2E_WF, PROMOTE_WF when it exists, DEPLOY_WF) in
 # progress, wait for it to finish (one bounded wait, 1.5x its longest recent run, never cancelled by
 # this script), then merge. And one line when another PR landed on this repo in the last 30 minutes.
+# A REFUSED READ IS NOT "STILL RUNNING" (22 Nov 2026): a 403 (spent allowance) on `gh run view` gave an empty
+# conclusion, read as "still running", so land waited blind to the ceiling; on `gh run list` it read as "nothing in
+# flight". Every queue read goes through queue_gh: a spent allowance sleeps to GitHub's reset once (rate_wait) and
+# asks again; anything else, or a second refusal, is rc 75 with a NAMED STOP line naming the reset (could not verify).
+queue_gh() { # gh args -> its stdout | rc 75 with one NAMED STOP line on stderr
+  local out err try ef
+  ef="$(mktemp)" || return 75
+  for try in 1 2; do
+    out="$(gh "$@" 2>"$ef")" && { rm -f "$ef"; printf '%s\n' "$out"; return 0; }
+    err="$(head -2 "$ef" | paste -sd' ' -)"; [ -n "$err" ] || err="no answer"
+    [ "$try" -eq 1 ] && declare -F rate_wait >/dev/null && rate_wait "$err" && continue
+    break
+  done
+  rm -f "$ef"
+  local reset=""
+  is_rate_limit "$err" 2>/dev/null && reset="; its allowance resets at $(when $(( $(date +%s) + $(rate_reset_in) )) 2>/dev/null || echo "an unknown time")"
+  echo "NAMED STOP [QUEUE_UNREADABLE] GitHub refused gh $1 $2 ($err)$reset: main's post-merge run is unknown, so nothing was merged" >&2
+  return 75
+}
 queue_workflows() { printf '%s\n' "$E2E_WF" "$DEPLOY_WF" "$( [ -n "$E2E_WF" ] && printf '%s' "$PROMOTE_WF")" | grep -v '^$' | sort -u; }
 queue_inflight() { # -> "<run id>\t<workflow>\t<sha>" of the first post-merge run on main still running, or nothing
   local wf st row
   for wf in $(queue_workflows); do
     for st in in_progress queued; do
-      row="$(gh run list --workflow "$wf" --branch main --status "$st" --limit 1 --json databaseId,headSha \
-              -q ".[0] | select(. != null) | \"\(.databaseId)\t$wf\t\(.headSha)\"" 2>/dev/null)"
+      row="$(queue_gh run list --workflow "$wf" --branch main --status "$st" --limit 1 --json databaseId,headSha \
+              -q ".[0] | select(. != null) | \"\(.databaseId)\t$wf\t\(.headSha)\"")" || return 75
       [ -n "$row" ] && { printf '%s\n' "$row"; return 0; }
     done
   done
   return 0
 }
-queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 one ran past its ceiling (named on stdout)
-  local row rid wf sha ceil deadline
-  while row="$(queue_inflight)"; [ -n "$row" ]; do
+queue_wait() { # waits for every in-flight post-merge run on main; 0 clear | 1 one ran past its ceiling | 75 unreadable
+  local row rid wf sha ceil deadline concl
+  while :; do
+    row="$(queue_inflight)" || return 75
+    [ -n "$row" ] || break
     IFS=$'\t' read -r rid wf sha <<<"$row"
     ceil=$(( $(last_duration "$wf") * 3 / 2 )); [ "$ceil" -ge 600 ] || ceil=600
     echo "     queue: $wf run $rid on main ${sha:0:7} is still running — waiting for it before merging (ceiling $((ceil / 60)) min)"
     deadline=$(( $(date +%s) + ceil ))
-    while [ -z "$(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)" ]; do
+    while concl="$(queue_gh run view "$rid" --json conclusion -q '.conclusion')" || return 75; [ -z "$concl" ]; do
       [ "$(date +%s)" -lt "$deadline" ] || { echo "NAMED STOP [QUEUE_RUN_PAST_CEILING] $wf run $rid on main ran past $((ceil / 60)) min; nothing was merged. Read it: gh run view $rid"; return 1; }
       sleep 20
     done
-    echo "     queue: $wf run $rid finished: $(gh run view "$rid" --json conclusion -q '.conclusion' 2>/dev/null)"
+    echo "     queue: $wf run $rid finished: $concl"
   done
   return 0
 }
@@ -1100,20 +1121,26 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
   return 1
 }
 gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
-  local tree re files added launch body reviewer ids msg why
+  # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every PR that changes what people see OR code
+  # (patch_code: tests, docs and data are not code). 22 Nov 2026, her words: "make the reviewer gate real in land now".
+  local tree re files code what look added launch body reviewer ids msg why
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
-  [ -n "$files" ] || return 0
+  code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
+  [ -n "$files$code" ] || return 0
+  if [ -n "$files" ]; then what="changes what people see ($(head -3 <<<"$files" | paste -sd' ' -))"; look="the real output: page at 390 px, rendered email, frames"
+  else what="changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"; fi
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 changes what people see, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
-         echo "PR #$1 changes what people see ($(head -3 <<<"$files" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output: page at 390 px, rendered email, frames> at <head sha>; Engineering: PASS"; return 1; }
+    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $what, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"; return 1; }
+         echo "PR #$1 $what: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$look> at ${3:0:8}; Engineering: PASS"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
     || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
   msg="$(fresh_pass Ship-ready "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+  [ -n "$files" ] || return 0   # Launch-ready is for something new in public, never for code alone
   added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
   launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
   [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
@@ -1185,23 +1212,44 @@ owner_override() { # stdin: PR body -> 0 when it carries a real Owner override l
 # must carry, in its body or an owner-account comment, a "Mutation" heading followed by at least one
 # row naming the test that went red when the fix was undone, or "Mutation proof: none — <why, 6+ words>"
 # for a change with no behaviour to break. Structure only: whether the proof is real is the reviewer's call.
-proof_listed() { # stdin: PR body + owner comments -> 0 when a mutation list (or a reasoned none) is there
+proof_listed() { # stdin: PR body + owner comments -> 0 when a mutation proof section has a filled row (or a reasoned none)
+  # Structure only (review of #141, F1-F3): whether a row is honest is the fresh reviewer's call, never a keyword's.
+  # Opens on a line that, past # * > - | and spaces, starts "mutation" or "self-proof"; the rest of that line after
+  # its ":" counts. A row is any line with 4+ words that is not a table separator, not the first row of a table
+  # (its header), not only <placeholders>. A "none" needs its reason (6+ words). One unticked [ ] box fails it all.
   awk '
-    { l = tolower($0) }
-    l ~ /^[[:space:]>*#|-]*mutation proof:[[:space:]]*none/ && index($0, "<") == 0 {
-      sub(/.*[Nn][Oo][Nn][Ee][[:space:]—:-]*/, ""); if (split($0, w, /[[:space:]]+/) >= 6) ok = 1; next }
-    l ~ /^[[:space:]>*#|-]*mutations?([[:space:]]|:|$|\()/ || l ~ /^#+[[:space:]].*mutation/ { open = 1; next }
-    open && /^#+[[:space:]]/ { open = 0 }
-    open && l ~ /test/ && index($0, "<") == 0 && l !~ /^[|[:space:]:-]+$/ && l !~ /^\|[[:space:]]*mutation[[:space:]]*\|/ {
-      if (split($0, w, /[[:space:]]+/) >= 4) ok = 1 }
-    END { exit !ok }'
+    function filled(s,   n, i, c, w, out) {   # s without pipes, emphasis and <placeholder> cells -> its word count
+      n = split(s, c, "|"); out = ""
+      for (i = 1; i <= n; i++) { gsub(/[*`_]/, "", c[i]); gsub(/^[[:space:]]+|[[:space:]]+$/, "", c[i])
+        if (c[i] ~ /^<[^>]*>$/) continue; out = out " " c[i] }
+      sub(/^[[:space:]>*+-]+/, "", out); gsub(/^[[:space:]]+|[[:space:]]+$/, "", out)
+      return out == "" ? 0 : split(out, w, /[[:space:]]+/)
+    }
+    function row(s,   l) {
+      l = tolower(s)
+      if (l ~ /^[[:space:]>]*([-*+]|[0-9]+\.)[[:space:]]+\[[[:space:]]\]/) { unticked = 1; return }
+      if (l ~ /^[[:space:]>]*\|/) {
+        if (l ~ /^[|[:space:]:-]+$/) return
+        if (!intable) { intable = 1; return }   # the first row of a table is its header
+      } else intable = 0
+      if (l ~ /^[^a-z0-9]*none([^a-z]|$)/) { sub(/^[^a-z0-9]*none[^a-z0-9<]*/, "", l); if (filled(l) >= 6) ok = 1; return }
+      if (filled(s) >= 4) ok = 1
+    }
+    { t = tolower($0); sub(/^[[:space:]#*>|-]*/, "", t) }
+    t ~ /^(mutations?|self-proof)/ && !(open && $0 ~ /^[[:space:]]*[|]/) {   # opens; inside, a table header is a header
+      open = 1; intable = ($0 ~ /^[[:space:]]*[|]/)   # a table that opens the section: this line is its header
+      if (!intable && index($0, ":")) { r = $0; sub(/^[^:]*:/, "", r); row(r) }
+      next }
+    open && (/^[[:space:]]*#+[[:space:]]/ || t ~ /^(ship-ready|launch-ready|verdict|owner override|patch or rebuild):/) { open = 0 }   # a heading or another gate line ends it
+    open { row($0) }
+    END { exit !(ok && !unticked) }'
 }
 gate_proof() { # $1 PR  $2 PR view JSON  $3 PR body + owner comments -> rc 1 with one plain line on stdout
   local code
   code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
   [ -n "$code" ] || return 0
   proof_listed <<<"$3" && return 0
-  echo "PR #$1 changes code ($(head -3 <<<"$code" | paste -sd' ' -)) and lists no mutation proof: undo each fix, see its test go red, and add to the PR body a '## Mutation proof' section with one row per fix: the mutation and the test that went red (or 'Mutation proof: none — <why there is no behaviour to break>')."
+  echo "PR #$1 changes code ($(head -3 <<<"$code" | paste -sd' ' -)) and lists no mutation proof: undo each fix, see its test go red, and add to the PR body a '## Mutation proof' section with one row per fix (a table under a header row, or a bullet), each saying the mutation and the test that went red in 4 or more words, with no unticked [ ] box; or 'Mutation proof: none — <why there is no behaviour to break, 6+ words>'."
   return 1
 }
 gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line on stdout) | 75 could not read
@@ -1352,7 +1400,9 @@ fi
 
 RECENT="$(recent_lands "$PR")"
 [ -z "$RECENT" ] || echo "     WARNING: $NAME already had $RECENT landed in the last 30 minutes — batch fixes into one round"
-queue_wait || die "PR #$PR was NOT merged: main's post-merge run is past its ceiling (above)."
+queue_wait; QRC=$?
+[ "$QRC" -ne 75 ] || unverified "queue" "GitHub refused the read of main's post-merge run (above)"
+[ "$QRC" -eq 0 ] || die "PR #$PR was NOT merged: main's post-merge run is past its ceiling (above)."
 say "2/5  merging"
 # Pinned to the head verified above: a push after the check cannot ride in unverified.
 # A spent allowance refuses the merge without making it: wait for the reset and ask again (rate_wait).

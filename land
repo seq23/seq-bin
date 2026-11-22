@@ -645,6 +645,27 @@ POLL_SECS="${LAND_POLL_SECS:-60}"
 run_conclusion() { # $1 run id -> its conclusion, empty while it runs or when unreadable
   gh api "repos/{owner}/{repo}/actions/runs/$1" --jq '.conclusion // ""' 2>/dev/null
 }
+# queue_gh lives here, above the --promote path, because every wait on a run uses it (wait_run_bounded below,
+# the queue block further down). A REFUSED READ IS NOT "STILL RUNNING" (22 Nov 2026): a 403 (spent allowance) on `gh run view` gave an empty
+# conclusion, read as "still running", so land waited blind to the ceiling; on `gh run list` it read as "nothing in
+# flight". Every queue read goes through queue_gh: a spent allowance sleeps to GitHub's reset once (rate_wait) and
+# asks again; anything else, or a second refusal, is rc 75 with a NAMED STOP line naming the reset (could not verify).
+queue_gh() { # gh args -> its stdout | rc 75 with one NAMED STOP line on stderr
+  local out err try ef
+  ef="$(mktemp)" || return 75
+  for try in 1 2; do
+    out="$(gh "$@" 2>"$ef")" && { rm -f "$ef"; printf '%s\n' "$out"; return 0; }
+    err="$(head -2 "$ef" | paste -sd' ' -)"; [ -n "$err" ] || err="no answer"
+    [ "$try" -eq 1 ] && declare -F rate_wait >/dev/null && rate_wait "$err" && continue
+    break
+  done
+  rm -f "$ef"
+  local reset=""
+  is_rate_limit "$err" 2>/dev/null && reset="; its allowance resets at $(when $(( $(date +%s) + $(rate_reset_in) )) 2>/dev/null || echo "an unknown time")"
+  local why="${UNREADABLE_WHY:-}"; [ -n "$why" ] || why="main's post-merge run is unknown, so nothing was merged" # the caller names its stop and its consequence
+  echo "NAMED STOP [${UNREADABLE_STOP:-QUEUE_UNREADABLE}] GitHub refused gh $1 $2 ($err)$reset: $why" >&2
+  return 75
+}
 # Wait for one run to a terminal conclusion, bounded by 1.5x the workflow's last completed
 # duration (a step past 1.5x is cancelled and investigated, never watched). Prints the conclusion.
 # A REFUSED READ IS NOT "STILL RUNNING" (22 Nov 2026): the read swallowed its errors, so a 403 or a
@@ -888,26 +909,6 @@ fi
 # main has a run of this repo's post-merge workflows (E2E_WF, PROMOTE_WF when it exists, DEPLOY_WF) in
 # progress, wait for it to finish (one bounded wait, 1.5x its longest recent run, never cancelled by
 # this script), then merge. And one line when another PR landed on this repo in the last 30 minutes.
-# A REFUSED READ IS NOT "STILL RUNNING" (22 Nov 2026): a 403 (spent allowance) on `gh run view` gave an empty
-# conclusion, read as "still running", so land waited blind to the ceiling; on `gh run list` it read as "nothing in
-# flight". Every queue read goes through queue_gh: a spent allowance sleeps to GitHub's reset once (rate_wait) and
-# asks again; anything else, or a second refusal, is rc 75 with a NAMED STOP line naming the reset (could not verify).
-queue_gh() { # gh args -> its stdout | rc 75 with one NAMED STOP line on stderr
-  local out err try ef
-  ef="$(mktemp)" || return 75
-  for try in 1 2; do
-    out="$(gh "$@" 2>"$ef")" && { rm -f "$ef"; printf '%s\n' "$out"; return 0; }
-    err="$(head -2 "$ef" | paste -sd' ' -)"; [ -n "$err" ] || err="no answer"
-    [ "$try" -eq 1 ] && declare -F rate_wait >/dev/null && rate_wait "$err" && continue
-    break
-  done
-  rm -f "$ef"
-  local reset=""
-  is_rate_limit "$err" 2>/dev/null && reset="; its allowance resets at $(when $(( $(date +%s) + $(rate_reset_in) )) 2>/dev/null || echo "an unknown time")"
-  local why="${UNREADABLE_WHY:-}"; [ -n "$why" ] || why="main's post-merge run is unknown, so nothing was merged" # the caller names its stop and its consequence
-  echo "NAMED STOP [${UNREADABLE_STOP:-QUEUE_UNREADABLE}] GitHub refused gh $1 $2 ($err)$reset: $why" >&2
-  return 75
-}
 queue_workflows() { printf '%s\n' "$E2E_WF" "$DEPLOY_WF" "$( [ -n "$E2E_WF" ] && printf '%s' "$PROMOTE_WF")" | grep -v '^$' | sort -u; }
 queue_inflight() { # -> "<run id>\t<workflow>\t<sha>" of the first post-merge run on main still running, or nothing
   local wf st row

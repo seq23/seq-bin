@@ -135,6 +135,7 @@ case "$a" in
     if [ -f "$FAKE_DIR/promote-inflight" ] && [ ! -f "$FAKE_DIR/promote-done" ]; then printf '777\t%s\tin_progress\n' "$ORIGIN_MAIN"; fi; exit 0 ;;
   "api repos/{owner}/{repo}/actions/runs/777 "*)
     [ -f "$FAKE_DIR/promote-hang" ] && exit 0
+    [ -f "$FAKE_DIR/promote-refused" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
     t="$(cat "$FAKE_DIR/promote-ticks" 2>/dev/null || echo 0)"
     if [ "$t" -le 0 ]; then : > "$FAKE_DIR/promote-done"; echo success; else echo $((t - 1)) > "$FAKE_DIR/promote-ticks"; fi; exit 0 ;;
   "run cancel 777"*) : > "$FAKE_DIR/promote-cancelled"; exit 0 ;;
@@ -459,6 +460,16 @@ check "read production AFTER the run (deployment record answered)" has "promote 
 check "NOTHING TO PROMOTE — the run shipped that sha" has "NOTHING TO PROMOTE"
 check "no deploy ran on top of it" [ ! -f "$FAKE/npm-ran" ]
 check "the run was not cancelled" [ ! -f "$FAKE/promote-cancelled" ]
+
+echo "=== 11b. the in-flight promote run cannot be read: NAMED STOP, never cancelled, nothing deployed (22 Nov 2026) ==="
+fixture build-first-fixture promote
+: > "$FAKE/promote-inflight"; : > "$FAKE/promote-refused"; mkdir "$W/build-first-fixture/node_modules"
+run_promote build-first-fixture
+check "rc 1" [ "$RC" -eq 1 ]
+check "NAMED STOP [RUN_UNREADABLE] names the run" has "NAMED STOP [RUN_UNREADABLE] promote.yml run 777"
+check "the unread run was not cancelled" [ ! -f "$FAKE/promote-cancelled" ]
+check "nothing deployed on top of it" [ ! -f "$FAKE/npm-ran" ]
+rm -f "$FAKE/promote-refused"
 
 echo "=== 12. no promote.yml on origin/main: nothing to wait for, promotes as before ==="
 fixture build-first-fixture

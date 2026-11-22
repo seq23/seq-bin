@@ -62,12 +62,16 @@ chmod +x "$W/bin/gh"
 pushed() { jq -rn --arg t "$2" '$t | fromdateiso8601' > "$W/suites/$1" || exit 1; }   # sha, when GitHub first saw it (jq: BSD and GNU date differ, and CI is Linux)
 # A short sha the gate can read: land takes 7-40 hex characters with at least one a-f (a bare number is a size, not a
 # commit), so a prefix that happens to be all digits (8 chars: about 1 in 40 commits) is lengthened, never a flake.
-short() { local n="${2:-7}"; while [ "$n" -lt 40 ] && [[ ! "${1:0:$n}" =~ [a-f] ]]; do n=$((n + 1)); done; printf '%s' "${1:0:$n}"; }
+eval "$(grep '^sha_name() ' "$LAND")"   # land's own helper, never a copy
 gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/$(short "$PR_HEAD" 8)}")"; RC=$?
+  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
 one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
+check "sha_name: an all-digit 8-char prefix is lengthened to its first a-f (12345678901b…) -> 12345678901b" [ "$(sha_name 12345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 12345678901b ]
+check "sha_name: a prefix with a letter stays 8 characters" [ "$(sha_name 1a345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 1a345678 ]
+no_bare8() { ! grep -qE '[$][{][a-zA-Z0-9]+:0:8[}]' "$LAND"; }
+check "land never prints a bare 8-char sha for a reviewer to post (every one goes through sha_name)" no_bare8
 SITE='[{"path":"site/index.html"}]'
 # @HEAD@ is the PR head's short sha, filled in by gate(): a PASS names the commit it looked at (STALE_PASS).
 GOOD='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px and 1280 px at @HEAD@; Engineering: PASS'
@@ -150,7 +154,7 @@ stale_pr() {
   echo '<h1>reviewed</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the page"; PASSED="$(git -C "$W/r" rev-parse HEAD)"
 }
 publish_pr() { PR_HEAD="$(git -C "$W/r" rev-parse HEAD)"; git -C "$W/r" push -q -f origin "HEAD:refs/pull/9/head"; git -C "$W/r" checkout -q main; git -C "$W/r" branch -q -D pr; }
-passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "$(short "$PASSED" 9)"; }
+passed_at() { printf 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at %s; Engineering: PASS' "$(sha_name "$PASSED")"; }
 stale_pr; publish_pr
 gate "$(meta "$(passed_at)" "$SITE")"
 check "a PASS naming the head -> allowed (rc 0)" [ "$RC" -eq 0 ]
@@ -168,16 +172,16 @@ gate "$(meta "$(passed_at)" "$SITE")"
 check "new lines inside a merge commit -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
 stale_pr; publish_pr
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS' "$SITE")"
-check "a PASS that names no commit -> refused STALE_PASS, with the head to name" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "names no commit" <<<"$MSG" && grep -q " at ${PR_HEAD:0:8}; Engineering: PASS" <<<"$MSG"'
+check "a PASS that names no commit -> refused STALE_PASS, with the head to name" eval '[ "$RC" -eq 1 ] && one_line && grep -q "STALE_PASS" <<<"$MSG" && grep -q "names no commit" <<<"$MSG" && grep -q " at $(sha_name "$PR_HEAD"); Engineering: PASS" <<<"$MSG"'
 gate "$(meta 'Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px at deadbeef1; Engineering: PASS' "$SITE")"
 check "a PASS naming a commit not on the PR -> refused STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "names no commit" <<<"$MSG"'
 # Review F1 of #137: a re-check line names the old commit first ("the diff A..B", "diff since A … at B").
 stale_pr; echo '<h1>fixed after the fail</h1>' > "$W/r/site/index.html"; git -C "$W/r" commit -qam "the fix"; publish_pr
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff $(short "$PASSED" 8)..$(short "$PR_HEAD" 8) at 390 px; Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff $(sha_name "$PASSED")..$(sha_name "$PR_HEAD") at 390 px; Engineering: PASS" "$SITE")"
 check "a re-check PASS on 'the diff <old>..<head>' -> allowed (the newest commit it names)" [ "$RC" -eq 0 ]
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(short "$PASSED" 8), tests at $(short "$PR_HEAD" 8); Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(sha_name "$PASSED"), tests at $(sha_name "$PR_HEAD"); Engineering: PASS" "$SITE")"
 check "a re-check PASS on 'diff since <old> … at <head>' -> allowed" [ "$RC" -eq 0 ]
-gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(short "$PASSED" 8); Engineering: PASS" "$SITE")"
+gate "$(meta "Ship-ready: PASS — re-check agent session_01RECHECK looked at the diff since $(sha_name "$PASSED"); Engineering: PASS" "$SITE")"
 check "…naming only the old commit, with work after it -> still STALE_PASS" eval '[ "$RC" -eq 1 ] && grep -q "STALE_PASS" <<<"$MSG"'
 # Review F2 of #137: the reviewer template's line names no commit; its time decides, where it is known.
 SHALESS='Ship-ready: PASS — hostile-review agent session_01REVIEW looked at the home page at 390 px; Engineering: PASS'

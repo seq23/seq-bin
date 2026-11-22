@@ -102,8 +102,8 @@ git -C "$W/repo" push -q origin main && git -C "$W/repo" fetch -q origin
 GIT_COMMITTER_DATE="2026-11-22T12:00:00Z" git -C "$W/repo" commit -q --allow-empty -m "the PR's work"
 HEADSHA="$(git -C "$W/repo" rev-parse HEAD)"; export HEADSHA; git -C "$W/repo" reset -q --hard origin/main
 # land reads 7-40 hex characters with at least one a-f as a commit: an all-digit prefix is lengthened, never a flake.
-n=8; while [ "$n" -lt 40 ] && [[ ! "${HEADSHA:0:$n}" =~ [a-f] ]]; do n=$((n + 1)); done
-GOOD="Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land at ${HEADSHA:0:$n}; Engineering: PASS"
+eval "$(grep '^sha_name() ' "$(dirname "$LA")/land")"   # land's own helper, never a copy
+GOOD="Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land at $(sha_name "$HEADSHA"); Engineering: PASS"
 reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; rm -f "$W/api/down"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
 la() { (cd "$W/repo" && "$LA" "$@") > "$W/out" 2>&1; RC=$?; }
 lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(find "$T/locks" -name '*.lock' 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }

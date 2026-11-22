@@ -983,6 +983,8 @@ baseline_red() { # $1 the PR's checks JSON -> prints "<name>: <bucket>" and rc 0
 # OWNER comment posted after the newest commit of the PR's own work REACHED GITHUB. In the body, or older than that
 # push, it is STALE_PASS (review F2). The commit's own date is the builder's to set (review F5: committed 10:00,
 # PASS 10:10 on the older head, pushed 10:20), so the time is GitHub's: its earliest check suite for that commit.
+# The sha to tell a reviewer to post: 8 characters, lengthened until one is a-f (pass_sha reads a bare number as a size).
+sha_name() { local n=8; while [ "$n" -lt 40 ] && [[ ! "${1:0:$n}" =~ [a-f] ]]; do n=$((n + 1)); done; printf '%s' "${1:0:$n}"; }
 pass_sha() { # $1 one PASS line  $2 head sha -> the full sha of the newest commit it names (rc 1 none on the PR's history)
   local t best=""
   for t in $(tr -cs '[:alnum:]' '\n' <<<"$1" | tr '[:upper:]' '[:lower:]' | grep -E '^[0-9a-f]{7,40}$' | grep '[a-f]'); do
@@ -1038,12 +1040,12 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
       [ "$rc" -eq 75 ] && { echo "PR #$2's check suites could not be read, so when its last commit reached GitHub is unknown"; return 75; }
       [ "$rc" -eq 0 ] && [ "$posted" -gt "$arrived" ] && return 0
     fi
-    echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR$([ -z "$posted" ] && echo " and stands where its time is unknown (the body)" || { [ -n "$arrived" ] && echo " and was posted before its last commit reached GitHub" || echo " and when its last commit reached GitHub is unknown (no check suite)"; }), so what it passed is unknown: the reviewer posts it again as a PR comment, naming the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at ${3:0:8}; Engineering: PASS"
+    echo "NAMED STOP [STALE_PASS] PR #$2's $1 PASS names no commit on this PR$([ -z "$posted" ] && echo " and stands where its time is unknown (the body)" || { [ -n "$arrived" ] && echo " and was posted before its last commit reached GitHub" || echo " and when its last commit reached GitHub is unknown (no check suite)"; }), so what it passed is unknown: the reviewer posts it again as a PR comment, naming the head it looked at, e.g.  $1: PASS — <its session or run id> looked at <what> at $(sha_name "$3"); Engineering: PASS"
     return 1
   fi
   stale="$(changed_since_pass "$sha" "$3")"
   [ -z "$stale" ] && return 0
-  echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names (${sha:0:8}): the reviewer re-checks git diff ${sha:0:8}..${3:0:8} and posts a new PASS line naming ${3:0:8}"
+  echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names ($(sha_name "$sha")): the reviewer re-checks git diff $(sha_name "$sha")..$(sha_name "$3") and posts a new PASS line naming $(sha_name "$3")"
   return 1
 }
 gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 head sha -> rc 1 with one plain line on stdout

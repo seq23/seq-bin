@@ -56,9 +56,12 @@ d="$W/allow"; page "$d/site" '<p>App coming soon. TODO</p>'; echo '{ "kind": "si
 rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'placeholder text: "TODO"' "$d/log" && ! grep -q '"coming soon"' "$d/log"; } && ok "an allowed phrase (with its reason) passes; the TODO beside it still fails" || bad "allow (rc $rc)"
 # live_origin: the site's own API on another host answers CORS for the live origin only. Without live_origin the
 # local render is refused (a console error); with it the page passes; naming an origin the API refuses still fails.
-API_PORT=$((20000 + RANDOM % 20000))
-node -e 'require("http").createServer((q,r)=>{r.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"https://x.test"});r.end("{\"left\":7}")}).listen(+process.argv[1],"127.0.0.1")' "$API_PORT" & API_PID=$!
-for _ in $(seq 1 50); do curl -s "http://127.0.0.1:$API_PORT/" >/dev/null && break; sleep 0.1; done
+# The kernel picks the port (listen 0) and the server writes it down: a random pick in 20000-40000 sat inside Linux's
+# ephemeral range and collided with a live socket (main CI 22 Nov 2026, run 45062933627: EADDRINUSE 38766).
+API_PORT_FILE="$W/api.port"; rm -f "$API_PORT_FILE"
+node -e 'const s=require("http").createServer((q,r)=>{r.writeHead(200,{"content-type":"application/json","access-control-allow-origin":"https://x.test"});r.end("{\"left\":7}")});s.listen(0,"127.0.0.1",()=>require("fs").writeFileSync(process.argv[1],String(s.address().port)))' "$API_PORT_FILE" & API_PID=$!
+for _ in $(seq 1 50); do [ -s "$API_PORT_FILE" ] && break; sleep 0.1; done
+API_PORT="$(cat "$API_PORT_FILE" 2>/dev/null)"; [ -n "$API_PORT" ] || { bad "the live_origin test API never started"; API_PORT=1; }
 API_BODY="<p id=n>Places left</p><script>fetch('http://127.0.0.1:$API_PORT/count').then(r=>r.json()).then(j=>{document.getElementById('n').textContent=j.left+' places left'})</script>"
 for want in none https://x.test https://other.test; do
   d="$W/live-${want//[^a-z]/}"; page "$d/site" "$API_BODY"
@@ -73,9 +76,12 @@ kill "$API_PID" 2>/dev/null
 d="$W/badlive"; mkdir -p "$d"; echo '{ "kind": "site", "serve": ".", "live_origin": "http://x.test" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'live_origin must be an https origin' "$d/log"; } && ok "a non-https live_origin is a named stop" || bad "bad live_origin (rc $rc)"
 # A signed-in console (kind web-app): a server that shows the app only with the session cookie, and
+free_port() { # a port the kernel says is free now (bind 0, read it, let go); never a guess in the ephemeral range
+  node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})'
+}
 # a sign-in command that writes a Playwright storageState with the cookie it is given.
 console_() { # dir cookie-value -> a console fixture whose sign-in writes that cookie
-  mkdir -p "$1"; local port=$((20000 + RANDOM % 20000))
+  mkdir -p "$1"; local port; port="$(free_port)"
   cat > "$1/server.mjs" <<'JS'
 import { createServer } from "node:http";
 createServer((req, res) => {

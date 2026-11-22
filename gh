@@ -16,8 +16,12 @@
 #      across a write is returned to its caller but not kept. Only a
 #      successful answer is kept, and never past its TTL: an expired entry is fetched again, and if that
 #      fetch fails the failure is returned, never the old answer ("green" is never served stale).
-#   2. WATCHERS BACK OFF. `gh run watch` and `gh pr checks --watch` poll no faster than every
-#      GH_SHARE_WATCH_SECS (30) seconds; a shorter --interval is raised to it.
+#   2. WATCHERS POLL THROUGH HERE. `gh run watch` and `gh pr checks --watch` never reach the real gh: each
+#      becomes a loop of ordinary reads of this file (`run view --json status`, `pr checks`), so every poll
+#      is shared, logged, held at the floor and charged to its caller, no faster than every
+#      GH_SHARE_WATCH_SECS (30) seconds (a shorter --interval is raised to it). Exit codes are gh's:
+#      `pr checks` 0 passed / 1 failed (--fail-fast stops at the first fail), `run watch --exit-status` 1 on
+#      a failed run.
 #   3. LOW ALLOWANCE WAITS, IT DOES NOT FAIL. Before a read reaches GitHub, the allowance left (from
 #      GitHub's free rate_limit endpoint, re-read every 30 s and shared) is checked; at or under
 #      GH_SHARE_FLOOR (300) the read waits for the reset in ONE bounded sleep, then runs. The floor is
@@ -35,6 +39,8 @@
 #   awk -v c="$(( $(date +%s) - 3600 ))" '$1 > c {n[$3]++} END {for (k in n) print k, n[k]}' ~/.cache/gh-share/calls.log
 # (miss, write, watch and graphql reached GitHub; hit was answered here; wait/share/stop are holds).
 #
+# AN UNREADABLE ALLOWANCE IS A STOP, never a blind call: when rate_limit fails twice, a read exits 75 with
+# "rate limit: NAMED STOP [GH_ALLOWANCE_UNKNOWN]" and is not sent (writes are never held).
 # FAIL TOWARD WORKING. Anything this wrapper cannot do (no cache dir, no real gh found twice, a TTY
 # caller) passes the command straight to the real gh unchanged. A terminal on stdout is never cached
 # (her own Terminal gets gh exactly as it is).
@@ -121,7 +127,7 @@ allowance() { # $1 core|graphql -> "<remaining> <reset>"
     if [[ "${cr:-}" =~ ^[0-9]+$ && "${cs:-}" =~ ^[0-9]+$ && "${gr:-}" =~ ^[0-9]+$ && "${gs:-}" =~ ^[0-9]+$ ]]; then
       printf '%s %s %s %s %s\n' "$cr" "$cs" "$gr" "$gs" "$NOW" > "$f.$$" && mv -f "$f.$$" "$f"
     else
-      echo "unknown 0"; return   # unreadable: the call goes ahead and GitHub answers for itself
+      echo "unknown 0"; return   # unreadable: the read is refused (wait_for_reset), never sent uncounted
     fi
   fi
   if [ "${1:-core}" = graphql ]; then echo "$gr $gs"; else echo "$cr $cs"; fi
@@ -140,7 +146,17 @@ wait_for_reset() { # holds a read while the allowance is at or under the floor (
   local rem reset secs budget
   budget="$(budget_of "${1:-}")"
   read -r rem reset <<<"$(allowance "$budget")"
-  [[ "$rem" =~ ^[0-9]+$ ]] || return 0
+  if ! [[ "$rem" =~ ^[0-9]+$ ]]; then
+    # OUTAGE: the allowance could not be read (rate_limit failed twice). The read is not sent blind: it
+    # comes back as "rate limit:" with exit 75, so the caller's own rate-limit handling decides. Writes
+    # never come here (the floor is theirs).
+    sleep 2; rm -f "$DIR/rate"; NOW="$(date +%s)"
+    read -r rem reset <<<"$(allowance "$budget")"
+    if ! [[ "$rem" =~ ^[0-9]+$ ]]; then
+      echo "rate limit: NAMED STOP [GH_ALLOWANCE_UNKNOWN] GitHub's $budget allowance could not be read (rate_limit failed twice); this read was not sent" >&2
+      log unknown "$budget"; exit 75
+    fi
+  fi
   [ "$rem" -gt "$FLOOR" ] && return 0
   secs=$(( reset - NOW + 5 )); [ "$secs" -ge 1 ] || secs=1
   too_long "$secs" "GitHub's $budget allowance is down to $rem and resets at $(date -r "$reset" +%H:%M 2>/dev/null || date -d "@$reset" +%H:%M); this read"
@@ -169,6 +185,44 @@ hold_share() { # one caller may send PER_CALLER reads to GitHub in any hour
 gen() { cat "$DIR/gen" 2>/dev/null; }
 bump() { printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$DIR/gen.$$" && mv -f "$DIR/gen.$$" "$DIR/gen"; }
 
+# --- watchers: a loop of reads through this file -------------------------------------------------------
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+watch_loop() { # gh run watch <id> [...] | gh pr checks [<pr>] --watch [...]
+  local sub="$1" iv="$WATCH_SECS" fail_fast=0 exit_status=0 rest=() out rc v tty=0
+  shift 2
+  [ -t 1 ] && tty=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --watch|--compact) ;;
+      -i|--interval) v="${2:-}"; [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -gt "$iv" ] && iv="$v"; shift ;;
+      --interval=*) v="${1#--interval=}"; [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -gt "$iv" ] && iv="$v" ;;
+      --fail-fast) fail_fast=1 ;;
+      --exit-status) exit_status=1 ;;
+      *) rest+=("$1") ;;
+    esac
+    shift
+  done
+  log watch "$sub $iv"
+  while :; do
+    if [ "$sub" = run ]; then
+      out="$("$SELF" run view "${rest[@]}" --json status,conclusion -q '.status+" "+.conclusion')"; rc=$?
+      [ "$rc" -eq 0 ] || exit "$rc"
+      case "$out" in
+        completed*)
+          if [ "$exit_status" = 1 ]; then "$SELF" run view "${rest[@]}" --exit-status; else "$SELF" run view "${rest[@]}"; fi
+          exit $? ;;
+      esac
+      [ "$tty" = 1 ] && echo "$(date +%H:%M:%S) run ${rest[*]}: $out (next look in ${iv}s)"
+    else
+      out="$("$SELF" pr checks "${rest[@]}")"; rc=$?
+      if [ "$rc" -ne 8 ]; then printf '%s\n' "$out"; exit "$rc"; fi
+      if [ "$fail_fast" = 1 ] && grep -q "$(printf '\tfail\t')" <<<"$out"; then printf '%s\n' "$out"; exit 1; fi
+      [ "$tty" = 1 ] && printf '%s\n%s checks pending (next look in %ss)\n' "$out" "$(date +%H:%M:%S)" "$iv"
+    fi
+    sleep "$iv"; NOW="$(date +%s)"
+  done
+}
+
 KIND="$(classify "$@")"
 
 case "$KIND" in
@@ -190,19 +244,11 @@ case "$KIND" in
     bump; rm -f "$DIR"/resp/* 2>/dev/null
     exit "$rc" ;;
   watch)
-    # Raise the poll interval to the floor; leave every other word alone.
-    args=() iv="" i=0
-    for a in "$@"; do args+=("$a"); done
-    for ((i = 0; i < ${#args[@]}; i++)); do
-      case "${args[$i]}" in
-        -i|--interval) iv="${args[$((i + 1))]:-}"; [[ "$iv" =~ ^[0-9]+$ ]] && [ "$iv" -lt "$WATCH_SECS" ] && args[i + 1]="$WATCH_SECS" ;;
-        --interval=*) iv="${args[$i]#--interval=}"; [[ "$iv" =~ ^[0-9]+$ ]] && [ "$iv" -lt "$WATCH_SECS" ] && args[i]="--interval=$WATCH_SECS" ;;
-      esac
-    done
-    [ -n "$iv" ] || args+=(--interval "$WATCH_SECS")
-    wait_for_reset "$@"
-    log watch "${1:-} ${2:-}"
-    exec "$REAL" "${args[@]}" ;;
+    # A watcher polls THROUGH this wrapper (22 Nov 2026: an exec'd `gh run watch` / `pr checks --watch`
+    # polled GitHub on its own, uncounted, unshared and never held at the floor). Each poll is an ordinary
+    # read of this file: shared with every other caller, one line in calls.log, held at the floor, and
+    # charged to this caller's share. No real gh is ever left polling by itself.
+    watch_loop "$@" ;;
 esac
 
 # --- a read ----------------------------------------------------------------------------------------------

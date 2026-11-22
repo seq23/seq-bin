@@ -1407,6 +1407,33 @@ PR_RUNID="${RUNID:-}"
 PR_WF=""
 [ -z "$PR_RUNID" ] || PR_WF="$(gh run view "$PR_RUNID" --json workflowName -q '.workflowName // empty' 2>/dev/null || true)"
 case "$PR_WF" in *\"*|*\\*) PR_WF="" ;; esac   # never splice a quote or backslash into pick_run's jq filter: fall back to "newest"
+# SAME CODE, CHECKED ONCE (her ask 22 Nov 2026: "make this faster and not sacrifice quality"). When the
+# squash merge's tree is byte-for-byte the tree step 1 verified green on the PR head, main's run of the
+# same workflow checks the same files again. land then ships on the PR's run. It stays conservative:
+#   - only when step 1 ran (HEAD verified here),
+#   - the PR's workflow is also deploy.yml's gate (or there is no gate),
+#   - that workflow has nothing that differs between a PR and a push (no github.event / github.ref).
+# Any doubt or unreadable answer → main is watched exactly as before.
+# --- same_tree begin (tests/test-land-same-tree.sh) ---
+SAME_TREE=""
+[ -n "${MERGESHA:-}" ] || MERGESHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null || true)"
+if [ -n "${RUNID:-}" ] && [ -n "${HEAD:-}" ] && [ -n "$MERGESHA" ] && [ -n "$PR_WF" ] && [ "${LAND_SAME_TREE:-1}" = 1 ]; then
+  ST_GATE="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
+  ST_WFPATH="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=100" --jq ".workflows[] | select(.name == \"$PR_WF\") | .path" 2>/dev/null | head -1)"
+  ST_TM="$(gh api "repos/{owner}/{repo}/commits/$MERGESHA" --jq '.commit.tree.sha' 2>/dev/null || true)"
+  ST_TH="$(gh api "repos/{owner}/{repo}/commits/$HEAD" --jq '.commit.tree.sha' 2>/dev/null || true)"
+  if [ -n "$ST_TM" ] && [ "$ST_TM" = "$ST_TH" ] && [ -n "$ST_WFPATH" ] \
+     && { [ -z "$ST_GATE" ] || [ "$ST_GATE" = "$PR_WF" ]; } \
+     && git show "origin/main:$ST_WFPATH" >/dev/null 2>&1 \
+     && ! git show "origin/main:$ST_WFPATH" | grep -vE '^[[:space:]]*(#|group:)' | grep -qE 'github\.(event|ref|head_ref|base_ref)'; then
+    SAME_TREE=1
+  fi
+fi
+# --- same_tree end ---
+if [ -n "$SAME_TREE" ]; then
+  echo "     same tree as the tested head ${HEAD:0:7} (tree ${ST_TM:0:7}): the PR's green \"$PR_WF\" run $RUNID checked exactly this code — shipping on it, main's run of the same files is not waited for"
+  CONC=success
+else
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
 GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
@@ -1549,6 +1576,7 @@ case "$CONC" in
     die "main is $CONC after merging #$PR. Not deploying. Fix main first."
     ;;
 esac
+fi
 
 # A SELF-DEPLOYING REPO IS NOT DEPLOYED UNTIL EVERY ONE OF ITS CLOUDFLARE BUILDS SAYS SO. 25 Sep 2026,
 # local-guides-generator #48: main's GitHub workflows went green, this script printed "nothing to

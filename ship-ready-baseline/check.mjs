@@ -167,6 +167,18 @@ async function judge(browser, origin, target, viewport, opts) {
       const px = parseFloat(getComputedStyle(el).fontSize);
       if (px < 12) small.push(`${px}px "${t.textContent.trim().slice(0, 40)}"`);
     }
+    // Text drawn by CSS (a ::before table label, an ::after tag) has no text node to walk.
+    // Only letters and digits count, so an arrow or icon glyph is never "text".
+    for (const el of document.body.querySelectorAll("*")) {
+      if (!vis(el) || el.closest("[aria-hidden=true], .sr-only, .visually-hidden")) continue;
+      for (const pseudo of ["::before", "::after"]) {
+        const s = getComputedStyle(el, pseudo);
+        if (s.display === "none" || s.visibility === "hidden" || !s.content || s.content === "none" || s.content === "normal") continue;
+        const text = s.content.replace(/attr\(\s*([\w-]+)\s*\)/g, (_, n) => el.getAttribute(n) || "").replace(/["']/g, "").trim();
+        const px = parseFloat(s.fontSize);
+        if (/[\p{L}\p{N}]/u.test(text) && px < 12) small.push(`${px}px "${text.slice(0, 40)}"`);
+      }
+    }
     const brokenImgs = [...document.images].filter((i) => i.complete && i.naturalWidth === 0 && i.getAttribute("src")).map((i) => i.getAttribute("src"));
     const links = [...document.querySelectorAll("a[href]")].map((a) => a.href).filter((h) => h.startsWith(location.origin));
     const meta = (sel) => document.querySelector(sel)?.getAttribute("content")?.trim() || "";

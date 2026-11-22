@@ -18,6 +18,10 @@
 // every further write; reads go on, so the run still reports what Play holds. A re-run is the retry and
 // finishes only what is missing.
 //
+// Order guard: --apply writes nothing until RevenueCat holds every product on its Play app with the
+// code's type (catalog.revenuecat is the app's RevenueCat catalog). A Play product sold while RevenueCat
+// holds it as one_time is consumed, so the buyer's restore gives nothing back: NAMED STOP [RC_TYPES_NOT_READY].
+//
 // Dry run by default (reads Play, prints the plan, changes nothing); --apply writes, then reads back.
 // Exit: 0 = Play matches the code; 3 = dry run, Play still lacks something (run --apply);
 //       1 = a failure, a MISMATCH or a product switched off on Play; 2 = a NAMED STOP.
@@ -25,6 +29,7 @@
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { googleAccessToken } from './google-token.mjs';
+import { playTypesReady } from './revenuecat-setup.mjs';
 
 const API = 'https://androidpublisher.googleapis.com/androidpublisher/v3/applications';
 export const OPTION_ID = 'buy';
@@ -215,9 +220,10 @@ function printPlan(pl, log) {
  *   offers = [{ id, priceUsd, startTime, endTime }]: a launch discount; no startTime yet = WAITING.
  * getToken() returns a Play access token or '' (never printed). fetchFn is injectable for tests.
  * @param {{ app: string, packageName: string, products: any[] }} c
- * @param {{ argv?: string[], getToken: () => Promise<string>, fetchFn?: (url: string, init: any) => Promise<any>, log?: (line: string) => void, now?: number }} opts
+ * rcReady(c) answers the order guard ({ ok } or { ok: false, why }); by default it reads RevenueCat.
+ * @param {{ argv?: string[], getToken: () => Promise<string>, fetchFn?: (url: string, init: any) => Promise<any>, log?: (line: string) => void, now?: number, rcReady?: (c: any) => Promise<{ ok: boolean, why?: string }> }} opts
  */
-export async function run(c, { argv = process.argv.slice(2), getToken, fetchFn = fetch, log = console.log, now = Date.now() }) {
+export async function run(c, { argv = process.argv.slice(2), getToken, fetchFn = fetch, log = console.log, now = Date.now(), rcReady = cat => playTypesReady(cat.revenuecat) }) {
   const apply = argv.includes('--apply');
   const tag = `OUTPUT play-products ${c?.app ?? '?'}`;
   if (!c?.products?.length) { log(`${tag}: NAMED STOP [NO_PRODUCTS_IN_SOURCE] the app code lists no products`); return 1; }
@@ -279,6 +285,8 @@ export async function run(c, { argv = process.argv.slice(2), getToken, fetchFn =
     const code = verdict(pl) || (work(pl) ? 3 : 0);
     return finish(`dry run on ${c.packageName}: ${counts(pl)}${work(pl) ? ' (Play lacks these: --apply writes them)' : ''}`, code);
   }
+  const rc = await rcReady(c);
+  if (!rc.ok) return finish(`${rc.why}; nothing written to Play`, 2);
 
   const n = { created: 0, activated: 0, appeared: 0, offersCreated: 0, offersActivated: 0 };
   const conversions = new Map();

@@ -65,9 +65,9 @@ function fakePlay({ products = [], fault = () => null, activateWorks = true, onG
   };
   return { fetchFn, db, offers, calls };
 }
-const go = async (c, play, argv = [], now) => {
+const go = async (c, play, argv = [], now, rcReady = async () => ({ ok: true })) => {
   const lines = [];
-  const code = await run(c, { argv, getToken: async () => 'token', fetchFn: play.fetchFn, log: l => lines.push(l), now });
+  const code = await run(c, { argv, getToken: async () => 'token', fetchFn: play.fetchFn, log: l => lines.push(l), now, rcReady });
   return { code, lines, out: lines.at(-1) };
 };
 const onPlay = (id, usCents, state = 'ACTIVE') => ({ productId: id, listings: [{ title: id }], purchaseOptions: [{ purchaseOptionId: OPTION_ID, state,
@@ -91,6 +91,20 @@ test('a dry run with products still to create exits 3, never 0, and writes nothi
   assert.equal(r.code, 3);
   assert.match(r.out, /3 to create.*Play lacks these/);
   assert.ok(play.calls.every(c => c.startsWith('GET')));
+});
+
+test('--apply writes nothing to Play while RevenueCat still holds a Play product as one_time (a sale would be consumed)', async () => {
+  const play = fakePlay();
+  const c = catalog([product('kit_a', 14.99)]);
+  const seen = [];
+  const r = await go(c, play, ['--apply'], undefined, async cat => { seen.push(cat); return { ok: false, why: 'NAMED STOP [RC_TYPES_NOT_READY] kit_a is one_time, code says non_consumable' }; });
+  assert.equal(r.code, 2, r.lines.join('\n'));
+  assert.equal(seen[0], c, 'the guard is asked about this catalog');
+  assert.match(r.out, /RC_TYPES_NOT_READY.*nothing written to Play/);
+  assert.ok(play.calls.every(x => x.startsWith('GET')), play.calls.join('\n'));
+  assert.equal(play.db.size, 0);
+  const dry = await go(c, play, [], undefined, async () => { throw Error('a dry run never asks RevenueCat'); });
+  assert.equal(dry.code, 3, 'the dry run still plans');
 });
 
 test('apply creates and activates every product, reads back, and a second dry run exits 0', async () => {

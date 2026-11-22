@@ -25,6 +25,11 @@
 #      charged to its caller, no faster than every GH_SHARE_WATCH_SECS (30) seconds (a shorter --interval
 #      is raised to it). Exit codes are gh's: `pr checks` 0 passed / 1 failed (--fail-fast stops at the
 #      first fail), `run watch --exit-status` 1 on a failed run.
+#      `gh run list --json …` (2 REST, never a 304) is asked as ONE api GET of
+#      …/actions/[workflows/<wf>/]runs, so it shares the cache and is free while unchanged; the answer
+#      keeps gh's shape (its field names, conclusion "" while running, -q applied), and a workflow name is
+#      looked up through the (also free) workflows list. Anything it cannot say exactly (no --json, an
+#      unknown flag or field, --limit over 100, a name that is not one workflow) goes to gh's own run list.
 #   3. LOW ALLOWANCE WAITS, IT DOES NOT FAIL. Before a read reaches GitHub, the allowance left (from
 #      GitHub's free rate_limit endpoint, re-read every 30 s and shared) is checked; at or under
 #      GH_SHARE_FLOOR (300) the read waits for the reset in ONE bounded sleep, then runs. The floor is
@@ -284,8 +289,73 @@ case "$KIND" in
     watch_loop "$@" ;;
 esac
 
+# --- run list as one api GET --------------------------------------------------------------------------
+# `gh run list --json …` costs 2 REST requests and can never be a free 304 (gh asks without an ETag), and
+# it was the largest REST cost left after the watch fixes (108 of 312 a 10 min, projected, 22 Nov 2026,
+# many callers: land, tap-through and clickthrough scripts, sessions). The same question as ONE api GET
+# of …/actions/[workflows/<wf>/]runs goes through the api read below: shared, and free while unchanged.
+# Answers keep gh's shape: the --json fields asked, with gh's names (databaseId, headSha, …; conclusion
+# "" while running), newest first, then -q. Anything else gh run list can do (no --json, --all, a
+# --limit over 100, a flag not listed here, a workflow name that is not exactly one workflow) goes to gh
+# itself, unchanged.
+urlenc() { local s="$1" o="" c i; for ((i = 0; i < ${#s}; i++)); do c="${s:i:1}"; case "$c" in [a-zA-Z0-9._~/-]) o+="$c" ;; *) o+="$(printf '%%%02X' "'$c")" ;; esac; done; printf '%s' "$o"; }
+jqstr() { local s="${1//\\/\\\\}"; printf '"%s"' "${s//\"/\\\"}"; }
+run_list_api() { # gh run list args (after "run list") -> exec's the api read, or returns 1 (gh does it)
+  local wf="" br="" st="" ev="" lim=20 json="" q="" have_q=0 repo="{owner}/{repo}" sha="" user="" a v
+  local -a qs=()
+  while [ $# -gt 0 ]; do
+    a="$1"; v=""
+    case "$a" in --*=*) v="${a#*=}"; a="${a%%=*}" ;; esac
+    case "$a" in
+      -w|--workflow|-b|--branch|-s|--status|-e|--event|-L|--limit|--json|-q|--jq|-R|--repo|-c|--commit|-u|--user)
+        if [ -z "$v" ]; then [ $# -ge 2 ] || return 1; v="$2"; shift; fi ;;
+      *) return 1 ;;
+    esac
+    case "$a" in
+      -w|--workflow) wf="$v" ;; -b|--branch) br="$v" ;; -s|--status) st="$v" ;; -e|--event) ev="$v" ;;
+      -L|--limit) lim="$v" ;; --json) json="$v" ;; -q|--jq) q="$v"; have_q=1 ;; -c|--commit) sha="$v" ;; -u|--user) user="$v" ;;
+      -R|--repo) repo="${v#https://github.com/}"; repo="${repo%/}"; [[ "$repo" == */* ]] || return 1 ;;
+    esac
+    shift
+  done
+  [ -n "$json" ] && [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -ge 1 ] && [ "$lim" -le 100 ] || return 1
+  local f obj="" e
+  IFS=, read -ra fs <<<"$json"
+  for f in "${fs[@]}"; do
+    case "$f" in
+      attempt) e=.run_attempt ;; conclusion) e='(.conclusion // "")' ;; createdAt) e=.created_at ;;
+      databaseId) e=.id ;; displayTitle) e=.display_title ;; event) e=.event ;; headBranch) e=.head_branch ;;
+      headSha) e=.head_sha ;; name|workflowName) e=.name ;; number) e=.run_number ;; startedAt) e=.run_started_at ;;
+      status) e=.status ;; updatedAt) e=.updated_at ;; url) e=.html_url ;; workflowDatabaseId) e=.workflow_id ;;
+      *) return 1 ;;
+    esac
+    obj+="${obj:+, }$f: $e"
+  done
+  local path="repos/$repo/actions/runs"
+  if [ -n "$wf" ]; then
+    if [[ "$wf" =~ ^[0-9]+$ ]] || [[ "$wf" == *.yml ]] || [[ "$wf" == *.yaml ]]; then
+      path="repos/$repo/actions/workflows/$(urlenc "${wf##*/}")/runs"
+    else   # a workflow NAME: its id from the workflow list (itself a shared api read, free while unchanged)
+      local ids
+      ids="$("$SELF" api "repos/$repo/actions/workflows?per_page=100" --jq "if .total_count > 100 then \"many\" else (.workflows[] | select(.name == $(jqstr "$wf")) | .id) end")" || return 1
+      [[ "$ids" =~ ^[0-9]+$ ]] || return 1   # none, several, or more than 100 workflows: gh decides
+      path="repos/$repo/actions/workflows/$ids/runs"
+    fi
+  fi
+  qs+=("per_page=$lim")
+  [ -n "$br" ] && qs+=("branch=$(urlenc "$br")"); [ -n "$st" ] && qs+=("status=$(urlenc "$st")")
+  [ -n "$ev" ] && qs+=("event=$(urlenc "$ev")"); [ -n "$sha" ] && qs+=("head_sha=$(urlenc "$sha")")
+  [ -n "$user" ] && qs+=("actor=$(urlenc "$user")")
+  local IFS='&'; path+="?${qs[*]}"; unset IFS
+  local prog="[.workflow_runs[] | {$obj}]"
+  [ "$have_q" = 1 ] && prog="$prog | ($q)"
+  log run-list-api "run list"
+  exec "$SELF" api "$path" --jq "$prog"
+}
+
 # --- a read ----------------------------------------------------------------------------------------------
 [ -t 1 ] && { wait_for_reset "$@"; log read-tty "${1:-} ${2:-}"; exec "$REAL" "$@"; }
+[ "${1:-} ${2:-}" = "run list" ] && run_list_api "${@:3}"   # exec's on success; else gh's own run list below
 # THE KEY NAMES THE QUESTION, NOT THE ASKER (22 Nov 2026 hostile review F3: branch and HEAD were in every
 # key, so lands in different worktrees never shared `run view 123` and 9% of reads were hits). The
 # checkout's branch and commit count only when the answer depends on them: a pr read that names no PR

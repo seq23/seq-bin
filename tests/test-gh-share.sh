@@ -21,6 +21,12 @@ body() {
         printf 'lint\tpass\t1s\turl\t\nbuild\t%s\t2s\turl\t\n' "${FAKE_CONCL:-pass}"; [ "${FAKE_CONCL:-pass}" = pass ]; return $? ;;
     esac
   fi
+  # GitHub's runs and workflows lists, with --jq applied the way gh applies it (FAKE_RUNS / FAKE_WORKFLOWS: JSON)
+  local a prog="" prev=""; for a in "$@"; do [ "$prev" = --jq ] && prog="$a"; prev="$a"; done
+  case "$1 $2" in
+    "api repos/"*"/runs?"*) [ -n "${FAKE_RUNS:-}" ] && { jq -r "${prog:-.}" <<<"$FAKE_RUNS"; return; } ;;
+    "api repos/"*"/actions/workflows?"*) [ -n "${FAKE_WORKFLOWS:-}" ] && { jq -r "${prog:-.}" <<<"$FAKE_WORKFLOWS"; return; } ;;
+  esac
   [ -n "${FAKE_SLOW:-}" ] && [ "$1" = pr ] && [ "$2" = view ] && sleep "$FAKE_SLOW"   # a read in flight
   echo "answer-$(wc -l < "$FAKE_LOG" | tr -d ' ') for $*"
   return "${FAKE_RC:-0}"
@@ -46,7 +52,7 @@ chmod +x "$T/fake-gh"
 export GH_SHARE_REAL="$T/fake-gh" FAKE_LOG="$T/calls" FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 ))
 pass=0
 fail() { echo "FAIL: $*"; exit 1; }
-fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_WATCH_SECS FAKE_DONE_AT FAKE_CONCL FAKE_EARLY FAKE_RL_FAIL GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW FAKE_ETAG; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
+fresh() { rm -rf "$T/share" "$T/calls"; touch "$T/calls"; export GH_SHARE_DIR="$T/share"; unset GH_SHARE_WATCH_SECS FAKE_DONE_AT FAKE_CONCL FAKE_EARLY FAKE_RL_FAIL GH_SHARE_TTL GH_SHARE_FLOOR GH_SHARE_MAX_WAIT GH_SHARE_PER_CALLER GH_SHARE_UNTIL GH_SHARE_SWEEP_EVERY FAKE_RC FAKE_GQL_REM FAKE_GQL_RESET FAKE_SLOW FAKE_ETAG FAKE_RUNS FAKE_WORKFLOWS; export FAKE_REM=4000 FAKE_RESET=$(( $(date +%s) + 600 )); }
 real_calls() { grep -vc '^api rate_limit' "$T/calls"; }
 GH_UNDER_TEST="${GH_SHARE_UNDER_TEST:-$HERE/gh}"
 gh() { "$GH_UNDER_TEST" "$@" </dev/null; }
@@ -286,6 +292,26 @@ fresh; gh pr checks 24 >/dev/null
 perl -e 'utime undef, time - 6, @ARGV' "$T"/share/resp/*
 gh pr checks 24 >/dev/null
 [ "$(real_calls)" = 2 ] || fail "an answer 6 s old was served from the cache ($(real_calls) calls, want 2): the default TTL is over 5 s"
+pass=$((pass + 1))
+
+# 25. RUN LIST IS ONE api GET, free while unchanged: `gh run list --json` (2 REST, never a 304) is asked as
+#     …/actions/[workflows/<wf>/]runs; the answer keeps gh's shape (its field names, conclusion "" while
+#     running, -q applied); a workflow NAME is looked up once; what it cannot say exactly goes to gh itself
+fresh; export GH_SHARE_TTL=0
+export FAKE_RUNS='{"total_count":2,"workflow_runs":[{"id":11,"head_sha":"aaa","status":"in_progress","conclusion":null,"name":"e2e","event":"push"},{"id":10,"head_sha":"bbb","status":"completed","conclusion":"success","name":"e2e","event":"push"}]}'
+export FAKE_WORKFLOWS='{"total_count":2,"workflows":[{"id":77,"name":"e2e","path":".github/workflows/e2e.yml"},{"id":78,"name":"Fast Check","path":".github/workflows/fast.yml"}]}'
+got="$(gh run list --workflow e2e --branch feat/x --status completed --limit 5 --json databaseId,headSha,conclusion -q '.[] | "\(.databaseId) \(.headSha) \(.conclusion)"')"
+[ "$got" = "$(printf '11 aaa \n10 bbb success')" ] || fail "run list answer not in gh's shape: '$got'"
+grep -q '^api repos/{owner}/{repo}/actions/workflows/77/runs?per_page=5&branch=feat/x&status=completed ' "$T/calls" || fail "run list was not one api GET of the workflow's runs: $(cat "$T/calls")"
+grep -q '^run list' "$T/calls" && fail "run list reached gh's own run list (2 REST, never free)"
+[ "$(gh run list -R o/r -w fast.yml -L 1 --json databaseId,name | jq -c .)" = '[{"databaseId":11,"name":"e2e"},{"databaseId":10,"name":"e2e"}]' ] || fail "run list without -q is not gh's JSON (only the fields asked)"
+grep -q '^api repos/o/r/actions/workflows/fast.yml/runs?per_page=1 ' "$T/calls" || fail "-R and a workflow file were not asked directly: $(tail -2 "$T/calls")"
+export FAKE_ETAG=same; gh run list -w e2e --json status >/dev/null; n0=$(wc -l < "$T/share/calls.log"); gh run list -w e2e --json status >/dev/null
+again="$(tail -n +$((n0 + 1)) "$T/share/calls.log")"
+[ "$(grep -c ' 304 api ' <<<"$again")" = 2 ] && ! grep -q ' miss ' <<<"$again" || fail "a repeated run list (name lookup + runs) was not two free 304s: $again"
+unset FAKE_ETAG; : > "$T/calls"
+gh run list --json databaseId --all >/dev/null; gh run list -L 200 --json databaseId >/dev/null; gh run list -w "No Such" --json databaseId >/dev/null; gh run list -w e2e >/dev/null
+[ "$(grep -c '^run list' "$T/calls")" = 4 ] || fail "run list the api cannot say exactly (--all, --limit 200, an unknown workflow, no --json) did not go to gh: $(cat "$T/calls")"
 pass=$((pass + 1))
 
 echo "test-gh-share: $pass cases passed — one shared cache, never stale, waits for the reset, writes never held and drop the cache, watchers poll through it, a share per poller, an unreadable allowance stops, login shells find it"

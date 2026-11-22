@@ -2,7 +2,7 @@
 //   node --test tests/store/
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { storeType, diff, run, playTypesReady } from '../../store/revenuecat-setup.mjs';
+import { storeType, sameType, diff, run, playTypesReady } from '../../store/revenuecat-setup.mjs';
 
 const catalog = {
   app: 'Example', projectName: 'Example', vaultPrefix: 'EX', secretEnv: 'EXAMPLE_RC_TEST_KEY', bundleId: 'com.example.app',
@@ -11,12 +11,19 @@ const catalog = {
   offerings: [{ key: 'default', name: 'Default', current: true, packages: ['kit', 'extra_event'] }],
 };
 
-test('no store ever gets one_time: on Play that would make RevenueCat consume a non-consumable purchase', () => {
+test('a kind is consumable or non_consumable; RevenueCat\'s Play one_time matches only through is_consumable', () => {
   for (const store of ['app_store', 'play_store', 'test_store']) {
     assert.equal(storeType(store, 'non_consumable'), 'non_consumable');
     assert.equal(storeType(store, 'consumable'), 'consumable');
     assert.throws(() => storeType(store, 'one_time'));
   }
+  assert.equal(sameType({ type: 'one_time', one_time: { is_consumable: false } }, 'non_consumable'), true);
+  assert.equal(sameType({ type: 'one_time', one_time: { is_consumable: true } }, 'consumable'), true);
+  assert.equal(sameType({ type: 'one_time', one_time: { is_consumable: true } }, 'non_consumable'), false, 'a non-consumable that would be consumed');
+  assert.equal(sameType({ type: 'one_time', one_time: { is_consumable: false } }, 'consumable'), false);
+  assert.equal(sameType({ type: 'one_time' }, 'non_consumable'), false, 'no flag is unknown, never a match');
+  assert.equal(sameType({ type: 'non_consumable' }, 'non_consumable'), true);
+  assert.equal(sameType({ type: 'consumable' }, 'non_consumable'), false);
 });
 
 /** A fake RevenueCat holding one project; `products` seeds what already exists. */
@@ -44,8 +51,17 @@ function fakeRc({ products = [], fault = () => null, readOnly = false, pageSize 
     if (path === '/projects') return items([{ id: 'proj', name: 'Example' }]);
     if (path === '/projects/proj/apps') return items(s.apps);
     if (path === '/projects/proj/products' && init.method === 'GET') return items(s.products);
-    if (path === '/projects/proj/products') { const p = { id: next('prod'), ...body }; s.products.push(p); return reply(201, p); }
-    if ((m = path.match(/^\/projects\/proj\/products\/([^/]+)$/))) { const p = s.products.find(x => x.id === m[1]); Object.assign(p, body); return reply(200, p); }
+    // Like live RevenueCat: a Play one-time product is stored as one_time with the kind in is_consumable,
+    // `one_time` cannot be written, and an update of `type` is ignored.
+    if (path === '/projects/proj/products') {
+      const p = { id: next('prod'), ...body };
+      if (body.app_id === 'app_play') Object.assign(p, { type: 'one_time', one_time: { is_consumable: body.type === 'consumable' } });
+      s.products.push(p); return reply(201, p);
+    }
+    if ((m = path.match(/^\/projects\/proj\/products\/([^/]+)$/))) {
+      if (body.one_time) return reply(400, { type: 'parameter_error', message: "Additional properties are not allowed ('one_time' was unexpected)" });
+      const p = s.products.find(x => x.id === m[1]); const { type, ...rest } = body; Object.assign(p, rest); return reply(200, p);
+    }
     if (path === '/projects/proj/entitlements' && init.method === 'GET') return items(s.ents);
     if (path === '/projects/proj/entitlements') { const e = { id: next('ent'), ...body }; s.ents.push(e); s.entProducts[e.id] = []; return reply(201, e); }
     if ((m = path.match(/^\/projects\/proj\/entitlements\/([^/]+)\/products$/))) return items(s.entProducts[m[1]].map(pid => s.products.find(p => p.id === pid)));
@@ -69,28 +85,36 @@ async function withRc(rc, fn) {
   try { return { code: await fn(), lines }; } finally { [globalThis.fetch, console.log] = saved; if (saved[2] === undefined) delete process.env.EXAMPLE_RC_TEST_KEY; else process.env.EXAMPLE_RC_TEST_KEY = saved[2]; }
 }
 
-test('a Play product held as one_time is corrected to the code type, and the read-back proves it', async () => {
-  const rc = fakeRc({ products: [
-    { id: 'old1', app_id: 'app_play', store_identifier: 'kit', type: 'one_time' },
-    { id: 'old2', app_id: 'app_play', store_identifier: 'extra_event', type: 'one_time' },
-  ] });
+const WRONG_FLAG = { id: 'old1', app_id: 'app_play', store_identifier: 'kit', type: 'one_time', one_time: { is_consumable: true } };
+
+test('Play products come back as one_time with the right is_consumable and match the code; a re-run writes nothing', async () => {
+  const rc = fakeRc();
   const r = await withRc(rc, () => run(catalog, []));
   assert.equal(r.code, 0, r.lines.join('\n'));
-  assert.equal(rc.s.products.find(p => p.id === 'old1').type, 'non_consumable');
-  assert.equal(rc.s.products.find(p => p.id === 'old2').type, 'consumable');
-  assert.ok(rc.s.products.every(p => p.type !== 'one_time'));
-  assert.ok(!rc.s.posts.some(p => p.startsWith('/projects/proj/products {') && p.includes('"store_identifier":"kit","app_id":"app_play"')), 'corrected in place, not duplicated');
-  assert.match(r.lines.join('\n'), /type kit on play_store: one_time -> non_consumable/);
+  const play = rc.s.products.filter(p => p.app_id === 'app_play');
+  assert.deepEqual(play.map(p => [p.store_identifier, p.type, p.one_time.is_consumable]), [['kit', 'one_time', false], ['extra_event', 'one_time', true]]);
+  const posts = rc.s.posts.length;
+  assert.equal((await withRc(rc, () => run(catalog, []))).code, 0);
+  assert.equal(rc.s.posts.length, posts, 'nothing rewritten');
+});
+
+test('a Play product with the wrong is_consumable is a logged mismatch, exit 1: never deleted, re-created or duplicated', async () => {
+  const rc = fakeRc({ products: [WRONG_FLAG] });
+  const r = await withRc(rc, () => run(catalog, []));
+  assert.equal(r.code, 1, r.lines.join('\n'));
+  assert.match(r.lines.join('\n'), /product kit on play_store is one_time \(is_consumable: true\), code says non_consumable/);
+  assert.equal(rc.s.products.filter(p => p.store_identifier === 'kit' && p.app_id === 'app_play').length, 1);
+  assert.ok(!rc.s.posts.some(p => p.startsWith('/projects/proj/products/')), 'no update of an existing product');
 });
 
 test('the read-back check fails when a product type differs from the code', () => {
   const live = {
     apps: [{ id: 'a', type: 'play_store', play_store: { package_name: catalog.bundleId } }],
-    products: [{ app_id: 'a', store_identifier: 'kit', type: 'one_time' }, { app_id: 'a', store_identifier: 'extra_event', type: 'consumable' }],
+    products: [{ app_id: 'a', store_identifier: 'kit', type: 'one_time', one_time: { is_consumable: true } }, { app_id: 'a', store_identifier: 'extra_event', type: 'one_time', one_time: { is_consumable: true } }],
     entitlementProducts: { kit: ['kit'] }, offeringPackages: { default: [{ key: 'kit', position: 1, products: ['kit'] }, { key: 'extra_event', position: 2, products: ['extra_event'] }] }, currentOffering: ['default'],
   };
   const out = diff(catalog, live);
-  assert.ok(out.some(l => l === 'product kit on play_store is one_time, code says non_consumable'), out.join('\n'));
+  assert.deepEqual(out.filter(l => l.startsWith('product ')), ['product kit on play_store is one_time (is_consumable: true), code says non_consumable']);
 });
 
 const FAULTS = { 'a 503': { status: 503, body: 'down' }, 'a network error': 'throw', 'a reply that is not JSON': { status: 200, body: '<html>' } };
@@ -123,7 +147,7 @@ test('a 503 on /projects says RevenueCat is unavailable, never that the key sees
 });
 
 test('a key that cannot write is NAMED STOP RC_KEY_READ_ONLY naming the key, exit 3, after the first refused write', async () => {
-  const rc = fakeRc({ readOnly: true, products: [{ id: 'old1', app_id: 'app_play', store_identifier: 'kit', type: 'one_time' }] });
+  const rc = fakeRc({ readOnly: true });
   const r = await withRc(rc, () => run(catalog, []));
   assert.equal(r.code, 3, r.lines.join('\n'));
   assert.match(r.lines.join('\n'), /NAMED STOP \[RC_KEY_READ_ONLY\] EXAMPLE_RC_TEST_KEY cannot write/);
@@ -131,12 +155,12 @@ test('a key that cannot write is NAMED STOP RC_KEY_READ_ONLY naming the key, exi
 });
 
 test('--dry-run reads RevenueCat, lists the drift, exits non-zero and writes nothing; a matching project exits 0', async () => {
-  const rc = fakeRc({ products: [{ id: 'old1', app_id: 'app_play', store_identifier: 'kit', type: 'one_time' }] });
+  const rc = fakeRc();
   const r = await withRc(rc, () => run(catalog, ['--dry-run']));
   assert.equal(r.code, 1, r.lines.join('\n'));
-  assert.ok(r.lines.includes('would fix: product kit on play_store is one_time, code says non_consumable'), r.lines.join('\n'));
+  assert.ok(r.lines.includes('would fix: product kit missing on play_store'), r.lines.join('\n'));
   assert.equal(rc.s.posts.length, 0);
-  assert.equal(rc.s.products.find(p => p.id === 'old1').type, 'one_time');
+  assert.equal(rc.s.products.length, 0);
   assert.equal((await withRc(rc, () => run(catalog, []))).code, 0);
   const clean = await withRc(rc, () => run(catalog, ['--dry-run']));
   assert.equal(clean.code, 0, clean.lines.join('\n'));
@@ -156,11 +180,12 @@ test('every page of a list is read: products past the first page are never creat
   assert.equal(rc.s.products.length, 6);
 });
 
-test('the Play order guard is ready only when every Play product has the code type', async () => {
-  const rc = fakeRc({ products: [{ id: 'old1', app_id: 'app_play', store_identifier: 'kit', type: 'one_time' }] });
-  const notYet = await withRc(rc, () => playTypesReady(catalog));
+test('the Play order guard is ready only when every Play product has the code kind', async () => {
+  const notYet = await withRc(fakeRc({ products: [WRONG_FLAG] }), () => playTypesReady(catalog));
   assert.equal(notYet.code.ok, false);
-  assert.match(notYet.code.why, /RC_TYPES_NOT_READY.*kit is one_time.*extra_event missing/);
+  assert.match(notYet.code.why, /RC_TYPES_NOT_READY.*kit is one_time \(is_consumable: true\), code says non_consumable; extra_event missing/);
+  const rc = fakeRc();
+  assert.equal((await withRc(rc, () => playTypesReady(catalog))).code.ok, false, 'nothing on Play yet');
   assert.equal((await withRc(rc, () => run(catalog, []))).code, 0);
   assert.deepEqual((await withRc(rc, () => playTypesReady(catalog))).code, { ok: true });
   const down = await withRc(fakeRc({ fault: (m, p) => (p === '/projects/proj/products' ? 'throw' : null) }), () => playTypesReady(catalog));

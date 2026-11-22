@@ -93,11 +93,11 @@ test('a dry run with products still to create exits 3, never 0, and writes nothi
   assert.ok(play.calls.every(c => c.startsWith('GET')));
 });
 
-test('--apply writes nothing to Play while RevenueCat still holds a Play product as one_time (a sale would be consumed)', async () => {
+test('--apply writes nothing to Play while RevenueCat still holds a Play product as consumable when the code says non_consumable (a sale would be consumed)', async () => {
   const play = fakePlay();
   const c = catalog([product('kit_a', 14.99)]);
   const seen = [];
-  const r = await go(c, play, ['--apply'], undefined, async cat => { seen.push(cat); return { ok: false, why: 'NAMED STOP [RC_TYPES_NOT_READY] kit_a is one_time, code says non_consumable' }; });
+  const r = await go(c, play, ['--apply'], undefined, async cat => { seen.push(cat); return { ok: false, why: 'NAMED STOP [RC_TYPES_NOT_READY] kit_a is one_time (is_consumable: true), code says non_consumable' }; });
   assert.equal(r.code, 2, r.lines.join('\n'));
   assert.equal(seen[0], c, 'the guard is asked about this catalog');
   assert.match(r.out, /RC_TYPES_NOT_READY.*nothing written to Play/);

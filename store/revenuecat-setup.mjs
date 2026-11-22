@@ -23,14 +23,24 @@ const API = 'https://api.revenuecat.com/v2';
 const STORE_SLOT = { app_store: 'IOS', play_store: 'ANDROID', test_store: 'TEST' };
 
 /**
- * The RevenueCat product type, the same on every store: the code's own kind. Never `one_time`: on Google
- * Play RevenueCat consumes every one-time purchase not marked non_consumable, so a buyer who reinstalls
- * or changes phone gets nothing back from restore (22 Nov 2026, every Play product had been one_time).
+ * The product type the tool asks RevenueCat for: the code's own kind, consumable or non_consumable.
  */
 export function storeType(appType, kind) {
   if (kind !== 'consumable' && kind !== 'non_consumable') throw Error(`product kind must be consumable or non_consumable, not ${kind}`);
   return kind;
 }
+
+/**
+ * Does RevenueCat hold this product as the code's kind? RevenueCat v2 keeps every Google Play one-time
+ * product as `type: one_time` and the kind in `one_time.is_consumable` (read live 22 Nov 2026; an update of
+ * `type` is ignored and `one_time` cannot be written). A wrong flag would let a non-consumable sale be
+ * consumed, so it is a mismatch, never fixed by deleting or re-creating the product.
+ */
+export function sameType(x, kind) {
+  if (x.type === 'one_time') return x.one_time?.is_consumable === (storeType('', kind) === 'consumable');
+  return x.type === storeType('', kind);
+}
+const typeOf = x => (x.type === 'one_time' ? `one_time (is_consumable: ${x.one_time?.is_consumable})` : x.type);
 
 /** Every object the catalog needs, as plain lines (also the --dry-run output). */
 export function plan(c) {
@@ -52,7 +62,7 @@ export function diff(c, live) {
   for (const p of c.products) for (const a of live.apps.filter(a => STORE_SLOT[a.type])) {
     const x = live.products.find(x => x.app_id === a.id && x.store_identifier === p.id);
     if (!x) out.push(`product ${p.id} missing on ${a.type}`);
-    else if (x.type !== storeType(a.type, p.kind)) out.push(`product ${p.id} on ${a.type} is ${x.type}, code says ${storeType(a.type, p.kind)}`);
+    else if (!sameType(x, p.kind)) out.push(`product ${p.id} on ${a.type} is ${typeOf(x)}, code says ${p.kind}`);
   }
   for (const e of c.entitlements) {
     const have = live.entitlementProducts[e.key];
@@ -144,7 +154,7 @@ async function readLive(P, list) {
 
 /**
  * For play-products, before it writes to Play: is every catalog product on RevenueCat's play_store app,
- * with the code's type? Until it is, a Play sale could be consumed (one_time) or unknown to the app.
+ * with the code's kind (see sameType)? Until it is, a Play sale could be consumed or unknown to the app.
  * Returns { ok: true } or { ok: false, why, code }: code 1 = RevenueCat could not be read (FAILED, an outage),
  * 2 = a NAMED STOP, 3 = a key only the owner can change. Read-only.
  */
@@ -160,7 +170,7 @@ export async function playTypesReady(c) {
     const products = (await list(`${P}/products`)).filter(x => x.app_id === play[0].id);
     const wrong = c.products.flatMap(p => {
       const x = products.find(x => x.store_identifier === p.id);
-      return !x ? [`${p.id} missing`] : x.type !== storeType('play_store', p.kind) ? [`${p.id} is ${x.type}, code says ${p.kind}`] : [];
+      return !x ? [`${p.id} missing`] : !sameType(x, p.kind) ? [`${p.id} is ${typeOf(x)}, code says ${p.kind}`] : [];
     });
     return wrong.length ? { ok: false, code: 2, why: `NAMED STOP [RC_TYPES_NOT_READY] RevenueCat's Play products do not match the code yet (run ~/bin/revenuecat-setup first): ${wrong.join('; ')}` } : { ok: true };
   } catch (e) {
@@ -200,16 +210,6 @@ export async function run(c, argv = process.argv.slice(2)) {
       const body = { store_identifier: p.id, app_id: a.id, type: storeType(a.type, p.kind), display_name: p.name };
       if (a.type === 'test_store') body.title = p.name;
       await call('POST', `${P}/products`, body);
-    }
-    products = await list(`${P}/products`);
-    // A product made with the wrong type (before 22 Nov 2026: one_time on Play) is corrected in place.
-    for (const x of products) {
-      const p = c.products.find(p => p.id === x.store_identifier);
-      const a = apps.find(a => a.id === x.app_id);
-      if (p && a && x.type !== storeType(a.type, p.kind)) {
-        await call('POST', `${P}/products/${x.id}`, { type: storeType(a.type, p.kind) });
-        console.log(`type ${p.id} on ${a.type}: ${x.type} -> ${storeType(a.type, p.kind)}`);
-      }
     }
     products = await list(`${P}/products`);
     const idsFor = sid => products.filter(x => x.store_identifier === sid).map(x => x.id);

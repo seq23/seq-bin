@@ -19,8 +19,8 @@
 // finishes only what is missing.
 //
 // Order guard: --apply writes nothing until RevenueCat holds every product on its Play app with the
-// code's type (catalog.revenuecat is the app's RevenueCat catalog). A Play product sold while RevenueCat
-// holds it as one_time is consumed, so the buyer's restore gives nothing back: NAMED STOP [RC_TYPES_NOT_READY].
+// code's kind (catalog.revenuecat is the app's RevenueCat catalog). A Play product sold while RevenueCat
+// holds it with the wrong is_consumable could be consumed, so the buyer's restore gives nothing back: NAMED STOP [RC_TYPES_NOT_READY].
 //
 // Dry run by default (reads Play, prints the plan, changes nothing); --apply writes, then reads back.
 // Exit: 0 = Play matches the code; 3 = dry run, Play still lacks something (run --apply);

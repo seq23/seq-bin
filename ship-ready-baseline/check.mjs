@@ -15,7 +15,7 @@
 // at 390 and 1280 px, and a page without the signed_in selector is a fail (it rendered the login screen).
 // or a list of those (a site and an app in one repo).
 // Each automatic fail is one plain line; ZERO pages rendered is a fail (rule 0). Writes <out>/baseline.json,
-// one screenshot per page and viewport, and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
+// one screenshot per page and viewport (plus a -dark one where the page has a dark mode), and a job summary. Exit 0 pass | 1 fails found | 2 bad config.
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync, statSync, readdirSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
@@ -155,7 +155,7 @@ async function judge(browser, origin, target, viewport, opts) {
   if (opts.signedIn && !(await page.locator(opts.signedIn).locator("visible=true").count().catch(() => 0)))
     fail(row, `${target.label} did not render signed in (no ${opts.signedIn} on screen)`);
   const shot = `${target.label.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "home"}-${viewport.width}.png`;
-  await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => {});
+  const light = await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).then(() => true, () => false);
   row.shot = `shots/${shot}`; T("shot");
   const facts = await page.evaluate(() => {
     const vis = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0; };
@@ -197,6 +197,28 @@ async function judge(browser, origin, target, viewport, opts) {
   for (const v of axe) for (const n of v.nodes.slice(0, 3)) fail(row, `${target.label} has text below 4.5:1 contrast: ${n.target.join(" ")}`);
   T("axe");
   row.links = facts.links;
+  // Dark mode (prefers-color-scheme: dark), after the light checks so they judge the untouched page. It is
+  // read from computed colours, not screenshot bytes (an animation is not a dark mode): first by media query
+  // alone, then after a reload for a site that picks its theme in script at load. "none" means the page does
+  // not follow prefers-color-scheme (a toggle-only dark theme also reads "none"); "not read" means it could not
+  // be judged in the page's time budget. Informational: never a fail.
+  row.dark = "not read";
+  const budget = () => Date.now() - t0 < (PAGE_SECS - 20) * 1000;
+  const colours = () => page.evaluate(() => ["html", "body", "h1, h2", "main, header, nav"].map((q) => { const el = document.querySelector(q); if (!el) return ""; const c = getComputedStyle(el); return `${c.backgroundColor}|${c.color}`; }).join(";"));
+  if (light && budget()) {
+    try {
+      const before = await colours();
+      await page.emulateMedia({ colorScheme: "dark" });
+      let after = await colours();
+      if (after === before && budget()) { await page.reload({ waitUntil: "load", timeout: 10000 }); after = await colours(); }
+      if (after !== before) {
+        const d = shot.replace(/\.png$/, "-dark.png");
+        await page.screenshot({ path: join(OUT, "shots", d), fullPage: true, animations: "disabled" });
+        row.dark = `shots/${d}`;
+      } else if (budget()) row.dark = "none";
+    } catch { row.dark = "not read"; }
+    T("dark");
+  }
   await context.close();
   return row;
 }

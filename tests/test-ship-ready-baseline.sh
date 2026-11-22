@@ -20,6 +20,14 @@ case_() { # label body expected-rc grep-for
   if [ "$rc" = "$3" ] && { [ -z "$4" ] || grep -qF -- "$4" "$d/log"; }; then ok "$1"; else bad "$1 (rc $rc): $(grep -E '^- |OUTPUT|STOP' "$d/log" | head -4 | tr '\n' ' ')"; fi
 }
 case_ "a clean page passes" '<h1>Tables and chairs for your party</h1><p>Delivered and set up.</p>' 0 "OUTPUT PASS"
+d="$W/dark"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important;color:#eee!important}}</style><h1>Tables and chairs</h1>'
+rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ] && grep -q '"dark": "shots/home-390-dark.png"' "$d/out/baseline.json"; } && ok "a page with a dark mode gets a -dark screenshot" || bad "dark shot (rc $rc)"
+d="$W/nodark"; page "$d/site" '<style>@keyframes s{to{transform:rotate(360deg)}}.s{display:inline-block;animation:s 1s linear infinite}</style><h1>Tables and chairs <span class="s">*</span></h1>'
+rc=$(judge "$d"); { [ "$rc" = 0 ] && [ ! -e "$d/out/shots/home-390-dark.png" ] && grep -q '"dark": "none"' "$d/out/baseline.json"; } && ok "an animated page with no dark mode says dark: none, no extra screenshot" || bad "no-dark (rc $rc)"
+d="$W/jsdark"; page "$d/site" '<style>.dk{background:#111!important;color:#eee!important}</style><script>if(matchMedia("(prefers-color-scheme: dark)").matches)document.documentElement.className="dk"</script><h1>Tables and chairs</h1>'
+rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ]; } && ok "a theme picked in script at load is read after a reload" || bad "js dark (rc $rc)"
+d="$W/darkbudget"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important}}</style><h1>Tables and chairs</h1>'
+rc=$( (cd "$d" && SHIP_READY_PAGE_SECS=20 node "$TOOL" --out "$d/out" > "$d/log" 2>&1); echo $?); { [ "$rc" = 0 ] && grep -q '"dark": "not read"' "$d/out/baseline.json"; } && ok "dark past the page budget says not read and never fails the page" || bad "dark budget (rc $rc)"
 case_ "placeholder text fails" '<h1>Lorem ipsum dolor</h1>' 1 'placeholder text'
 case_ "a banned word fails" '<h1>Unlock a seamless party</h1>' 1 'banned word'
 case_ "an emoji fails" '<h1>Party time 🎉</h1>' 1 'emoji or sparkle'

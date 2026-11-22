@@ -126,7 +126,7 @@ async function judge(browser, origin, target, viewport, opts) {
   await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
   T("settled");
   const shot = `${target.label.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "home"}-${viewport.width}.png`;
-  const light = await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).catch(() => null);
+  const light = await page.screenshot({ path: join(OUT, "shots", shot), fullPage: true }).then(() => true, () => false);
   row.shot = `shots/${shot}`; T("shot");
   const facts = await page.evaluate(() => {
     const vis = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0; };
@@ -168,15 +168,26 @@ async function judge(browser, origin, target, viewport, opts) {
   for (const v of axe) for (const n of v.nodes.slice(0, 3)) fail(row, `${target.label} has text below 4.5:1 contrast: ${n.target.join(" ")}`);
   T("axe");
   row.links = facts.links;
-  // Dark mode: the same page reloaded with prefers-color-scheme: dark. Kept only when it differs, so a
-  // reviewer sees every dark page there is, and baseline.json says "none" for a page with no dark mode.
-  if (light) {
-    await page.emulateMedia({ colorScheme: "dark" });
-    await page.reload({ waitUntil: "load", timeout: 30000 }).catch(() => {});
-    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
-    const dark = await page.screenshot({ fullPage: true }).catch(() => null);
-    if (dark && !dark.equals(light)) { const d = shot.replace(/\.png$/, "-dark.png"); writeFileSync(join(OUT, "shots", d), dark); row.dark = `shots/${d}`; }
-    else row.dark = dark ? "none" : "not read";
+  // Dark mode (prefers-color-scheme: dark), after the light checks so they judge the untouched page. It is
+  // read from computed colours, not screenshot bytes (an animation is not a dark mode): first by media query
+  // alone, then after a reload for a site that picks its theme in script at load. "none" means the page does
+  // not follow prefers-color-scheme (a toggle-only dark theme also reads "none"); "not read" means it could not
+  // be judged in the page's time budget. Informational: never a fail.
+  row.dark = "not read";
+  const budget = () => Date.now() - t0 < (PAGE_SECS - 20) * 1000;
+  const colours = () => page.evaluate(() => ["html", "body", "h1, h2", "main, header, nav"].map((q) => { const el = document.querySelector(q); if (!el) return ""; const c = getComputedStyle(el); return `${c.backgroundColor}|${c.color}`; }).join(";"));
+  if (light && budget()) {
+    try {
+      const before = await colours();
+      await page.emulateMedia({ colorScheme: "dark" });
+      let after = await colours();
+      if (after === before && budget()) { await page.reload({ waitUntil: "load", timeout: 10000 }); after = await colours(); }
+      if (after !== before) {
+        const d = shot.replace(/\.png$/, "-dark.png");
+        await page.screenshot({ path: join(OUT, "shots", d), fullPage: true, animations: "disabled" });
+        row.dark = `shots/${d}`;
+      } else if (budget()) row.dark = "none";
+    } catch { row.dark = "not read"; }
     T("dark");
   }
   await context.close();

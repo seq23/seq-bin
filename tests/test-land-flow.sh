@@ -384,6 +384,17 @@ fixture approvalprep; echo ratelimit > "$FAKE/checks"
 OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=1 bash "$LAND" 7 2>&1)"; RC=$?
 check "a reset past the bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
 
+# Review F3 of #137: the bound is for the WHOLE land, across reads (each gh_read runs in its own $( )). A clock that
+# sleep moves forward: the first read waits 8 s for the reset, so the second has 4 s of a 12 s bound left, too few.
+mkdir -p "$W/clock"; echo 0 > "$W/clock/offset"
+printf '#!/bin/bash\nif [ "$1" = +%%s ]; then echo $(( $(/bin/date +%%s) + $(cat "%s/clock/offset") )); else exec /bin/date "$@"; fi\n' "$W" > "$W/clock/date"
+printf '#!/bin/bash\nn="${1%%%%.*}"; echo $(( $(cat "%s/clock/offset") + ${n:-0} )) > "%s/clock/offset"\n' "$W" "$W" > "$W/clock/sleep"
+chmod +x "$W/clock/date" "$W/clock/sleep"
+fixture approvalprep; echo ratelimit-once > "$FAKE/base"; echo ratelimit > "$FAKE/checks"
+OUT="$(cd "$W/approvalprep" && PATH="$W/clock:$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=12 bash "$LAND" 7 2>&1)"; RC=$?
+check "two rate-limited reads, 8 s each, under a 12 s bound: exit 75, could not verify (rate limit), nothing merged" eval '[ "$RC" -eq 75 ] && has "could not verify (rate limit)" && ! merge_called'
+check "…one wait in the whole land, not one per read" [ "$(grep -c "allowance is spent; waiting" <<<"$OUT")" -eq 1 ]
+
 echo "=== 10c. a stacked PR (base is not main) is refused (22 Nov 2026, westpeek-live #122) ==="
 fixture approvalprep; echo work/random-role-codes > "$FAKE/base"
 run_land approvalprep

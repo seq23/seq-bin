@@ -58,8 +58,8 @@ case "$1 $2" in
       && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
     cm="$(cat "$F/comments" 2>/dev/null || echo '[]')"
-    jq -n --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
-      '{state: $st, body: $body, comments: $cm, headRefOid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", headRefName: "feat", title: "A change",
+    jq -n --arg head "$HEADSHA" --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
+      '{state: $st, body: $body, comments: $cm, headRefOid: $head, headRefName: "feat", title: "A change",
         url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}' ;;
   "pr checks")
     case "$(mode checks-mode)" in
@@ -92,8 +92,14 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
 esac
 SH
 chmod +x "$BIN/gh" "$W/fake-land"
-git init -q "$W/repo" && git -C "$W/repo" remote add origin https://github.com/t/fixture.git && git -C "$W/repo" commit -q --allow-empty -m init
-GOOD='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
+# The checkout: its origin is a real local repo at a path that reads as github.com/t/fixture, so land-after's
+# fresh_pass reads real commits: main, then the PR's one commit on top (HEADSHA, the head the fake gh reports).
+git init -q --bare -b main "$W/github.com/t/fixture.git"
+git init -q -b main "$W/repo" && git -C "$W/repo" remote add origin "$W/github.com/t/fixture.git" && git -C "$W/repo" commit -q --allow-empty -m init
+git -C "$W/repo" push -q origin main && git -C "$W/repo" fetch -q origin
+GIT_COMMITTER_DATE="2026-11-22T12:00:00Z" git -C "$W/repo" commit -q --allow-empty -m "the PR's work"
+HEADSHA="$(git -C "$W/repo" rev-parse HEAD)"; export HEADSHA; git -C "$W/repo" reset -q --hard origin/main
+GOOD="Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land at ${HEADSHA:0:8}; Engineering: PASS"
 reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; rm -f "$W/api/down"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
 la() { (cd "$W/repo" && "$LA" "$@") > "$W/out" 2>&1; RC=$?; }
 lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(find "$T/locks" -name '*.lock' 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }
@@ -135,7 +141,7 @@ AGENT=$!
 for _ in $(seq 1 100); do [ -s "$W/rc" ] && break; sleep 0.1; done
 kill -KILL -- "-$AGENT" 2>/dev/null; wait "$AGENT" 2>/dev/null
 check "starter exited 0 at once with one line naming pid and log" eval '[ "$(cat "$W/rc")" = 0 ] && [ "$(grep -c . "$W/out")" -eq 1 ] && has "pid " && has "logs/job1-7.log"'
-check "…the sheet said landing while land ran" eval 'line1 "$T/job1.md" | grep -q "^STATUS: landing t/fixture#7 aaaaaaa" || [ -f "$T/done/job1.md" ]'
+check "…the sheet said landing while land ran" eval 'line1 "$T/job1.md" | grep -q "^STATUS: landing t/fixture#7 ${HEADSHA:0:7}" || [ -f "$T/done/job1.md" ]'
 check "…the worker finished after its starter's process group was killed" lockgone
 check "…PASS with the merge sha on line 1, moved to done/" eval 'line1 "$T/done/job1.md" | grep -q "^STATUS: PASS t/fixture#7 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " && [ ! -e "$T/job1.md" ]'
 check "…the rest of the sheet kept" grep -q 'built (abc123)' "$T/done/job1.md"
@@ -283,6 +289,21 @@ check "the reviewer's PASS in an owner-account comment: lands" eval 'line1 "$T/d
 reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "passerby"}, authorAssociation: "NONE", body: $b}]' > "$FAKE/comments"
 la 34 --task strangercomment
 check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
+
+echo "=== F2 (review of #137): the PASS is for this head, checked before anything starts ==="
+SHALESS='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
+reset "$SHALESS"
+la 40 --task shaless-body
+check "a PASS naming no commit, in the body (time unknown): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "nothing started" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-body.md" ]'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
+la 41 --task shaless-after; lockgone
+check "the same line in an owner comment posted after the PR's last commit (12:00 -> 13:00): lands" eval 'line1 "$T/done/shaless-after.md" | grep -q "^STATUS: PASS"'
+reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T11:00:00Z", body: $b}]' > "$FAKE/comments"
+la 42 --task shaless-before
+check "…posted before the PR's last commit (11:00 < 12:00): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-before.md" ]'
+reset "Ship-ready: PASS — reviewer session_rev123 looked at it at 0123456789ab; Engineering: PASS"
+la 43 --task notonpr
+check "a PASS naming a commit that is not on the PR: refused STALE_PASS before the CI wait" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'
 
 echo "=== N1: a worker that never starts is reported, the sheet put back ==="
 reset; printf 'STATUS: review\nGoal: kept\n' > "$T/nostart.md"

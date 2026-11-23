@@ -39,6 +39,7 @@ topbarz-voting|npm run deploy:production
 creator-studios|self
 aplayer-mode|d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")
 keepmyproof|self
+whisperalmanac-site|d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && npx --yes wrangler@4 deploy")
 '
 route_for() { # repo -> "self" | deploy command | "DIED: msg"
   # shellcheck disable=SC2034  # NAME is read by the eval'd routes block

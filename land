@@ -445,6 +445,11 @@ case "$NAME" in
   # deploys main; its "Workers Builds: courtscope" check-run is the deploy. GitHub Actions only validates
   # (docs/CI_REPAIR_RECEIPT.md). Added 18 Nov 2026 when land refused courtscope #2.
   courtscope)           DEPLOY="" ; SELF="deploys itself through Cloudflare Workers Builds on push to main (courtscope.org)" ;;
+  # Whisper Almanac (seq23/whisperalmanac-site, whisperalmanac.com): a Workers static-assets site
+  # (wrangler.jsonc assets ./public, custom domains) with no Git build and no deploy workflow; its
+  # README's deploy is wrangler inside the Boss OS vault (CLOUDFLARE_API_TOKEN), as aplayer-mode does.
+  # Added 23 Nov 2026 when land refused whisperalmanac-site #3 (d10-scan-protect).
+  whisperalmanac-site)  DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && npx --yes wrangler@4 deploy")' ; SELF="" ;;
   *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

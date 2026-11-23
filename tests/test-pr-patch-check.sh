@@ -18,12 +18,12 @@ git init -q --bare "$T/origin.git"
 git clone -q "$T/origin.git" "$T/w" 2>/dev/null; git -C "$T/w" checkout -q -b main
 printf 'function alpha() {\n  return 1;\n}\nfunction beta() {\n  return 2;\n}\n' > "$T/w/lib.js"
 gc "$T/w" add lib.js; gc "$T/w" commit -q -m "add lib"
-sed -i '' 's/return 1;/return 11;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "lib: fix alpha's off-by-ten (#41)"
+perl -pi -e 's/return 1;/return 11;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "lib: fix alpha's off-by-ten (#41)"
 git -C "$T/w" push -q origin main 2>/dev/null; git -C "$T/w" fetch -q origin
 git -C "$T/w" remote set-url origin https://github.com/seq23/demo.git   # the slug the guard reads (fetch done above)
 git -C "$T/w" update-ref refs/remotes/origin/main main
 
-gc "$T/w" checkout -q -b touch-alpha; sed -i '' 's/return 11;/return 12;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "alpha again"
+gc "$T/w" checkout -q -b touch-alpha; perl -pi -e 's/return 11;/return 12;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "alpha again"
 
 out=$(hook "gh pr create --title t --body 'changes alpha'" "$T/w")
 denied "$out" && grep -q '#41' <<<"$out" && grep -q 'Patch or rebuild' <<<"$out" && ok "a PR changing alpha (fixed today in #41) with no line is refused, naming #41" || bad "unanswered patch not refused: $out"
@@ -44,7 +44,7 @@ out=$(hook "gh pr create --title t --body-file $T/body.md" "$T/w")
 out=$(hook "gh pr create --title t --body 'Patch or rebuild: <why a patch and not a rebuild> (#41)'" "$T/w")
 denied "$out" && ok "a copied placeholder is not an answer" || bad "placeholder accepted"
 
-gc "$T/w" checkout -q -b touch-beta main; sed -i '' 's/return 2;/return 3;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "beta"
+gc "$T/w" checkout -q -b touch-beta main; perl -pi -e 's/return 2;/return 3;/' "$T/w/lib.js"; gc "$T/w" commit -q -am "beta"
 out=$(hook "gh pr create --title t --body x" "$T/w")
 [ -z "$out" ] && ok "a PR changing only beta (no recent fix) opens with nothing asked" || bad "unrelated function refused: $out"
 
@@ -58,7 +58,7 @@ out=$(LAND_SRC=/nonexistent hook "gh pr create --title t --body x" "$T/w")
 
 # Negative proof: a checker that never runs land's gate passes the unanswered PR, and this test sees it.
 cp "$BIN/pr-patch-check" "$T/pr-patch-check.bak"
-sed -i '' 's/^msg="\$(gate_patch /msg="$(true /' "$BIN/pr-patch-check"
+perl -pi -e 's/^msg="\$\(gate_patch /msg="\$(true /' "$BIN/pr-patch-check"
 out=$(hook "gh pr create --title t --body 'changes alpha'" "$T/w")
 cp "$T/pr-patch-check.bak" "$BIN/pr-patch-check"
 denied "$out" && bad "mutation (gate never run) was not noticed" || ok "mutation: a checker that skips land's gate lets the unanswered PR through (so case 1 is real)"

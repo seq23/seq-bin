@@ -997,9 +997,16 @@ check "a re-run on the already-merged bypass PR: rc 0, still ONE line, nothing p
 perl -pi -e 's{^- ENG-CHECK DUE (seq23/approvalprep#7 )}{- ENG-CHECK DONE $1}' "$LAND_HANDOFF"   # the reviewer ran
 run_land approvalprep '--owner=ship it now please'
 check "a re-run after the check was marked DONE: rc 0, no new DUE line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && grep -c "^- ENG-CHECK DONE seq23/approvalprep#7 " "$LAND_HANDOFF" | grep -qx 1'
+# Fast PRs (her ruling 23 Nov 2026): EVERY land with no fresh reviewer's PASS joins the day's batched
+# engineering check, not only her bypass. A PR a reviewer passed for its head needs none.
 handoff_fixture; fixture approvalprep
 run_land approvalprep
-check "a land with no bypass: rc 0, no ENG-CHECK line, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && no_posts'
+check "a Fast PR on green CI with no reviewer's PASS: rc 0, ONE ENG-CHECK DUE line saying so, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed on green CI with no reviewer.s PASS (Fast PRs) " && no_posts'
+check "…every other line of HANDOFF exactly as it was" eval 'diff <(grep -v "^- ENG-CHECK DUE " "$LAND_HANDOFF") <(grep -v "^- ENG-CHECK DUE " "$W/hh/before") >/dev/null'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"Review class: none — wording of a log line only\nShip-ready: PASS — hostile-review session_01REVIEW looked at the diff at @HEAD@; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "a PR with a fresh reviewer's Ship-ready PASS for its head: rc 0, no ENG-CHECK line" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(due_lines)" -eq 0 ]'
 printf '# HANDOFF\n## PINNED\nPINNED-STAYS\n' > "$LAND_HANDOFF"; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'

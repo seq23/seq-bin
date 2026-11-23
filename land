@@ -16,7 +16,8 @@
 #   land 96         # that PR number
 #   land 96 --owner="<her words>"  # HER bypass (21 Nov 2026): skips the review, click-through and patch
 #                      # sign-offs; CI, the safety checks, deploy and smoke still run. Only when SHE says ship it.
-#                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/HANDOFF.md Today (same-day review).
+#                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/HANDOFF.md Today (same-day review),
+#                      # as it does for EVERY land with no fresh reviewer's PASS (Fast PRs: the day's batched check).
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
@@ -170,9 +171,9 @@ unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing 
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 RATE_UNTIL_FILE="$(mktemp -t land-rate-until.XXXXXX)" || { rm -f "$GH_ERR_FILE"; exit 1; } # rate_wait's deadline, below
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
-land_exit() { # $1 exit code. A land that ended green under her bypass notes its same-day engineering check; a landed launch lists its repo.
+land_exit() { # $1 exit code. A land that ended green with no fresh reviewer's PASS (her bypass, or a Fast PR) notes its same-day engineering check; a landed launch lists its repo.
   local rc="$1"
-  if [ "$rc" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ]; then note_eng_check || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
+  if [ "$rc" -eq 0 ] && [ -n "${LAND_ENG_DUE:-}" ]; then note_eng_check "$LAND_ENG_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   if [ "$rc" -eq 0 ] && [ -n "${LIVE_ADD:-}" ]; then live_add "$LIVE_ADD" "$PR" || rc="$LAND_RC_LIVE_NOT_ADDED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
   # A TERM, HUP or Ctrl-C mid-deploy leaves no temp worktree or step file (deploy_cleanup, in deploy_at).
@@ -1543,7 +1544,8 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # --- gates end ---
 # HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
-# landed under `Owner override:` skipped its engineering review, so once it is green and deployed land
+# landed under `Owner override:`, or any Fast PR that landed on green CI with no reviewer's PASS (her ruling
+# 23 Nov 2026), skipped its engineering review, so once it is green and deployed land
 # writes ONE line into the Today section of ~/HANDOFF.md (the coordinator's start-here; the handoff hook
 # keeps a line there all day) and prints it:
 #   - ENG-CHECK DUE <owner/repo>#<pr> <merge sha> — landed under her bypass <time CT>; ...
@@ -1553,11 +1555,15 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # on the same PR adds no second line (nor after its DUE was turned into DONE). A line that cannot be written is NAMED STOP [ENG_CHECK_NOT_NOTED],
 # exit 4: the PR IS landed but its check is not noted, so it never ends a silent 0.
 LAND_RC_ENG_CHECK_NOT_NOTED=4
-note_eng_check() {
-  local slug sha line out handoff="${LAND_HANDOFF:-$HOME/HANDOFF.md}"
+note_eng_check() { # $1 why no reviewer saw it: bypass | unreviewed
+  local slug sha line out how handoff="${LAND_HANDOFF:-$HOME/HANDOFF.md}"
+  case "${1:-bypass}" in
+    unreviewed) how="landed on green CI with no reviewer's PASS (Fast PRs)" ;;
+    *) how="landed under her bypass" ;;
+  esac
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
-  line="ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — landed under her bypass $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today"
+  line="ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today"
   # One writer at a time with the PreCompact hook (handoff-on-compact.sh takes the same lock), then an
   # atomic replace. The line goes after the Jobs list, where the hook keeps hand-written lines all day.
   if out="$(python3 -c '
@@ -1778,9 +1784,13 @@ if [ "$MERGE_RC" -ne 0 ]; then
 fi
 fi
 
-# Landed under her bypass (this run's --owner, or the override already on the PR): the exit trap notes
-# the same-day engineering check once the land ends green (note_eng_check).
-{ [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; } && LAND_BYPASSED=1
+# No fresh reviewer read this diff: it landed under her bypass (this run's --owner, or the override already on
+# the PR), or it is a Fast PR (no review class, so no Ship-ready PASS for its head: ship_pass, the review gate's
+# own check). Either way the exit trap notes its same-day engineering check once the land ends green
+# (note_eng_check; Fast PRs item 1: "ONE batched engineering check of the day's merged diffs"). A PASS that
+# cannot be read (75) counts as no PASS: one check too many, never one too few.
+if [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; then LAND_ENG_DUE=bypass
+elif ! ship_pass "$PR" "${PRMETA:-"{}"}" "${HEAD:-}" "landed" "the diff" >/dev/null 2>&1; then LAND_ENG_DUE=unreviewed; fi
 say "3/5  syncing main"
 # THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`
 # in whatever checkout land ran from. 26 Sep 2026, local-guides-citation-velocity #159: her tree

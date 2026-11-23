@@ -1,6 +1,6 @@
 #!/bin/bash
 # ship-ready-baseline/check.mjs against fixture sites (row 18): a clean page passes; each automatic fail
-# is caught by name (placeholder text, a banned word, an emoji, sideways scroll at 390 px, a broken
+# is caught by name (placeholder text, an emoji, sideways scroll at 390 px, a broken
 # image, a missing description, a default 404); zero pages rendered is a fail (rule 0); a bad config
 # is exit 2. Needs the tool's deps: npm ci --prefix ship-ready-baseline && npx playwright install chromium.
 set -uo pipefail
@@ -29,7 +29,14 @@ rc=$(judge "$d"); { [ "$rc" = 0 ] && [ -f "$d/out/shots/home-390-dark.png" ]; } 
 d="$W/darkbudget"; page "$d/site" '<style>@media (prefers-color-scheme: dark){body{background:#111!important}}</style><h1>Tables and chairs</h1>'
 rc=$( (cd "$d" && SHIP_READY_PAGE_SECS=20 node "$TOOL" --out "$d/out" > "$d/log" 2>&1); echo $?); { [ "$rc" = 0 ] && grep -q '"dark": "not read"' "$d/out/baseline.json"; } && ok "dark past the page budget says not read and never fails the page" || bad "dark budget (rc $rc)"
 case_ "placeholder text fails" '<h1>Lorem ipsum dolor</h1>' 1 'placeholder text'
-case_ "a banned word fails" '<h1>Unlock a seamless party</h1>' 1 'banned word'
+# Her ruling 23 Nov 2026 ("Drop the list"): no word list judges the writing, and an old "words" key is ignored,
+# never a crash; the other automatic fails still catch that same page.
+d="$W/words"; page "$d/site" '<h1>Unlock a seamless, tailored party</h1><p>Elevate it, dive in, delve, embark, empower, AI-powered sparkle.</p>'
+echo '{ "kind": "site", "serve": "site", "pages": ["/"], "words": ["party"] }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 0 ] && grep -q 'OUTPUT PASS' "$d/log" && ! grep -qi 'banned' "$d/log"; } && ok "the old machine-writing words pass, and an old \"words\" key is ignored" || bad "old words (rc $rc): $(grep -E '^- |OUTPUT|STOP' "$d/log" | head -3 | tr '\n' ' ')"
+d="$W/words-ph"; page "$d/site" '<h1>Unlock a seamless party</h1><p>TODO prices</p>'
+echo '{ "kind": "site", "serve": "site", "pages": ["/"], "words": ["party"] }' > "$d/ship-ready.json"
+rc=$(judge "$d"); { [ "$rc" = 1 ] && grep -q 'placeholder text: "TODO"' "$d/log"; } && ok "that config still fails on placeholder text" || bad "words + placeholder (rc $rc)"
 case_ "an emoji fails" '<h1>Party time 🎉</h1>' 1 'emoji or sparkle'
 case_ "© is text, not an emoji" '<p>© 2026 Porch and Party</p>' 0 "OUTPUT PASS"
 case_ "sideways scroll at 390 px fails" '<div style="width:900px">wide</div>' 1 'scrolls sideways at 390'

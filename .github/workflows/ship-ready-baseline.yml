@@ -1,6 +1,6 @@
 # ship-ready-baseline (row 18, 20 Nov 2026): ONE shared check that renders a repo's real output and
 # fails on the automatic fails (sideways scroll at 390 px, broken assets and links, console errors,
-# placeholder text, banned words / emoji / sparkles, missing title / description / og:image, a default
+# placeholder text, emoji / sparkles, missing title / description / og:image, a default
 # 404, text under 12 px or under 4.5:1 contrast, zero pages rendered). `land` refuses a PR whose
 # ship-ready-baseline check is red. Each repo calls it with a 10-line caller and a ship-ready.json:
 #

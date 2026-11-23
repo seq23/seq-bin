@@ -4,7 +4,7 @@
 // The caller's ship-ready.json says what to render:
 //   { "kind": "site|app|web-app|email", "build": "<cmd>", "serve": "<dir, or a cmd that serves on base_url>",
 //     "base_url": "http://127.0.0.1:4173" (cmd only), "pages": ["/", "/about"] (omitted: "/" + 7 from sitemap.xml),
-//     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" }, "words": ["extra banned word"],
+//     "emails": { "cmd": "<writes rendered .html files>", "dir": "<that dir>" },
 //     "not_yet": "<why it cannot render in CI yet; pairs with a dated Open Loops row>",
 //     "allow": { "<placeholder phrase true for this repo>": "<why>" },
 //     "live_origin": "https://example.com" (the site's public origin: its own cross-origin APIs answer the
@@ -60,9 +60,8 @@ if (signIn && (typeof signIn.cmd !== "string" || !signIn.cmd.trim() || typeof si
   stop("sign_in needs cmd (writes $SHIP_READY_STATE) and signed_in (a selector only a signed-in screen has)");
 mkdirSync(join(OUT, "shots"), { recursive: true });
 
-// The shared word list: words that read as machine-written, plus emoji and sparkle glyphs (from PBS phase 1).
-const shared = JSON.parse(readFileSync(new URL("./words.json", import.meta.url), "utf8"));
-const wordRe = new RegExp(`(?<![\\p{L}\\p{N}])(?:${[...shared.words, ...(cfg.words || [])].join("|")})(?![\\p{L}\\p{N}])`, "iu");
+// Emoji and sparkle glyphs (from PBS phase 1). No word list judges whether copy reads as machine-written:
+// the model reviewer does that in context (her ruling 23 Nov 2026, "Drop the list"); an old "words" key is ignored.
 const glyphRe = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|[✦✧]/u; // emoji and sparkles; ©, ® and ™ are text
 // Code words are matched in their own case ("todo" is Spanish for "all"); phrases in any case.
 const placeholderRe = /[Ll]orem ipsum|\bTODO\b|\bTBD\b|[Cc]oming [Ss]oon|COMING SOON|\{\{|\}\}|\bundefined\b|\bNaN\b|\[object Object\]/;
@@ -195,7 +194,6 @@ async function judge(browser, origin, target, viewport, opts) {
   for (const e of [...new Set(consoleErrors)].slice(0, 5)) fail(row, `${target.label} logs a console error: ${e.slice(0, 160)}`);
   const ph = [...facts.text.matchAll(new RegExp(placeholderRe, "g"))].map((m) => m[0]).find((m) => !allowed.includes(m.toLowerCase()));
   if (ph) fail(row, `${target.label} shows placeholder text: "${ph}"`);
-  const w = facts.text.match(wordRe); if (w) fail(row, `${target.label} uses a banned word: "${w[0]}"`);
   const g = facts.text.match(glyphRe); if (g) fail(row, `${target.label} shows an emoji or sparkle: ${g[0]}`);
   if (facts.small.length) fail(row, `${target.label} has text under 12 px: ${facts.small.slice(0, 3).join(", ")}`);
   if (opts.site) {

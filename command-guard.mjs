@@ -14,6 +14,9 @@
 //                    deleting a Worker, a KV namespace, an R2 bucket or a queue
 //   launchctl        unload / bootout / remove / disable of a com.seq.* job
 //   gh repo delete; security delete-*-password; diskutil erase*
+//   gh pr create     a PR that changes a function a fix changed in the last 30 days, with no
+//                    `Patch or rebuild:` line naming that fix (her ruling 23 Nov 2026: asked when the PR opens,
+//                    not at merge; land's own check, run by ~/bin/pr-patch-check). Could not judge: let through.
 //
 // These are hard safety stops, so they are code (CLAUDE.md: "code handles structure and hard safety stops").
 // The hook runs only on an agent's own commands: the repos' scripts (land, deploy scripts, installers) run
@@ -23,7 +26,10 @@
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
 
@@ -186,10 +192,34 @@ function rerunProblem(a, env) {
   return null;
 }
 
+/** `gh pr create` with a fix of the last 30 days left unanswered: land's patch check, run when the PR opens. */
+function patchCheck(dir, body) {
+  const r = spawnSync(resolve(dirname(fileURLToPath(import.meta.url)), "pr-patch-check"), [dir, "/dev/stdin"], { input: body, encoding: "utf8", timeout: 20000 });
+  return { code: r.status, msg: (r.stdout || "").trim() };
+}
+function originSlug(dir) {
+  try { return execFileSync("git", ["-C", dir, "remote", "get-url", "origin"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().replace(/\.git$/, "").replace(/^.*github\.com[:/]/, "").toLowerCase(); } catch { return ""; }
+}
+function prCreateProblem(a, line, dir, env) {
+  if (!dir || !existsSync(dir)) return null; // a folder it cannot see: let through, land asks at merge
+  const flag = (names) => { const i = a.findIndex((x) => names.includes(x) || names.some((n) => x.startsWith(`${n}=`))); if (i < 0) return null; return a[i].includes("=") ? a[i].split("=").slice(1).join("=") : a[i + 1]; };
+  if (flag(["--fill", "--fill-first", "--web", "-w", "--fill-verbose"]) !== null || a.some((x) => ["--fill", "--fill-first", "--web", "-w", "--fill-verbose"].includes(x))) return null;
+  const repo = flag(["--repo", "-R"]);
+  if (repo && (env.originSlug ?? originSlug)(dir) !== repo.toLowerCase()) return null; // another repo than the one checked out here: land asks at merge
+  let body = String(line);
+  const inline = flag(["--body", "-b"]); if (inline) body += "\n" + inline;
+  const file = flag(["--body-file", "-F"]);
+  if (file && file !== "-") { try { body += "\n" + readFileSync(isAbsolute(file) ? file : resolve(dir, file), "utf8"); } catch { /* unreadable: the line itself may still hold it */ } }
+  const r = (env.patchCheck ?? patchCheck)(dir, body);
+  return r.code === 1 && r.msg ? `${r.msg}. Add that line to the PR body, then open the PR` : null;
+}
+
 /** Why this command line must not run, or null. `env` lets tests stub git. */
 export function verdict(line, { cwd = process.cwd(), env = { branchOf, dirtyOf } } = {}) {
+  let dir = cwd;
   for (const a of commands(String(line ?? ""))) {
     const cmd = basename(a[0]);
+    if (cmd === "cd" && a[1]) { const t = expand(a[1]); dir = t === null || dir === null ? null : isAbsolute(t) ? t : resolve(dir, t); continue; }
     let why = null;
     if (cmd === "rm") {
       const flags = a.slice(1).filter((x) => x.startsWith("-") && x !== "--");
@@ -206,6 +236,7 @@ export function verdict(line, { cwd = process.cwd(), env = { branchOf, dirtyOf }
       }
     } else if (cmd === "gh" && a[1] === "repo" && a[2] === "delete") why = "it deletes a GitHub repository";
     else if (cmd === "gh" && a[1] === "run" && a[2] === "rerun") why = rerunProblem(a, env);
+    else if (cmd === "gh" && a[1] === "pr" && a[2] === "create") { why = prCreateProblem(a, line, dir, env); if (why) return `Refused by the PR-open patch check (~/bin/pr-patch-check): ${why}.`; }
     else if (cmd === "security" && /^delete-(generic|internet)-password$/.test(a[1] ?? "")) why = "it deletes a Keychain secret";
     else if (cmd === "diskutil" && /^(erase|zero|secureErase|reformat|partitionDisk)/i.test(a[1] ?? "")) why = "it erases a disk";
     else why = wranglerProblem(a, cwd);

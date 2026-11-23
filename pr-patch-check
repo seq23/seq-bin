@@ -1,0 +1,27 @@
+#!/bin/bash
+# PATCH OR REBUILD, ASKED WHEN THE PR OPENS (her ruling 23 Nov 2026, after ApprovalPrep #207 lost a whole
+# review round to a missing "Patch or rebuild:" line that land only asked for at merge time).
+#
+#   pr-patch-check <dir> <body-file>
+#
+# Runs land's OWN patch check (gate_patch, read from land's gates block, never a copy) on the branch
+# checked out in <dir> against origin/main, with <body-file> as the PR body. The dangerous-command guard
+# calls it on every `gh pr create`, so the builder writes the line before a reviewer ever looks.
+#   exit 0  nothing to answer, or every fix is answered
+#   exit 1  a fix of the last 30 days is not answered: one line on stdout says which and what to add
+#   exit 3  could not judge (no land, no git, no origin/main): the caller lets the PR through; land still asks
+set -u
+LAND_SRC="${LAND_SRC:-$(dirname "$0")/land}"
+dir="${1:-}"; body_file="${2:-}"
+[ -d "$dir" ] && [ -r "$body_file" ] || { echo "usage: pr-patch-check <dir> <body-file>" >&2; exit 3; }
+block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND_SRC" 2>/dev/null)"
+[ -n "$block" ] || { echo "pr-patch-check: land's gates block not found in $LAND_SRC" >&2; exit 3; }
+eval "$block"
+declare -F gate_patch >/dev/null || { echo "pr-patch-check: land has no gate_patch" >&2; exit 3; }
+cd "$dir" 2>/dev/null || exit 3
+git rev-parse --git-dir >/dev/null 2>&1 || exit 3
+head="$(git rev-parse HEAD 2>/dev/null)" || exit 3
+base="$(git merge-base origin/main HEAD 2>/dev/null)" || exit 3
+msg="$(gate_patch new "$base" "$head" "$(cat "$body_file")")" && exit 0
+echo "${msg/PR #new/This PR}"
+exit 1

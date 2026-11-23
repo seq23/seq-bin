@@ -137,6 +137,8 @@ jobs:
 
       - name: the dangerous-command guard refuses each irreversible command and lets a harmless one through
         run: ./tests/test-command-guard.sh
+      - name: a PR that patches a fix of the last 30 days is refused at gh pr create until it says why patch, not rebuild
+        run: ./tests/test-pr-patch-check.sh
       - name: the agent launch gate refuses general agents and full re-reviews of a failed PR, and never caps agents
         run: ./tests/test-brief-gate.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the

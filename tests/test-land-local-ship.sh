@@ -82,6 +82,13 @@ check "real nested npm run failure: the tool's own error first" yes "$(has "$r" 
 check "  ... and no '> ' script headers or filler" yes "$(filler "$r")"
 r="$(run a 'cat "$FIX/nested-run-quiet.out"; exit 2')"
 check "real nested npm run with its output hidden: npm's own block, its code and workspace" yes "$(has "$r" "exited 2: npm error Lifecycle script \`typecheck\` failed with error: | code 2 | workspace @apm/api@1.0.0")"
+# recheck: a real ERESOLVE names the conflict in its 6th kept line; a fixed count of 4 lines cut it off.
+r="$(run a 'cat "$FIX/install-eresolve.out"; exit 1')"
+check "real npm ERESOLVE: the line naming the conflict survives" yes "$(has "$r" 'Found: react@18.2.0 | Could not resolve dependency: | peer react@"^16.14.0" from react-dom@16.14.0')"
+check "  ... without where packages sit, the report path or filler" yes "$(grep -qE 'node_modules/|from the root project|For a full report|/home/runner' <<<"$r" && echo "no: $r" || filler "$r")"
+r="$(run a 'for i in $(seq 1 30); do printf "npm error %s %s\n" "$i" "$(printf "x%.0s" $(seq 1 200))"; done; exit 1')"
+why="${r#*: }"
+check "a long npm block fills the 400-character budget, never past it" yes "$([ "${#why}" -le 400 ] && [ "${#why}" -ge 395 ] && echo yes || echo "no: ${#why}")"
 r="$(run a 'cat "$FIX/missing-script.out"; exit 1')"
 check "real short npm error (missing script): its lines, without 'A complete log'" '1|the deploy command exited 1: npm error Missing script: "deploy" | To see a list of scripts, run: | npm run' "$r"
 r="$(run a 'for i in 1 2 3 4 5 6; do echo "step $i"; done; exit 3')"
@@ -185,6 +192,16 @@ kill -9 "$lp" 2>/dev/null; wait "$lp" 2>/dev/null
 s=$SECONDS; r="$(LAND_DEPLOY_WAIT=3 run b 'true')"
 check "its land killed, a child still holding the deploy's output: the lock is free" "0|" "$r"
 check "  ... and the next deploy did not wait" yes "$([ $((SECONDS - s)) -lt 2 ] && echo yes || echo "no: $((SECONDS - s)) s")"
+# recheck: a deploy that leaves a daemon holding its output. Through a pipe, land waited for that daemon
+# for ever, holding the lock; land must return when the deploy command itself exits, with its code.
+s=$SECONDS; run a 'sleep 601.25 & echo started; exit 3' > "$W/r4" & rp=$!
+for _ in $(seq 1 60); do kill -0 "$rp" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$rp" 2>/dev/null; then r4="still running after 6 s"; pkill -f '^sleep 601\.25$'; wait "$rp" 2>/dev/null
+else wait "$rp" 2>/dev/null; r4="$(cat "$W/r4")"; fi
+el=$((SECONDS - s)); pkill -f '^sleep 601\.25$' 2>/dev/null
+check "a deploy that leaves 'sleep 601 &' on its output: land returns with its exit code" "3|the deploy command exited 3: started" "$r4"
+check "  ... within 5 s" yes "$([ "$el" -le 5 ] && echo yes || echo "no: $el s")"
+check "  ... and its output still reached the terminal" yes "$(grep -q '^started$' "$W/out-a" && echo yes || echo no)"
 r="$(LAND_DEPLOY_LOCK="$W/ro/x/deploy.lock" PATH="$W/bin:$PATH" TMPDIR="$W/tmp" bash -c 'mkdir -p "$W/ro"; chmod 500 "$W/ro"; "$W/run.sh" a true')"
 chmod 700 "$W/ro" 2>/dev/null
 if [ "$(id -u)" = 0 ]; then echo "  skip the unopenable lock (root writes anywhere)"; else

@@ -625,8 +625,11 @@ DEPLOY_WHY=""; DEPLOY_OUT=""
 # error), then npm's error block from its top, where npm names the cause ("code EUSAGE", "Missing:
 # left-pad@1.3.0 from lock file", "ENOSPC: no space left on device"). npm's filler is dropped: bare
 # "npm error" lines, its usage/options block and the one-line summary before it, "Run "npm help",
-# "A complete log", "command failed", the path/location/errno/syscall fields, and `> ` script headers
-# (22 Nov 2026 review: a tail of the last 3 lines kept only the filler and lost the cause).
+# "A complete log", "command failed", the path/location/errno/syscall fields, where a package sits
+# (`node_modules/x`, `x@"1" from the root project`), "For a full report see:" and its file path, and
+# `> ` script headers (22 Nov 2026 review: a tail of the last 3 lines kept only the filler and lost
+# the cause). npm's lines are kept in order until the 400-character budget runs out, never a fixed
+# count of them (recheck: ERESOLVE names the conflict in its 6th line, "peer react@... from react-dom@...").
 deploy_tail() { # $1 file -> that line, each part at most 120 characters and 400 in all, or "it printed nothing"
   local t
   t="$(perl -CSD -Mutf8 -e '
@@ -638,27 +641,37 @@ deploy_tail() { # $1 file -> that line, each part at most 120 characters and 400
         next if $usage;
         if ($_ eq "Usage:") { $usage = 1; pop @npm; next }
         next if !length || /^A complete log of this run/ || /^Run "npm help / || $_ eq "command failed"
-          || /^(?:path|location|errno|syscall) /;
+          || /^(?:path|location|errno|syscall) / || m{^node_modules/} || / from the root project$/
+          || $_ eq "For a full report see:" || m{^/\S+$};
         push @npm, $_;
       } else { $usage = 0; push @tool, $_ }
     }
     my $cap = sub { length($_[0]) > 120 ? substr($_[0], 0, 119) . "…" : $_[0] };
     @tool = @tool[-(@npm ? 2 : 3)..-1] if @tool > (@npm ? 2 : 3);
-    @npm = @npm[0..3] if @npm > 4;
-    my @out = map { $cap->($_) } @tool;
-    push @out, "npm error " . join(" | ", map { $cap->($_) } @npm) if @npm;
-    my $o = join(" | ", @out);
-    print length($o) > 400 ? substr($o, 0, 399) . "…" : $o;
+    my $o = join(" | ", map { $cap->($_) } @tool);
+    my $pre = "npm error ";
+    for my $l (map { $cap->($_) } @npm) {
+      my $head = ($o eq "" ? "" : " | ") . $pre;
+      if (length($o) + length($head) + length($l) > 400) {
+        my $room = 400 - length($o) - length($head) - 1;
+        $o .= $head . substr($l, 0, $room) . "…" if $room >= 20;
+        last;
+      }
+      $o .= $head . $l; $pre = "";
+    }
+    print $o;
   ' "$1" 2>/dev/null)"
   [ -n "$t" ] || { echo "it printed nothing"; return; }
   printf '%s\n' "$t"
 }
-deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to the terminal AND $DEPLOY_OUT
+deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to $DEPLOY_OUT, then the terminal
   local rc
-  : > "$DEPLOY_OUT"
-  # 9>&- on BOTH sides: tee lives as long as anything holds its pipe (a daemon the deploy left running),
-  # and a tee holding the lock's fd would keep the lock after its land died (22 Nov 2026 review).
-  (cd "$2" && eval "$3") 9>&- 2>&1 | tee "$DEPLOY_OUT" 9>&-; rc="${PIPESTATUS[0]}"
+  # Into a file, never a pipe: a pipe makes land wait for every process holding its write end, so a
+  # daemon the deploy left behind (`wrangler dev &`) would hang land for ever, holding the deploy lock
+  # (22 Nov 2026 recheck). Bash waits for the command alone; its leftovers can write to the file all
+  # they like. The output is printed when the step ends.
+  (cd "$2" && eval "$3") 9>&- > "$DEPLOY_OUT" 2>&1; rc=$?
+  cat "$DEPLOY_OUT"
   [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$DEPLOY_OUT")"
   return "$rc"
 }

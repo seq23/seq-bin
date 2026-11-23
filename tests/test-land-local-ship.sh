@@ -31,6 +31,7 @@ echo "npm $*" >> "$W/npm-calls"
 case "${FAKE_NPM:-ok}" in
   ok) echo "added 1 package" ;;
   silent2) exit 2 ;;
+  leftover) echo "added 1 package"; ( sleep 1; echo "LEFTOVER from npm ci" ) & exit 0 ;;
   fixture:*) f="${FAKE_NPM#fixture:}"; cat "$FIX/${f%%:*}.out"; exit "${f##*:}" ;;
 esac
 SH
@@ -49,13 +50,19 @@ cat > "$W/run.sh" <<'SH'
 #!/bin/bash
 set -uo pipefail
 eval "$BLOCK"
+# land's own exit trap, verbatim, as land installs it: a signal mid-deploy must leave nothing behind
+eval "$(sed -n '/^land_exit() {/,/^}/p' "$LAND")"; GH_ERR_FILE=""; RATE_UNTIL_FILE=""
+eval "$(grep "^trap 'land_exit" "$LAND")"
 cd "$REPO" || exit 9
 REPO_DIR="$REPO"; NAME="$1"
 deploy_at "$SHA" "$2" > "$W/out-$1" 2>&1; rc=$?
+# what is left the moment deploy_at returns, before any exit trap runs: step files, temp worktrees
+echo "$(find "$W/tmp" -maxdepth 1 \( -name 'land-step.*' -o -name 'land-deploy.*' \) | wc -l | tr -d ' ') $(git -C "$REPO" worktree list | wc -l | tr -d ' ')" > "$W/left-$1"
 printf '%s|%s\n' "$rc" "$DEPLOY_WHY"
 SH
 chmod +x "$W/run.sh"
-export BLOCK REPO SHA
+export BLOCK REPO SHA LAND
+leftovers() { find "$W/tmp" -maxdepth 1 \( -name 'land-step.*' -o -name 'land-deploy.*' \) | wc -l | tr -d ' '; }
 run() { # name command -> "<rc>|<why>"
   PATH="$W/bin:$PATH" TMPDIR="$W/tmp" LAND_DEPLOY_LOCK="$W/lock/deploy.lock" LAND_DEPLOY_POLL=1 "$W/run.sh" "$@"
 }
@@ -202,6 +209,40 @@ el=$((SECONDS - s)); pkill -f '^sleep 601\.25$' 2>/dev/null
 check "a deploy that leaves 'sleep 601 &' on its output: land returns with its exit code" "3|the deploy command exited 3: started" "$r4"
 check "  ... within 5 s" yes "$([ "$el" -le 5 ] && echo yes || echo "no: $el s")"
 check "  ... and its output still reached the terminal" yes "$(grep -q '^started$' "$W/out-a" && echo yes || echo no)"
+# follow-up: each step has its own file, so a child npm ci left running cannot write into the deploy
+# command's reason; and each install says it is starting, so someone watching sees progress.
+r="$(FAKE_NPM=leftover run a 'sleep 2; echo "the real cause"; exit 4')"
+check "a child npm ci left behind writes after the deploy starts: the reason is the deploy's own" "4|the deploy command exited 4: the real cause" "$r"
+check "  ... and 'installing (npm ci)' is printed before npm's own output" yes "$(awk '/installing \(npm ci\)/ && !s { s = NR } /^added 1 package$/ && !a { a = NR } END { print (s && a && s < a) ? "yes" : "no" }' "$W/out-a")"
+mkdir -p "$W/nomk"; printf '#!/bin/bash\ncase "$*" in *land-step*) exit 1 ;; esac\nexec /usr/bin/mktemp "$@"\n' > "$W/nomk/mktemp"; chmod +x "$W/nomk/mktemp"
+: > "$W/npm-calls"
+r="$(PATH="$W/nomk:$PATH" run a 'true')"
+check "no temp file for a step's output: refused, never run blind" "1|npm ci in the deploy worktree at ${SHA:0:7} did not run: no temp file for its output could be made" "$r"
+check "  ... and npm never ran" 0 "$(wc -l < "$W/npm-calls" | tr -d ' ')"
+# 22 Nov 2026 review of #153: every step's file and the worktree are gone after a run, ok or failed,
+# and after a TERM or a Ctrl-C (INT to the whole group) in the middle of a step.
+r="$(run a 'echo fine')"; ok_left="$(cat "$W/left-a") / $(leftovers) $(wts)"
+r2="$(FAKE_NPM=fixture:ci-mismatch:1 run a 'true')"; f1_left="$(cat "$W/left-a") / $(leftovers) $(wts)"
+r3="$(run a 'echo broken; exit 5')"; f2_left="$(cat "$W/left-a") / $(leftovers) $(wts)"
+check "after a deploy that worked: no step file, no temp worktree (as deploy_at returns / after exit)" "0 1 / 0 1" "$ok_left"
+r="$(run a 'echo fine; : SECRET_ARG_MARKER')"
+check "  ... and the terminal names the step and sha, never the temp worktree or the deploy command" "yes 0" "$(grep -qF "running the deploy command at ${SHA:0:7}" "$W/out-a" && echo yes || echo no) $(grep -cE "$W/tmp|land-deploy\.|SECRET_ARG_MARKER" "$W/out-a")"
+check "after a failed install: the same" "0 1 / 0 1" "$f1_left"
+check "after a failed deploy command: the same" "0 1 / 0 1" "$f2_left"
+r4="$(SHA=1111111111111111111111111111111111111111 run a 'true')"; c_left="$(cat "$W/left-a") / $(leftovers) $(wts)"
+check "a sha that cannot be checked out: refused, saying so" yes "$(has "$r4" "1|could not check out 1111111 into a worktree: ")"
+check "  ... and no temp folder or capture file is left" "0 1 / 0 1" "$c_left"
+for sig in TERM HUP INT; do
+  set -m; run k 'echo deploying; sleep 20' > "$W/rk" 2>&1 & kp=$!; set +m
+  for _ in $(seq 1 50); do [ -n "$(find "$W/tmp" -maxdepth 1 -name 'land-step.*' 2>/dev/null)" ] && grep -q deploying "$W/tmp"/land-step.* 2>/dev/null && break; sleep 0.1; done
+  mid="$(leftovers)"
+  kill -"$sig" -- -"$kp" 2>/dev/null
+  # wait for land itself (run.sh), not only the job's shell, which a TERM ends at once
+  for _ in $(seq 1 50); do pgrep -f "$W/run.sh k" >/dev/null || break; sleep 0.1; done
+  pgrep -f "$W/run.sh k" >/dev/null && { kill -9 -- -"$kp" 2>/dev/null; gone="still running"; } || gone=""
+  wait "$kp" 2>/dev/null
+  check "$sig mid-step: land ends and leaves no step file and no temp worktree" "2 -> 0 1" "$mid -> ${gone:-$(leftovers) $(wts)}"
+done
 r="$(LAND_DEPLOY_LOCK="$W/ro/x/deploy.lock" PATH="$W/bin:$PATH" TMPDIR="$W/tmp" bash -c 'mkdir -p "$W/ro"; chmod 500 "$W/ro"; "$W/run.sh" a true')"
 chmod 700 "$W/ro" 2>/dev/null
 if [ "$(id -u)" = 0 ]; then echo "  skip the unopenable lock (root writes anywhere)"; else

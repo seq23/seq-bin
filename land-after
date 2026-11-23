@@ -3,7 +3,7 @@
 #
 # WHY THIS EXISTS (her words, 22 Nov 2026): "Hand waiting to a script, not an agent ... it ends there and
 # a cheap script finishes the job." The token review that day measured polling CI and the cache rewrites
-# after each wait at 14-20% of all usage. A builder whose PR carries its fresh reviewer's PASS runs
+# after each wait at 14-20% of all usage. A builder whose PR is ready (a review-class PR: with its fresh reviewer's PASS) runs
 #
 #   land-after <pr> [--task <slug>] [--repo owner/name] [--then "<cmd>"]...
 #
@@ -95,7 +95,7 @@ load_land_blocks() {
   block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  declare -F review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
+  declare -F review_class review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -320,14 +320,17 @@ main() {
   # The PR and its PASS line. A read that never answers starts nothing (exit 75, "could not verify").
   # Asked patiently: a spent allowance is slept out to its reset (22 Nov 2026, #134), never "nothing started".
   local VIEW="" ERRF; ERRF="$(mktemp)"
-  VIEW="$(patient $(( $(date +%s) + ${LAND_AFTER_RATE_WAIT_SECS:-3900} )) '"state"' pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits)" \
+  VIEW="$(patient $(( $(date +%s) + ${LAND_AFTER_RATE_WAIT_SECS:-3900} )) '"state"' pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits,labels)" \
     || { say "could not verify $REPO#$PR ($(head -1 "$ERRF")); nothing started"; rm -f "$ERRF"; exit 75; }
   rm -f "$ERRF"
   local state body review reviewer HEADSHA
   state="$(jq -r .state <<<"$VIEW")"; body="$(jq -r '.body // ""' <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
   review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
-  if ! owner_override <<<"$body"; then
+  # Fast PRs item 1 (her ruling 23 Nov 2026): only a review-class PR (land's review_class: the review-required
+  # label, or labels unread) needs the PASS before anything starts. Others start at once; land itself still
+  # refuses a first public launch with no PASS (its gate_quality reads the files).
+  if ! owner_override <<<"$body" && review_class <<<"$VIEW" >/dev/null; then
     local why
     reviewer="$(signoff Ship-ready <<<"$review")" \
       || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"

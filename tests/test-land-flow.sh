@@ -51,7 +51,7 @@ HEADSHA="1111111111111111111111111111111111111111"
 MERGESHA="2222222222222222222222222222222222222222"
 
 # --- fakes -------------------------------------------------------------------
-printf '#!/bin/bash\nexit 0\n' > "$BIN/sleep"
+printf '#!/bin/bash\necho "$*" >> "$FAKE_DIR/sleeps" 2>/dev/null\nexit 0\n' > "$BIN/sleep"   # every wait land asks for, logged (case 1e: none on the happy path)
 cat > "$BIN/npm" <<'SH'
 #!/bin/bash
 { echo "pwd=$PWD"; echo "head=$(git rev-parse HEAD)"; [ -L node_modules ] && echo "node_modules=linked"; } > "$FAKE_DIR/npm-ran"
@@ -171,6 +171,9 @@ case "$a" in
   "run list "*) echo 900; exit 0 ;;
   "run watch "*) exit 0 ;;
   "api repos/{owner}/{repo}/actions/runs/900 "*) echo success; exit 0 ;;
+  # same-tree (case 1e): the merge commit's tree is the PR head's, and the PR's workflow is a file on main.
+  "api repos/{owner}/{repo}/actions/workflows?per_page=100"*) [ -f "$FAKE_DIR/same-tree" ] && echo ".github/workflows/fast.yml"; exit 0 ;;
+  "api repos/{owner}/{repo}/commits/"*".commit.tree.sha"*) [ -f "$FAKE_DIR/same-tree" ] && echo "7ree000000000000000000000000000000000000"; exit 0 ;;
   "api "*) exit 0 ;;   # no Cloudflare check-runs posted
   *) echo "fake gh: unhandled: $a" >&2; exit 1 ;;
 esac
@@ -269,7 +272,7 @@ check "…and its workflow was handed to the pick of the merge commit's run" gre
 
 echo "=== 1d. a changed screen lands only once it was clicked through (olp_m6qyb1m4wke6h9dx) ==="
 fixture approvalprep
-echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"},{"path":"tests/x.test.ts"}],"body":"Adds the page.","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"},{"path":"tests/x.test.ts"}],"labels":[],"body":"Adds the page.\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the fix in the page | tests/x.test.ts goes red |","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "rc 1: stopped" [ "$RC" -eq 1 ]
 check "a named stop that names the screen" has "NAMED STOP [NOT_CLICKED_THROUGH]"
@@ -294,6 +297,34 @@ fixture approvalprep
 echo '{"files":[{"path":"tests/boss/x.test.tsx"},{"path":"site/guides/a.html"},{"path":"worker/x.ts"}],"body":"Ship-ready: PASS — hostile-review session_01REVIEW looked at guides/a at 390 px at @HEAD@; Engineering: PASS\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the fix in the page | tests/x.test.ts goes red |","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "tests, content pages and server code need no click: rc 0" [ "$RC" -eq 0 ]
+
+echo "=== 1e. Fast PRs (her ruling 23 Nov 2026): a review only for a review-class PR, no re-wait on green CI, a rendered: PASS is a click ==="
+MP='\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the fix | tests/x.test.ts goes red |'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"worker/x.ts\"}],\"labels\":[],\"body\":\"Fixes the sync.$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "happy path: a green PR outside the review classes, with no PASS line, lands (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…with no wait at all: the checks read once, no sleep, main's run of the same tree never polled" eval '[ "$(grep -c "^pr checks" "$FAKE/calls")" -eq 1 ] && [ ! -s "$FAKE/sleeps" ] && ! grep -q "^api repos/{owner}/{repo}/actions/runs/900" "$FAKE/calls" && has "same tree as the tested head"'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"worker/x.ts\"}],\"labels\":[{\"name\":\"bug\"},{\"name\":\"review-required\"}],\"body\":\"Fixes the sync.$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "safety: a review-class PR (review-required label) with no PASS line is refused, rc 1, not merged" eval '[ "$RC" -eq 1 ] && has "review-required label" && has "Ship-ready: PASS — " && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"worker/x.ts\"}],\"body\":\"Fixes the sync.$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "outage: labels missing from GitHub's answer count as review class: refused, rc 1, not merged" eval '[ "$RC" -eq 1 ] && has "labels could not be read" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[],\"body\":\"Adds the page.\\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page at @HEAD@; Engineering: PASS\\nrendered: Updates page at 320 and 390 px, light and dark$MP\",\"comments\":[{\"authorAssociation\":\"OWNER\",\"body\":\"rendered: Updates page at 390 px\"}]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "abuse: rendered: on its own line and in a comment, not ON the PASS line: NOT_CLICKED_THROUGH, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [NOT_CLICKED_THROUGH]" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[],\"body\":\"Adds the page.\\nShip-ready: PASS — builder looked at the Updates page, rendered: at 390 px at @HEAD@; Engineering: PASS$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "abuse: a rendered: PASS signed by the builder is no click: NOT_CLICKED_THROUGH, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [NOT_CLICKED_THROUGH]" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"
+echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[],\"body\":\"Adds the page.\\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page, rendered: Updates at 320 and 390 px light and dark, at @HEAD@; Engineering: PASS$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
+run_land approvalprep
+check "item 4: a fresh reviewer's PASS whose own line says rendered: needs no Clicked through line: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called && has "rendered by the reviewer: "'
 
 echo "=== 2. checkout on a feature branch: not switched to main ==="
 fixture approvalprep

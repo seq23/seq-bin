@@ -60,9 +60,11 @@ case "$1 $2" in
       && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
     cm="$(cat "$F/comments" 2>/dev/null || echo '[]')"
-    jq -n --arg head "$HEADSHA" --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" \
+    lb="$(cat "$F/labels" 2>/dev/null || echo null)"   # labels: absent = not in GitHub's answer (unread)
+    jq -n --arg head "$HEADSHA" --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" --argjson lb "$lb" \
       '{state: $st, body: $body, comments: $cm, headRefOid: $head, headRefName: "feat", title: "A change",
-        url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}' ;;
+        url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}
+       + (if $lb == null then {} else {labels: $lb} end)' ;;
   "pr checks")
     case "$(mode checks-mode)" in
       ratelimit) echo "HTTP 403: API rate limit exceeded for user" >&2; exit 1 ;;
@@ -134,6 +136,15 @@ done
 reset; echo down > "$FAKE/view-mode"
 la 7 --task ghdown
 check "the PR unreadable at the start: exit 75 'could not verify', nothing started" eval '[ "$RC" -eq 75 ] && has "could not verify" && [ ! -e "$T/ghdown.md" ] && [ ! -f "$FAKE/land-ran" ]'
+
+echo "=== Fast PRs (her ruling 23 Nov 2026): the PASS is asked for only of a review-class PR ==="
+reset "Fixes it."; echo '[{"name":"review-required"}]' > "$FAKE/labels"
+la 7 --task fastreview
+check "safety: review-required label and no PASS line: refused, nothing started" eval '[ "$RC" -eq 1 ] && has "Ship-ready: PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/fastreview.md" ]'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"
+la 7 --task fastplain
+check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]
+check "…and lands: PASS on line 1, in done/" eval 'lockgone && line1 "$T/done/fastplain.md" | grep -q "^STATUS: PASS t/fixture#7 "'
 
 echo "=== green, detached: survives the starting shell and its whole process group; only its own sheet is touched ==="
 reset; mkdir -p "$T"

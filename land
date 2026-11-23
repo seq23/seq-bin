@@ -1108,8 +1108,9 @@ rate_reset_in() { # -> seconds until GitHub's spent allowance comes back (its re
 #     such fix. Functions use git's default funcname rule (a line starting with a letter, _ or $ opens
 #     one; it runs to the next); history is `git log -L` on the merge base. 19 Nov 2026, west-peek-os:
 #     webPropertyChange.ts took #527, #531, #532, #537, #540, #546 and #551 in one day.
-#  2. SHIP-READY. A PR that changes what a person sees (land-surfaces.json: pages, app screens, emails,
-#     video/social output, per repo type) stops unless its body has
+#  2. SHIP-READY. A REVIEW-CLASS PR (review_class: the `review-required` label, or labels unread; or a first
+#     public launch) that changes what a person sees (land-surfaces.json: pages, app screens, emails,
+#     video/social output, per repo type) or code stops unless its body has
 #     `Ship-ready: PASS — <reviewer> looked at <real output>` (in the body, or in a comment by the repo's
 #     owner account: `review_text`) from a reviewer who is not the builder
 #     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
@@ -1287,32 +1288,69 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
   echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names ($(sha_name "$sha")): the reviewer re-checks git diff $(sha_name "$sha")..$(sha_name "$3") and posts a new PASS line naming $(sha_name "$3")"
   return 1
 }
-gate_quality() { # $1 PR  $2 PR view JSON (files, body, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
-  # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every PR that changes what people see OR code
-  # (patch_code: tests, docs and data are not code). 22 Nov 2026, her words: "make the reviewer gate real in land now".
-  local tree re files code what look added launch body reviewer ids msg why
+# FAST PRs (her ruling 23 Nov 2026, item 1: "review only what can really hurt"): a fresh reviewer's PASS is
+# required only of a REVIEW-CLASS PR: money, children's or private data, store submissions, deleting people's
+# data, first public launches. No repo carries a classification of its own, so the class is the PR's
+# `review-required` label (set by whoever writes the brief), plus the launch markers below (a first public launch).
+# Labels that could not be read are a review-class PR: unknown is never "no review needed".
+# Everything else lands on green CI; the day's merged diffs get ONE batched engineering check after.
+review_class() { # stdin: PR view JSON (labels) -> rc 0 when it needs a reviewer's PASS, with why on stdout
+  local j; j="$(cat)"
+  jq -e '.labels | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its labels could not be read"; return 0; }
+  jq -e 'any(.labels[]; (.name // "") == "review-required")' <<<"$j" >/dev/null 2>&1 && { echo "it carries the review-required label"; return 0; }
+  return 1
+}
+ship_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what the PR does  $5 what the reviewer looks at
+  # -> rc 0 when a fresh reviewer (not the builder) stands on the last Ship-ready PASS line, with Engineering: PASS,
+  # for this head | 1 refused, one line on stdout | 75 could not read. One check, used by the review gate and
+  # by the click-through stop (a rendered: PASS), never two copies.
+  local body ids reviewer why msg
+  body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
+  reviewer="$(signoff Ship-ready <<<"$body")" \
+    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $4, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at $(sha_name "$3"); Engineering: PASS"; return 1; }
+         echo "PR #$1 $4: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$5> at $(sha_name "$3"); Engineering: PASS"; return 1; }
+  is_builder "$reviewer" "$ids" \
+    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
+  pass_line Ship-ready <<<"$body" | covers_engineering \
+    || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
+  msg="$(fresh_pass Ship-ready "$1" "$3" "$2")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+}
+# FAST PRs item 4 (her ruling 23 Nov 2026): no click-through when the reviewer already rendered the screens. A
+# changed screen people operate is satisfied by a "Clicked through:" line, or by `rendered:` ON the Ship-ready PASS
+# line itself, and only when that PASS is a fresh reviewer's for this head (ship_pass). `rendered:` anywhere else
+# (a builder's comment, a line of its own) proves nothing.
+clicked_or_rendered() { # $1 PR  $2 PR view JSON  $3 head -> rc 0 with the line that satisfied it | 1 none | 75 unread
+  local line rc
+  line="$(jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$2" | grep -iE '^[[:space:]>*-]*Clicked through:' | tail -1)"
+  [ -n "$line" ] && { printf 'clicked through: %s\n' "$(cut -c1-140 <<<"$line")"; return 0; }
+  line="$(review_text <<<"$2" | pass_line Ship-ready)" || return 1
+  grep -qiE '(^|[^[:alnum:]])rendered:' <<<"$line" || return 1
+  ship_pass "$1" "$2" "$3" "changes screens" "the rendered screens" >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] && { printf 'rendered by the reviewer: %s\n' "$(cut -c1-140 <<<"$line")"; return 0; }
+  return "$rc"
+}
+gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
+  # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every REVIEW-CLASS PR (review_class, or a first
+  # public launch) that changes what people see OR code (patch_code: tests, docs and data are not code).
+  local tree re files code what look added launch reviewer ids msg why cls
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
   [ -n "$files$code" ] || return 0
-  if [ -n "$files" ]; then what="changes what people see ($(head -3 <<<"$files" | paste -sd' ' -))"; look="the real output: page at 390 px, rendered email, frames"
-  else what="changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"; fi
-  body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
-  reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $what, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at $(sha_name "$3"); Engineering: PASS"; return 1; }
-         echo "PR #$1 $what: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$look> at $(sha_name "$3"); Engineering: PASS"; return 1; }
-  is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
-  pass_line Ship-ready <<<"$body" | covers_engineering \
-    || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
-  msg="$(fresh_pass Ship-ready "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
-  [ -n "$files" ] || return 0   # Launch-ready is for something new in public, never for code alone
-  added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
-  launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
-  [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
+  launch=""
+  if [ -n "$files" ]; then   # Launch-ready is for something new in public, never for code alone
+    added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
+    launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
+    [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
+  fi
+  if [ -n "$launch" ]; then cls="it puts something new in public"; else cls="$(review_class <<<"$2")" || return 0; fi
+  if [ -n "$files" ]; then what="needs a review ($cls) and changes what people see ($(head -3 <<<"$files" | paste -sd' ' -))"; look="the real output: page at 390 px, rendered email, frames"
+  else what="needs a review ($cls) and changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"; fi
+  msg="$(ship_pass "$1" "$2" "$3" "$what" "$look")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   [ -n "$launch" ] || return 0
-  reviewer="$(signoff Launch-ready <<<"$body")" \
+  ids="$(builders <<<"$2")"
+  reviewer="$(review_text <<<"$2" | signoff Launch-ready)" \
     || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
   is_builder "$reviewer" "$ids" \
     && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
@@ -1542,11 +1580,6 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 BASELINE_RED="$(baseline_red "$CHECKS")" && die "PR #$PR's ship-ready-baseline check is not green ($BASELINE_RED): fix what its job summary lists, push, and land again."
 NOTGREEN="$(not_green "$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
-# CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
-# 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
-# every section, and only a click would have caught it. hostile-review step 4 said to click it; a
-# skill no code reads is a wish. So a PR that changes a screen people operate (operated_ui_files)
-# lands only with a "Clicked through: <what, 390 px, console clean>" line in its body or a comment.
 # --owner: write her words into the PR body once, so the bypass is on the record (owner_override reads it).
 if [ -n "$OWNER_WORDS" ]; then
   [ "$(wc -w <<<"$OWNER_WORDS" | tr -d ' ')" -ge 3 ] || die "--owner needs her own words (3+), e.g. --owner=\"land it deploy it finish it\""
@@ -1557,14 +1590,8 @@ if [ -n "$OWNER_WORDS" ]; then
   fi
   say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
-PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits)" \
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
-UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
-if [ -n "$UIFILES" ] && ! jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
-  jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$PRMETA" | grep -qiE '^[[:space:]>*-]*Clicked through:' \
-    || die "NAMED STOP [NOT_CLICKED_THROUGH] PR #$PR changes screens people operate ($(head -3 <<<"$UIFILES" | tr '\n' ' ')) and carries no \"Clicked through:\" line. Click every changed path in a real browser at 390 px with the console open (hostile-review step 4), then: gh pr comment $PR --body 'Clicked through: <what, 390 px, console clean>' and land again."
-  say "    clicked through: $(jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$PRMETA" | grep -iE '^[[:space:]>*-]*Clicked through:' | tail -1 | cut -c1-140)"
-fi
 # An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
 HEAD="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
@@ -1585,6 +1612,20 @@ case "$GATE_RC" in
   75) unverified network "$GATE_MSG" ;;
   *) die "$GATE_MSG" ;;
 esac
+# CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
+# 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
+# every section, and only a click would have caught it. So a PR that changes a screen people operate
+# (operated_ui_files) lands only with a "Clicked through: <what, 390 px, console clean>" line in its body
+# or a comment, or (Fast PRs item 4, 23 Nov 2026) a fresh reviewer's Ship-ready PASS for this head whose
+# own line says `rendered: <screens>` (clicked_or_rendered). Read after the gates, so origin/main is fetched.
+UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
+if [ -n "$UIFILES" ] && ! jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
+  CLICK_MSG="$(clicked_or_rendered "$PR" "$PRMETA" "$HEAD")"; CLICK_RC=$?
+  [ "$CLICK_RC" -eq 75 ] && unverified network "PR #$PR's rendered: PASS could not be checked against its head"
+  [ "$CLICK_RC" -eq 0 ] \
+    || die "NAMED STOP [NOT_CLICKED_THROUGH] PR #$PR changes screens people operate ($(head -3 <<<"$UIFILES" | tr '\n' ' ')) and carries no \"Clicked through:\" line, and no fresh reviewer's Ship-ready PASS line saying rendered:. Click every changed path in a real browser at 390 px with the console open (hostile-review step 4), then: gh pr comment $PR --body 'Clicked through: <what, 390 px, console clean>' and land again."
+  say "    $CLICK_MSG"
+fi
 if [ -n "$D1_PREMERGE" ]; then
   pr_size "$PR"
   d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] D1 migrations from ${HEAD:0:7} failed: ${DEPLOY_WHY:-see the output above}. PR #$PR was NOT merged (they go to D1 $D1_PREMERGE first, because $NAME deploys itself the moment it merges). Fix the migration, then land $PR again."
@@ -1653,8 +1694,7 @@ git log --oneline -1 origin/main
 
 say "4/5  watching main to a terminal state"
 # A green PR is not a green merge: `pull_request` builds the branch head, not the
-# result of merging. Give GitHub a moment to register the run before asking.
-sleep 12
+# result of merging. Main's run is waited for below, unless the merge is the same tree (SAME_TREE).
 # COULD NOT CHECK IS NOT THE SAME AS RED, and conflating them is how a poll lies.
 # On 18 Sep 2026 GitHub rate-limited the API mid-watch, `gh run watch` exited non-zero
 # having never read a conclusion, and this script announced "main is RED after merging
@@ -1735,6 +1775,9 @@ if [ -n "$SAME_TREE" ]; then
   GREEN="the merged code passed on the PR's run (main's own run not watched)"
 else
 GREEN="main is green"
+# Give GitHub a moment to register main's run before asking. Never on the same-tree path (Fast PRs item 6,
+# 23 Nov 2026): CI already green on that code is not waited on again.
+sleep 12
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
 GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | deploy_gates | head -1)"

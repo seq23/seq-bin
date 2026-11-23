@@ -125,12 +125,14 @@ async function judge(browser, origin, target, viewport, opts) {
   results.push(row);
   const context = await browser.newContext({ viewport, ...(opts.state ? { storageState: opts.state } : {}) });
   if (LIVE && origin) await context.route((u) => u.origin !== origin && /^https?:$/.test(u.protocol), async (r) => {
-    if (!["fetch", "xhr", "eventsource"].includes(r.request().resourceType())) return r.fallback();
+    // A page closed while this runs makes fallback/abort/fulfill throw; that must not crash the judge.
+    const gone = () => {};
+    if (!["fetch", "xhr", "eventsource"].includes(r.request().resourceType())) return r.fallback().catch(gone);
     let resp;
-    try { resp = await r.fetch({ headers: { ...r.request().headers(), origin: LIVE } }); } catch { return r.abort("failed"); }
+    try { resp = await r.fetch({ headers: { ...r.request().headers(), origin: LIVE } }); } catch { return r.abort("failed").catch(gone); }
     const headers = resp.headers();
     if (headers["access-control-allow-origin"] === LIVE) headers["access-control-allow-origin"] = origin;
-    return r.fulfill({ response: resp, headers });
+    return r.fulfill({ response: resp, headers }).catch(gone);
   });
   // Third-party analytics cannot answer a localhost origin (CORS); they are not the page's own errors.
   await context.route(/(cloudflareinsights\.com|clarity\.ms|googletagmanager\.com|google-analytics\.com|plausible\.io|connect\.facebook\.net)/, (r) => r.fulfill({ status: 204, body: "" }));
@@ -139,6 +141,12 @@ async function judge(browser, origin, target, viewport, opts) {
   const consoleErrors = []; const badResponses = [];
   page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
   page.on("pageerror", (e) => consoleErrors.push(e.message));
+  // Every request the page starts is tracked until it finishes or fails, so the facts (console errors
+  // above all: a refused fetch logs its error only when it fails) are read after the page's requests end.
+  const inflight = new Set();
+  page.on("request", (q) => inflight.add(q));
+  page.on("requestfinished", (q) => inflight.delete(q));
+  page.on("requestfailed", (q) => inflight.delete(q));
   page.on("response", (r) => { if (r.status() >= 400 && origin && r.url().startsWith(origin) && r.url() !== target.url) badResponses.push(`${r.status()} ${r.url().slice(origin.length)}`); });
   let resp;
   try { resp = await page.goto(target.url, { waitUntil: "domcontentloaded", timeout: 30000 }); } catch (e) { fail(row, `${target.label} did not load: ${e.message.split("\n")[0]}`); await context.close(); return row; }
@@ -148,6 +156,11 @@ async function judge(browser, origin, target, viewport, opts) {
   await page.evaluate(async () => { for (let y = 0; y < document.body.scrollHeight; y += 600) { window.scrollTo(0, y); await new Promise((r) => setTimeout(r, 30)); } window.scrollTo(0, 0); });
   await page.waitForLoadState("load", { timeout: 8000 }).catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+  // networkidle can come before a slow fetch ends (it is "no new request for 500 ms", and a timeout is
+  // caught): wait for the page's own requests to end, bounded, then one round trip to the page so the
+  // console errors and rejections their failures cause have been delivered.
+  for (const end = Date.now() + 8000; inflight.size && Date.now() < end; ) await page.waitForTimeout(50);
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 50))).catch(() => {});
   T("settled");
   // A signed-in render that shows the login screen has judged nothing: a fail by name, never a pass.
   // Any visible match counts: a console often has one nav for phones and another for desktops.

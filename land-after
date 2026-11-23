@@ -317,6 +317,10 @@ main() {
     DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not in a git checkout; pass --repo owner/name"
     REPO="$(repo_of_dir "$DIR")"; [ -n "$REPO" ] || refuse "$DIR has no GitHub origin; pass --repo owner/name"
   fi
+  # The worker runs in the repo's MAIN checkout, never a linked worktree: agents remove their worktree right
+  # after starting a land, and a worker cd'd into a removed folder fails (23 Nov 2026: lands lost this way).
+  local main_dir; main_dir="$(cd "$DIR" && dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"
+  [ -n "$main_dir" ] && [ -d "$main_dir" ] && [ "$(repo_of_dir "$main_dir")" = "$REPO" ] && DIR="$main_dir"
 
   # The PR and its PASS line. A read that never answers starts nothing (exit 75, "could not verify").
   # Asked patiently: a spent allowance is slept out to its reset (22 Nov 2026, #134), never "nothing started".

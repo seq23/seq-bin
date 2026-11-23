@@ -13,7 +13,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LAND="$HERE/../land"
-BLOCK="$(sed -n '/^# --- pick_run begin/,/^# --- pick_run end/p' "$LAND")"
+BLOCK="$(sed -n '/^# --- deploy_gates begin/,/^# --- deploy_gates end/p;/^# --- pick_run begin/,/^# --- pick_run end/p' "$LAND")"
 [ -n "$BLOCK" ] || { echo "FAIL: land no longer carries the pick_run block"; exit 1; }
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/repo/.github/workflows"

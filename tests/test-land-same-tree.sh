@@ -4,7 +4,7 @@
 # and checks the decision for each shape, with the skip-everything mutation as a negative proof.
 set -uo pipefail
 LAND="$(cd "$(dirname "$0")" && pwd)/../land"
-BLOCK="$(sed -n '/^# --- same_tree begin/,/^# --- same_tree end/p' "$LAND")"
+BLOCK="$(sed -n '/^# --- deploy_gates begin/,/^# --- deploy_gates end/p;/^# --- same_tree begin/,/^# --- same_tree end/p' "$LAND")"
 [ -n "$BLOCK" ] || { echo "FAIL test-land-same-tree: same_tree block not found"; exit 1; }
 fails=0
 decide() { # $1 block text; env: TM TH WF GATE PRWF RUNID HEADV MSHA → prints SAME_TREE

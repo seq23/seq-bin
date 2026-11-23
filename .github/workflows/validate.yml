@@ -68,6 +68,9 @@ jobs:
       # 22 Nov 2026: land ships on the PR's green run only when the merge is byte-for-byte the tested tree.
       - name: land skips main's re-run only for the exact same code
         run: ./tests/test-land-same-tree.sh
+      # 22 Nov 2026, west-peek-os #584: "main is green", then DEPLOY_RUN_NOT_FOUND, while CI was still queued.
+      - name: land waits for main's CI before looking for a deploy that fires on it
+        run: ./tests/test-land-gate-wait.sh
       - name: pass-line posts only a sign-off land will read, through land's own parser
         run: ./tests/test-pass-line.sh
 

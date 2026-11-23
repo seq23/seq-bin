@@ -174,6 +174,7 @@ gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
 land_exit() { # $1 exit code. A land that ended green with no fresh reviewer's PASS (her bypass, or a Fast PR) notes its same-day engineering check; a landed launch lists its repo.
   local rc="$1"
   if [ "$rc" -eq 0 ] && [ -n "${LAND_ENG_DUE:-}" ]; then note_eng_check "$LAND_ENG_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
+  if [ "$rc" -eq 0 ] && [ -n "${FORMS_DUE:-}" ]; then note_form_proof "$FORMS_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   if [ "$rc" -eq 0 ] && [ -n "${LIVE_ADD:-}" ]; then live_add "$LIVE_ADD" "$PR" || rc="$LAND_RC_LIVE_NOT_ADDED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
   # A TERM, HUP or Ctrl-C mid-deploy leaves no temp worktree or step file (deploy_cleanup, in deploy_at).
@@ -1541,6 +1542,27 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
   msg="$(gate_patch "$1" "$base" "$2" "$body")" || { echo "$msg"; return 1; }
   return 0
 }
+# FORMS ARE NEVER LEFT BROKEN BY A FIX (her words 23 Nov 2026: "u need to make sure the forms are not broken …
+# after theee fixes u need to test them"). A SAFETY check: no Fast PRs item cuts it, and her bypass only records it.
+# Whether a PR touches a form's page or server path is meaning, so the builder (a model) says it, and the reviewer
+# judges the claim; land checks structure only. Every PR body (or an owner-account comment) carries ONE of:
+#   Forms: none — <why no form is touched, 3+ words>
+#   Forms: <which form(s)> — preview: <the marked TEST submission on the preview and what received it, 3+ words>
+# Production is proven right after the deploy by post-land-check (land starts it, detached; FORM-PROOF DUE line).
+forms_lines() { # stdin: PR body + owner comments -> each Forms: line's text after the colon
+  sed -nE 's/^[[:space:]>]*([-*][[:space:]]+)?(\*\*)?Forms:(\*\*)?[[:space:]]*//Ip' | tr -d '\r'
+}
+gate_forms() { # $1 PR  $2 PR body + owner comments -> rc 0 (stdout: the forms touched, empty when none) | rc 1 one plain line
+  local lines touched none
+  lines="$(forms_lines <<<"$2" | grep -v '<')"
+  touched="$(grep -iE '^[^[:space:]].*[[:space:]](—|–|--|-)[[:space:]]*preview:[[:space:]]*[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" \
+    | grep -viE '^(none|no)[[:space:]]*(—|–|--|-|:)' | sed -E 's/[[:space:]]+(—|–|--|-)[[:space:]]*preview:.*$//I' | paste -sd';' -)"
+  [ -n "$touched" ] && { echo "$touched"; return 0; }
+  none="$(grep -iE '^(none|no)[[:space:]]*(—|–|--|-|:)[[:space:]]*[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" | head -1)"
+  [ -n "$none" ] && return 0
+  echo "PR #$1 says nothing about forms: add to its body 'Forms: none — <why no form page or server path is touched, 3+ words>', or 'Forms: <which form> — preview: <the marked TEST submission on the preview and what received it>' (her rule: a form is never left broken by a fix; production is proven right after the deploy)."
+  return 1
+}
 # --- gates end ---
 # HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
@@ -1563,7 +1585,7 @@ note_eng_check() { # $1 why no reviewer saw it: bypass | unreviewed
   esac
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
-  line="ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today"
+  line="${LAND_ENG_LINE:-ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today}"
   # One writer at a time with the PreCompact hook (handoff-on-compact.sh takes the same lock), then an
   # atomic replace. The line goes after the Jobs list, where the hook keeps hand-written lines all day.
   if out="$(python3 -c '
@@ -1572,8 +1594,9 @@ path, key, line = sys.argv[1], sys.argv[2], sys.argv[3]
 S, E, JE = "<!-- TODAY:START -->", "<!-- TODAY:END -->", "<!-- JOBS:END -->"
 lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
 doc = open(path).read() if os.path.exists(path) else ""
-if re.search(r"(?m)^- ENG-CHECK (DUE|DONE) " + re.escape(key) + " ", doc):
-    print("ENG-CHECK for " + key + " is already in " + path); sys.exit(0)
+kind = line.split(" DUE ", 1)[0]
+if re.search(r"(?m)^- " + re.escape(kind) + " (DUE|DONE|FAIL) " + re.escape(key) + " ", doc):
+    print(kind + " for " + key + " is already in " + path); sys.exit(0)
 item = "- " + line + "\n"
 if S not in doc or E not in doc:
     doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + item + E + "\n"
@@ -1592,6 +1615,23 @@ print(line + "  (in " + path + ", Today)")
   printf '\n\033[31;1mNAMED STOP [ENG_CHECK_NOT_NOTED] #%s LANDED, but its same-day engineering check was NOT written to %s: %s\nAdd this line to Today in %s by hand:\n  - %s\033[0m\n' \
     "$PR" "$handoff" "$(tail -1 <<<"$out")" "$handoff" "$line"
   return 1
+}
+# THE LIVE FORM IS PROVEN RIGHT AFTER THE DEPLOY (gate_forms). Same writer as the engineering check, kind
+# FORM-PROOF, then post-land-check starts detached on that one line: a fresh model makes a marked TEST submission
+# on production, posts `Form proof (production): PASS|FAIL — …` on the PR, and the line turns DONE or FAIL (a FAIL
+# also files a GitHub issue on the repo, which emails her). The nightly run picks up any line still DUE.
+note_form_proof() { # $1 the forms touched (from gate_forms), or "undeclared (…)"
+  local slug sha line runner="${LAND_POST_CHECK:-${LAND_DIR:-$HOME/bin}/post-land-check}"
+  slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
+  sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
+  line="FORM-PROOF DUE $slug#$PR ${sha:-merge-sha-unread} — forms: $1; deployed $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a marked TEST submission on production proves each one"
+  LAND_ENG_LINE="$line" note_eng_check line || return 1
+  if [ -x "$runner" ]; then
+    nohup "$runner" --now "$slug#$PR" >/dev/null 2>&1 </dev/null &
+    echo "     production form proof started (post-land-check --now $slug#$PR; log ~/Work/tasks/logs/post-land-check.log)"
+  else
+    echo "     post-land-check is not installed at $runner: the nightly run proves the form"
+  fi
 }
 # --- live_add begin (tests/test-land-gates.sh evals this block) ---
 # THE LAUNCH PATH WRITES live-repos.json, NOTHING ELSE DOES (23 Nov 2026). Once a PR with a fresh reviewer's
@@ -1718,6 +1758,17 @@ case "$GATE_RC" in
   75) unverified network "$GATE_MSG" ;;
   *) die "$GATE_MSG" ;;
 esac
+# Forms (gate_forms, above): a safety check, read under her bypass too. Her bypass never stops on it: a PR she
+# landed that says nothing about forms is proven on production anyway ("undeclared"), so nothing is skipped.
+FORMS_DUE=""
+FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"; FORM_RC=$?
+if [ "$FORM_RC" -eq 0 ]; then
+  [ -z "$FORM_MSG" ] || { FORMS_DUE="$FORM_MSG"; say "    forms: $FORM_MSG — proven on the preview; production is proven right after the deploy"; }
+elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
+  FORMS_DUE="undeclared (landed under her bypass)"; say "    forms: undeclared under her bypass; every form this PR touches is proven on production right after the deploy"
+else
+  die "NAMED STOP [FORMS_UNDECLARED] $FORM_MSG"
+fi
 # A LANDED LAUNCH LISTS ITS REPO (new until launched, 23 Nov 2026). A PR carrying a fresh reviewer's Launch-ready
 # PASS for this head (launch_pass, the launch gate's own check) in a repo not yet on live-repos.json is added to
 # the list by the exit trap once the land ends green (live_add). Never under her bypass: no review stood.

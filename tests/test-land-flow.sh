@@ -106,7 +106,8 @@ case "$a" in
   # The PR's repo is its url (o/r, on the fixture live-repos.json unless a case says otherwise); no-url = GitHub left it out.
   "pr view "*"files,body,comments"*) { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
       | if [ -f "$FAKE_DIR/no-url" ]; then cat; else jq -c '.url //= "https://github.com/o/r/pull/7"'; fi \
-      | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi; exit 0 ;;
+      | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi \
+      | if [ -f "$FAKE_DIR/no-forms" ]; then cat; else jq -c '.body = ((.body // "") + "\nForms: none — a fixture change touching no form")'; fi; exit 0 ;;
   # label-events = every label ever added (gh's --jq answer over the PR's issue events); default none; tls = down.
   "api --paginate repos/"*"/issues/7/events "*) answer label-events '[]' ;;
   # live_add: seq-bin's list through the contents API (live-get = its answer), the PUT logged to live-put.
@@ -1039,6 +1040,30 @@ OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-su
 check "rate limited past the bound under --owner: exit 75 'STOPPED: could not verify (rate limit)', not merged, no line, nothing posted" eval '[ "$RC" -eq 75 ] && has "STOPPED: could not verify (rate limit)" && ! merge_called && [ "$(due_lines)" -eq 0 ] && no_posts'
 # The land path never names the intake at all (the old poster block is gone, not kept beside the new line).
 check "land and land-after name no Open Loops poster or intake" eval '! grep -nE "open-loops|open_loops|/intake|OPEN_LOOPS" "$HERE/../land" "$HERE/../land-after"'
+# Forms (her words 23 Nov 2026: "after theee fixes u need to test them"): no Forms: line is refused by name; her
+# bypass records it instead of stopping; a touched form notes FORM-PROOF and starts post-land-check on that PR.
+printf '#!/bin/bash\necho "$*" >> "%s/plc-calls"\n' "$W" > "$W/plc"; chmod +x "$W/plc"; export LAND_POST_CHECK="$W/plc"
+form_lines() { grep -c '^- FORM-PROOF DUE ' "$LAND_HANDOFF"; }
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "forms: no Forms: line is refused rc 1 by NAMED STOP [FORMS_UNDECLARED] saying what to add, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [FORMS_UNDECLARED]" && has "Forms: none — " && ! merge_called && [ "$(form_lines)" -eq 0 ]'
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+sleep 1
+check "forms under her bypass: lands rc 0 with ONE FORM-PROOF DUE line marked undeclared" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 1 ] && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: undeclared (landed under her bypass)"'
+check "…and post-land-check was started for that PR alone" eval 'grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+echo '{"files":[{"path":"functions/api/lead.js"}],"labels":[],"body":"Forms: request form — preview: TEST submission 200, row recTEST stored\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the lead handler fix | tests/lead.test.js goes red |","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+sleep 1
+check "a touched form proven on the preview: lands rc 0, FORM-PROOF DUE names it, post-land-check started" eval '[ "$RC" -eq 0 ] && merge_called && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: request form;" && grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"
+run_land approvalprep
+sleep 1
+check "Forms: none lands with no FORM-PROOF line and starts nothing" eval '[ "$RC" -eq 0 ] && [ "$(form_lines)" -eq 0 ] && [ ! -f "$W/plc-calls" ]'
+rm -f "$FAKE/no-forms"; unset LAND_POST_CHECK
 unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
 export LAND_HANDOFF="$W/HANDOFF.md"
 

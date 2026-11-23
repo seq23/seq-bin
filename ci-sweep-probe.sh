@@ -622,6 +622,30 @@ else
   exit 3
 fi
 
+# DIVINE 10 SECURITY ALERTS (23 Nov 2026, her words: "every repo that is a divine 10 business
+# should get locked down and an audit"). Open code-scanning, secret-scanning and Dependabot alerts,
+# and a missing main-branch ruleset, on the repos in ci-sweep-security.json become lanes here:
+# RED to fix, PENDING when GitHub did not answer (unknown, never clean). See ci-sweep-alert-lanes.sh.
+ALERT_LANES="${CI_SWEEP_ALERT_LANES_BIN:-$(dirname "$0")/ci-sweep-alert-lanes.sh}"
+if [ -x "$ALERT_LANES" ]; then
+  alert_out="$("$ALERT_LANES")"; alert_rc=$?
+  if [ "$alert_rc" -ne 0 ]; then
+    log "NAMED STOP [ALERT_LANES_FAILED] $ALERT_LANES exited $alert_rc — the Divine 10 security alerts were read by nothing."
+    exit 3
+  fi
+  # A parked repo is never worked (her ruling 18 Nov 2026), its security lanes included.
+  alert_out="$(printf '%s\n' "$alert_out" | awk -F'\t' -v p=" $PARKED_REPOS " 'NF && index(p, " " $2 " ") == 0')"
+  if [ -n "$alert_out" ]; then
+    printf '%s\n' "$alert_out"
+    lanes=$((lanes + $(printf '%s\n' "$alert_out" | grep -cE '^(RED|GREEN|PENDING)	' || true)))
+    red=$((red + $(printf '%s\n' "$alert_out" | grep -cE '^RED	' || true)))
+    pending=$((pending + $(printf '%s\n' "$alert_out" | grep -cE '^PENDING	' || true)))
+  fi
+else
+  log "NAMED STOP [NO_ALERT_LANES] $ALERT_LANES is missing — the Divine 10 security alerts would reach no executor."
+  exit 3
+fi
+
 # RULE 0. Probing nothing is not a clean bill of health.
 if [ "$lanes" -eq 0 ]; then
   log "NAMED STOP [PROBED_NOTHING] no repository under $GITHUB_DIR resolved to a non-archived $OWNER repo."

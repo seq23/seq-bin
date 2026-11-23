@@ -1,0 +1,25 @@
+{
+  "_why": "The 12 Divine 10 repos (d10-scan-protect; her words 23 Nov 2026: 'every repo that is a divine 10 business should get locked down and an audit'). ci-sweep-alert-lanes.sh reads every repo below for open code-scanning, secret-scanning and Dependabot alerts, and for repos with protect=true checks that the ruleset below is live on the default branch. A PR-only rule is NOT in it: these repos belong to a personal account, where GitHub refuses GitHub Actions as a bypass actor (HTTP 422) and a PR rule refuses every GITHUB_TOKEN push to main (proved 23 Nov 2026, run seq23/whisperalmanac-site 45178181280). Adding it needs her decision on a push credential for the jobs.",
+  "ruleset": {
+    "name": "main: no force-push, no deletion (d10-scan-protect)",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+    "rules": [ { "type": "deletion" }, { "type": "non_fast_forward" } ],
+    "bypass_actors": []
+  },
+  "repos": [
+    { "repo": "seq23/dailystory", "protect": false, "why_not": "Lovable syncs its editor to main; GitHub-side rules on the synced branch are left to her (Lovable brief rule)." },
+    { "repo": "seq23/heygetonmylevel", "protect": false, "why_not": "Lovable syncs its editor to main (last sync 9 Nov 2026); GitHub-side rules on the synced branch are left to her (Lovable brief rule)." },
+    { "repo": "seq23/local-guides-generator", "protect": true },
+    { "repo": "seq23/local-guides-citation-velocity", "protect": true },
+    { "repo": "seq23/approvalprep", "protect": true },
+    { "repo": "seq23/dream-wedding-builder", "protect": true },
+    { "repo": "seq23/aplayer-mode", "protect": true },
+    { "repo": "seq23/sprylabs-hpc-site", "protect": true },
+    { "repo": "seq23/how-we-know", "protect": true },
+    { "repo": "seq23/keepmyproof", "protect": true },
+    { "repo": "seq23/peace-be-still", "protect": true },
+    { "repo": "seq23/whisperalmanac-site", "protect": true }
+  ]
+}

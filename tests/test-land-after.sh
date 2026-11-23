@@ -126,15 +126,15 @@ no_posts() { [ ! -s "$W/api/posts.jsonl" ]; }
 echo "=== abuse and mistakes: refused, nothing started ==="
 reset "Fixes it."
 la 7 --task nopass
-check "no PASS line: refused (rc 1)" [ "$RC" -eq 1 ]
+check "no PASS line: refused (rc 4: needs a reviewer)" [ "$RC" -eq 4 ]
 check "…with the line to add" has "Ship-ready: PASS"
 check "…land never ran, no sheet, no log, no lock" eval '[ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/nopass.md" ] && [ -z "$(find "$T" -type f 2>/dev/null)" ]'
 reset "Ship-ready: PASS — reviewer looked at it"
 la 7 --task noeng
-check "a PASS line without '; Engineering: PASS': refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noeng.md" ]'
+check "a PASS line without '; Engineering: PASS': refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noeng.md" ]'
 reset "Ship-ready: PASS — builder-bot looked at it; Engineering: PASS"
 la 7 --task selfsigned
-check "a PASS signed by the PR's builder: refused, nothing started" eval '[ "$RC" -eq 1 ] && has "signed by its builder" && [ ! -f "$FAKE/land-ran" ]'
+check "a PASS signed by the PR's builder: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "signed by its builder" && [ ! -f "$FAKE/land-ran" ]'
 reset
 for bad in "../escape" "a/b" "x..y" ".hidden"; do
   la 7 --task "$bad"
@@ -147,7 +147,7 @@ check "the PR unreadable at the start: exit 75 'could not verify', nothing start
 echo "=== Fast PRs (her ruling 23 Nov 2026): the PASS is asked for only of a review-class PR ==="
 reset "Fixes it."; echo '[{"name":"review-required"}]' > "$FAKE/labels"
 la 7 --task fastreview
-check "safety: review-required label and no PASS line: refused, nothing started" eval '[ "$RC" -eq 1 ] && has "Ship-ready: PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/fastreview.md" ]'
+check "safety: review-required label and no PASS line: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "Ship-ready: PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/fastreview.md" ]'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"
 la 7 --task fastplain
 check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]
@@ -163,19 +163,19 @@ check "started from a linked worktree that is removed at once: the worker runs i
 
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
 la 7 --task noclass
-check "safety: no Review class line and no PASS: refused, saying what to add, nothing started" eval '[ "$RC" -eq 1 ] && has "Review class: none — <why>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclass.md" ]'
+check "safety: no Review class line and no PASS: refused, saying what to add, nothing started" eval '[ "$RC" -eq 4 ] && has "Review class: none — <why>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclass.md" ]'
 reset $'Fixes it.\nReview class: none — log wording only'; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
 la 7 --task noneclass
 check "happy path: 'Review class: none — log wording only', no PASS: started at once (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo '["review-required"]' > "$FAKE/label-events"
 la 7 --task wasLabeled
-check "abuse: review-required added then taken off, no PASS: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/wasLabeled.md" ]'
+check "abuse: review-required added then taken off, no PASS: refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/wasLabeled.md" ]'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo down > "$FAKE/label-events"
 la 7 --task evdown
 check "outage: the label history unread: exit 75 'could not verify', nothing started" eval '[ "$RC" -eq 75 ] && has "label history" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/evdown.md" ]'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo "https://github.com/t/fixture/pull/7" > "$FAKE/url"
 la 7 --task unlisted
-check "new until launched: a repo not on live-repos.json, no PASS: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/unlisted.md" ]'
+check "new until launched: a repo not on live-repos.json, no PASS: refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/unlisted.md" ]'
 
 echo "=== green, detached: survives the starting shell and its whole process group; only its own sheet is touched ==="
 reset; mkdir -p "$T"
@@ -211,6 +211,31 @@ la 8 --task second
 check "second start on the same PR: refused" eval '[ "$RC" -eq 1 ] && has "already being landed"'
 check "…and it wrote no sheet of its own" eval '[ ! -e "$T/second.md" ] && [ ! -e "$T/logs/second-8.log" ]'
 lockgone; check "…the first still ends PASS" eval 'line1 "$T/done/first.md" | grep -q "^STATUS: PASS"'
+
+echo "=== --holds and --dry-run (pr-watch, 23 Nov 2026): a held PR is seen, a dry run starts nothing ==="
+reset
+FAKE_LAND_SECS=3 la 11 --task holder
+check "a land started on #11: rc 0" [ "$RC" -eq 0 ]
+"$LA" --holds t/fixture 11 > "$W/holds" 2>&1; hrc=$?
+check "--holds: rc 0 while a live land holds the PR, with its pid" eval '[ "$hrc" -eq 0 ] && grep -qE "^[0-9]+$" "$W/holds"'
+la 11 --dry-run
+check "--dry-run on a held PR: refused, already being landed" eval '[ "$RC" -eq 1 ] && has "already being landed"'
+lockgone
+"$LA" --holds t/fixture 11 >/dev/null 2>&1; hrc=$?
+check "--holds: rc 1 once the land is over" [ "$hrc" -eq 1 ]
+mkdir -p "$T/locks/t_fixture-12.lock"; echo 999999 > "$T/locks/t_fixture-12.lock/pid"; touch -t 202601010000 "$T/locks/t_fixture-12.lock"
+"$LA" --holds t/fixture 12 >/dev/null 2>&1; hrc=$?
+check "--holds: a dead holder's lock is not a hold (rc 1)" [ "$hrc" -eq 1 ]
+rm -rf "$T/locks/t_fixture-12.lock"
+"$LA" --holds "bad repo" 12 >/dev/null 2>&1; hrc=$?
+check "--holds: a malformed repo is refused (rc 1), never read as held" [ "$hrc" -eq 1 ]
+reset
+la 13 --dry-run
+check "--dry-run on a ready PR: rc 0, 'would land'" eval '[ "$RC" -eq 0 ] && has "would land t/fixture#13"'
+check "…nothing started: no land, no sheet, no lock, no log" eval '[ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/pr-fixture-13.md" ] && [ ! -e "$T/logs/pr-fixture-13-13.log" ] && [ -z "$(find "$T" -name "*.lock" 2>/dev/null)" ]'
+reset "Fixes it."; : > "$FAKE/no-class"
+la 14 --dry-run
+check "--dry-run on a review-class PR with no PASS: rc 4 (needs a reviewer), nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ]'
 
 echo "=== red: FAIL with the step and log on line 1, sheet stays open, NOTHING on Open Loops ==="
 reset; echo red > "$FAKE/land-mode"
@@ -345,38 +370,38 @@ la 33 --task ownercomment; lockgone
 check "the reviewer's PASS in an owner-account comment: lands" eval 'line1 "$T/done/ownercomment.md" | grep -q "^STATUS: PASS"'
 reset "Fixes it."; jq -nc --arg b "$GOOD" '[{author: {login: "passerby"}, authorAssociation: "NONE", body: $b}]' > "$FAKE/comments"
 la 34 --task strangercomment
-check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
+check "the same PASS in a comment by anyone else: refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/strangercomment.md" ]'
 
 echo "=== a PASS voided by a later VERDICT: fail says so, and how to post it again (22 Nov 2026: 4 PRs refused 'no PASS') ==="
 FAILC='[{"authorAssociation": "OWNER", "createdAt": "2026-11-22T14:00:00Z", "body": "VERDICT: fail\n- F1 the cap is unbounded"}]'
 reset "$GOOD"; printf '%s' "$FAILC" > "$FAKE/comments"
 la 35 --task voided
-check "a PASS in the body before an owner VERDICT: fail: refused, nothing started (the newest verdict still wins)" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/voided.md" ]'
+check "a PASS in the body before an owner VERDICT: fail: refused, nothing started (the newest verdict still wins)" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/voided.md" ]'
 check "…the refusal says the PASS is voided by the later fail, and when" eval 'has "PASS in the PR body does not count" && has "later VERDICT: fail comment (22 Nov 14:00 UTC) voids it"'
 check "…and gives the fix: the PASS again as a new comment, at the head" eval 'has "gh pr comment 35 -R t/fixture" && has " at ${HEADSHA:0:8}; Engineering: PASS"'
 reset "Fixes it."; jq -nc --arg b "$GOOD" '[{authorAssociation: "NONE", createdAt: "2026-11-22T13:00:00Z", body: $b}, {authorAssociation: "OWNER", createdAt: "2026-11-22T14:00:00Z", body: "VERDICT: fail"}]' > "$FAKE/comments"
 la 36 --task voided-stranger
-check "abuse: a stranger's PASS before an owner fail is never named as voided (it never counted): the plain refusal" eval '[ "$RC" -eq 1 ] && has "has no reviewer PASS line" && ! has "does not count" && ! has "session_rev123"'
+check "abuse: a stranger's PASS before an owner fail is never named as voided (it never counted): the plain refusal" eval '[ "$RC" -eq 4 ] && has "has no reviewer PASS line" && ! has "does not count" && ! has "session_rev123"'
 
 echo "=== F2 (review of #137): the PASS is for this head, checked before anything starts ==="
 SHALESS='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'
 reset "$SHALESS"
 la 40 --task shaless-body
-check "a PASS naming no commit, in the body (time unknown): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "nothing started" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-body.md" ]'
+check "a PASS naming no commit, in the body (time unknown): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 4 ] && has "STALE_PASS" && has "nothing started" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-body.md" ]'
 reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
 la 41 --task shaless-after; lockgone
 check "the same line in an owner comment posted after the PR's last commit (12:00 -> 13:00): lands" eval 'line1 "$T/done/shaless-after.md" | grep -q "^STATUS: PASS"'
 reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T11:00:00Z", body: $b}]' > "$FAKE/comments"
 la 42 --task shaless-before
-check "…posted before the PR's last commit (11:00 < 12:00): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-before.md" ]'
+check "…posted before the PR's last commit (11:00 < 12:00): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 4 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-before.md" ]'
 reset "Fixes it."; jq -nc --arg b "$SHALESS" '[{authorAssociation: "OWNER", createdAt: "2026-11-22T13:00:00Z", body: $b}]' > "$FAKE/comments"
 echo 2026-11-22T13:30:00Z > "$FAKE/suite-at"
 la 44 --task shaless-pushedlater
-check "committed 12:00, PASS 13:00, reached GitHub 13:30 (review F5): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && has "reached GitHub" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-pushedlater.md" ]'
+check "committed 12:00, PASS 13:00, reached GitHub 13:30 (review F5): refused STALE_PASS, nothing started" eval '[ "$RC" -eq 4 ] && has "STALE_PASS" && has "reached GitHub" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/shaless-pushedlater.md" ]'
 rm -f "$FAKE/suite-at"
 reset "Ship-ready: PASS — reviewer session_rev123 looked at it at 0123456789ab; Engineering: PASS"
 la 43 --task notonpr
-check "a PASS naming a commit that is not on the PR: refused STALE_PASS before the CI wait" eval '[ "$RC" -eq 1 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'
+check "a PASS naming a commit that is not on the PR: refused STALE_PASS before the CI wait" eval '[ "$RC" -eq 4 ] && has "STALE_PASS" && [ ! -f "$FAKE/land-ran" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'
 
 echo "=== N1: a worker that never starts is reported, the sheet put back ==="
 reset; printf 'STATUS: review\nGoal: kept\n' > "$T/nostart.md"

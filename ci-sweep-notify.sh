@@ -33,6 +33,19 @@ ISSUE_REPO_FALLBACK="${CI_SWEEP_ISSUE_REPO:-$GH_OWNER/west-peek-os}"
 # Test seam: print what WOULD be sent instead of sending it.
 DRY="${CI_SWEEP_NOTIFY_DRY:-}"
 
+# BANNER ONLY (23 Nov 2026, for pr-watch): `ci-sweep-notify.sh --banner <title> <subtitle> <body>` shows one
+# macOS banner and files nothing, so other watchers reuse this one sender instead of a second osascript.
+# The dry seam above prints it instead. Exit 2 with no body; exit 1 when the banner could not be shown.
+if [ "$VERDICT" = "--banner" ]; then
+  B_TITLE="${2:-}"; B_SUB="${3:-}"; B_BODY="$(printf '%s' "${4:-}" | head -c 200)"
+  [ -n "$B_TITLE" ] && [ -n "$B_BODY" ] || { echo "[notify] NAMED STOP [NO_BANNER_TEXT] --banner needs a title and a body."; exit 2; }
+  if [ -n "$DRY" ]; then echo "[notify:dry] banner: \"$B_TITLE: $B_SUB\" / \"$B_BODY\""; exit 0; fi
+  q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+  /usr/bin/osascript -e "display notification \"$(q "$B_BODY")\" with title \"$(q "$B_TITLE")\" subtitle \"$(q "$B_SUB")\" sound name \"Basso\"" \
+    >/dev/null 2>&1 || { echo "[notify] the macOS banner failed (no GUI session?)"; exit 1; }
+  exit 0
+fi
+
 # RULE 0: a notification with no verdict is noise, and noise is how a channel dies.
 [ -n "$VERDICT" ] || { echo "[notify] NAMED STOP [NO_VERDICT] refusing to notify without one."; exit 2; }
 

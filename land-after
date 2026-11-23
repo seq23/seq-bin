@@ -21,6 +21,10 @@
 #                            `landing` sheet with no live worker, or older than 90 min, is "stale"; any open
 #                            sheet untouched 7+ days is "stale".
 #   land-after --self-test   runs tests/test-land-after.sh.
+#   land-after --holds <owner/repo> <pr>   rc 0 (pid on stdout) while a live land holds that PR; 1 when none does.
+#   land-after <pr> ... --dry-run          every check, then "would land": nothing written, locked or started.
+#   A refusal exits 1, except "it needs a fresh reviewer's PASS first" (none, voided, stale, builder-signed,
+#   no Engineering): exit 4, so pr-watch can say "needs a reviewer" without reading the words.
 #
 #   land-after --sweep       (nightly, housekeeping.sh) a `landing` sheet whose worker is gone (power loss,
 #                            kill -9) becomes FAIL unknown on its sheet, so nothing waits unseen.
@@ -52,6 +56,7 @@ KEEP_MIN=$((14 * 1440)); STALE_LANDING_MIN=90; STALE_OPEN_MIN=$((7 * 1440))
 
 say() { printf 'land-after: %s\n' "$*"; }
 refuse() { say "REFUSED — $*"; exit 1; }
+refuse_review() { say "REFUSED — $*"; exit 4; }   # exit 4: it needs a fresh reviewer's PASS first (pr-watch reads this code)
 now() { date '+%Y-%m-%dT%H:%M'; }
 age_min() { perl -e '@s = stat $ARGV[0] or exit 1; print int((time - $s[9]) / 60)' "$1"; }
 valid_slug() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] && [[ "$1" != *..* ]]; }
@@ -76,11 +81,18 @@ cleanup() { # done/ and logs/ only, files only, older than 14 days only; a log a
 repo_of_dir() { git -C "$1" remote get-url origin 2>/dev/null | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p'; }
 slug_lock() { printf '%s/slugs/%s.lock' "$LOCKS" "$1"; }
 lock_pid_for_slug() { cat "$(slug_lock "$1")/pid" 2>/dev/null; }
-take_lock() { # $1 lock dir -> rc 0 taken | 1 held by a live land (its pid, or "starting", on stdout). A dead holder's lock is taken over.
+pr_lock() { printf '%s/%s-%s.lock' "$LOCKS" "${1//\//_}" "$2"; }   # $1 owner/repo $2 PR -> its lock dir
+lock_holder() { # $1 lock dir -> rc 0 with its live holder (pid, or "starting") on stdout | 1 free or held by a dead land
   local l="$1" holder
-  mkdir "$l" 2>/dev/null && return 0
+  [ -d "$l" ] || return 1
   holder="$(cat "$l/pid" 2>/dev/null || true)"
-  if alive "$holder" || { [ -z "$holder" ] && [ "$(age_min "$l" || echo 99)" -lt 2 ]; }; then printf '%s' "${holder:-starting}"; return 1; fi
+  if alive "$holder" || { [ -z "$holder" ] && [ "$(age_min "$l" || echo 99)" -lt 2 ]; }; then printf '%s' "${holder:-starting}"; return 0; fi
+  return 1
+}
+take_lock() { # $1 lock dir -> rc 0 taken | 1 held by a live land (its pid, or "starting", on stdout). A dead holder's lock is taken over.
+  local l="$1"
+  mkdir "$l" 2>/dev/null && return 0
+  lock_holder "$l" && return 1
   drop_lock "$l"; mkdir "$l" 2>/dev/null && return 0
   printf 'unknown'; return 1
 }
@@ -278,13 +290,16 @@ worker() {
 
 # ============================== start ==============================
 main() {
-  local PR="" SLUG="" REPO="" THENS=()
+  local PR="" SLUG="" REPO="" THENS=() DRY=""
   case "${1:-}" in
     --self-test) exec bash "$HERE/tests/test-land-after.sh" ;;
     --status) mkdir -p "$TASKS"; status; exit 0 ;;
+    --holds) # <owner/repo> <pr>: rc 0 with the holder's pid when a live land holds that PR, 1 when none does (pr-watch)
+      [[ "${2:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${3:-}" =~ ^[0-9]+$ ]] || refuse "usage: land-after --holds <owner/repo> <pr>"
+      lock_holder "$(pr_lock "$2" "$3")"; exit $? ;;
     --sweep) mkdir -p "$TASKS" "$LOGS" "$LOCKS"; load_land_blocks || { echo "FAIL: land's blocks could not be read"; exit 1; }; sweep; exit 0 ;;
     --worker) shift; mkdir -p "$TASKS" "$DONE" "$LOGS"; load_land_blocks || { echo "FAIL: land's blocks could not be read"; exit 1; }; worker "$@" ;;
-    -h|--help|"") sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help|"") sed -n '2,38p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
   esac
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -294,7 +309,8 @@ main() {
       --repo=*) REPO="${1#--repo=}" ;;
       --then) THENS+=("${2:-}"); shift ;;
       --then=*) THENS+=("${1#--then=}") ;;
-      --*) refuse "unknown flag $1 (land-after <pr> [--task <slug>] [--repo owner/name] [--then \"<cmd>\"]... | --status | --sweep | --self-test)" ;;
+      --dry-run) DRY=1 ;;
+      --*) refuse "unknown flag $1 (land-after <pr> [--task <slug>] [--repo owner/name] [--then \"<cmd>\"]... [--dry-run] | --holds <owner/repo> <pr> | --status | --sweep | --self-test)" ;;
       *) [ -z "$PR" ] || refuse "one PR at a time (got $PR and $1)"; PR="$1" ;;
     esac
     shift
@@ -302,8 +318,7 @@ main() {
   [[ "$PR" =~ ^[0-9]+$ ]] || refuse "the PR must be a number (got '${PR}')"
   [ -z "$SLUG" ] || valid_slug "$SLUG" || refuse "task slug '$SLUG' must be letters, digits, . _ - (no / and no ..)"
   local c; for c in ${THENS[@]+"${THENS[@]}"}; do [ -n "$c" ] || refuse "--then needs a command"; done
-  mkdir -p "$TASKS" "$DONE" "$LOGS" "$LOCKS/slugs" || refuse "cannot create $TASKS"
-  cleanup
+  if [ -z "$DRY" ]; then mkdir -p "$TASKS" "$DONE" "$LOGS" "$LOCKS/slugs" || refuse "cannot create $TASKS"; cleanup; fi
   load_land_blocks || refuse "land's gate block could not be read from $LAND_SRC, so the PASS line cannot be checked"
 
   # The repo: --repo names it (this checkout if it is that repo, else ~/GitHub/<name>); else this checkout.
@@ -342,12 +357,12 @@ main() {
   if ! owner_override <<<"$body" && cls="$(review_class <<<"$VIEW")"; then
     local why
     reviewer="$(signoff Ship-ready <<<"$review")" \
-      || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"
-           refuse "$REPO#$PR needs a review ($cls) and has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"; }
+      || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse_review "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"
+           refuse_review "$REPO#$PR needs a review ($cls) and has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"; }
     pass_line Ship-ready <<<"$review" | covers_engineering \
-      || refuse "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
+      || refuse_review "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
     is_builder "$reviewer" "$(builders <<<"$VIEW")" \
-      && refuse "$REPO#$PR's PASS line is signed by its builder ($reviewer); a fresh reviewer signs it. Nothing started"
+      && refuse_review "$REPO#$PR's PASS line is signed by its builder ($reviewer); a fresh reviewer signs it. Nothing started"
     # The PASS must be for this head (land's own fresh_pass), checked now: refused at the start, never after the CI wait (review F2).
     local fresh frc
     [[ "$HEADSHA" =~ ^[0-9a-f]{40}$ ]] || { say "could not verify $REPO#$PR (no head commit in GitHub's answer); nothing started"; exit 75; }
@@ -356,7 +371,7 @@ main() {
     case $frc in
       0) : ;;
       75) say "could not verify $REPO#$PR ($fresh); nothing started"; exit 75 ;;
-      *) refuse "$fresh; nothing started" ;;
+      *) refuse_review "$fresh; nothing started" ;;
     esac
   fi
 
@@ -367,8 +382,14 @@ main() {
   valid_slug "$SLUG" || refuse "derived slug '$SLUG' is not valid; pass --task"
 
   # One land per PR, and one per sheet, at a time: atomic mkdir locks; a dead holder's lock is taken over.
-  local LOCK="$LOCKS/${REPO//\//_}-$PR.lock" SLOCK holder
+  local LOCK SLOCK holder
+  LOCK="$(pr_lock "$REPO" "$PR")"
   SLOCK="$(slug_lock "$SLUG")"
+  # --dry-run: every check above ran; nothing is written, locked or started (pr-watch --dry-run).
+  if [ -n "$DRY" ]; then
+    holder="$(lock_holder "$LOCK")" && refuse "$REPO#$PR is already being landed (pid $holder); nothing started"
+    say "would land $REPO#$PR (sheet $TASKS/$SLUG.md); --dry-run, nothing started"; exit 0
+  fi
   holder="$(take_lock "$LOCK")" \
     || refuse "$REPO#$PR is already being landed (pid $holder, sheet $(cat "$LOCK/slug" 2>/dev/null || echo '?')); nothing started"
   echo "$SLUG" > "$LOCK/slug"

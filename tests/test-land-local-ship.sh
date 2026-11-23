@@ -31,6 +31,7 @@ echo "npm $*" >> "$W/npm-calls"
 case "${FAKE_NPM:-ok}" in
   ok) echo "added 1 package" ;;
   silent2) exit 2 ;;
+  leftover) echo "added 1 package"; ( sleep 1; echo "LEFTOVER from npm ci" ) & exit 0 ;;
   fixture:*) f="${FAKE_NPM#fixture:}"; cat "$FIX/${f%%:*}.out"; exit "${f##*:}" ;;
 esac
 SH
@@ -202,6 +203,16 @@ el=$((SECONDS - s)); pkill -f '^sleep 601\.25$' 2>/dev/null
 check "a deploy that leaves 'sleep 601 &' on its output: land returns with its exit code" "3|the deploy command exited 3: started" "$r4"
 check "  ... within 5 s" yes "$([ "$el" -le 5 ] && echo yes || echo "no: $el s")"
 check "  ... and its output still reached the terminal" yes "$(grep -q '^started$' "$W/out-a" && echo yes || echo no)"
+# follow-up: each step has its own file, so a child npm ci left running cannot write into the deploy
+# command's reason; and each install says it is starting, so someone watching sees progress.
+r="$(FAKE_NPM=leftover run a 'sleep 2; echo "the real cause"; exit 4')"
+check "a child npm ci left behind writes after the deploy starts: the reason is the deploy's own" "4|the deploy command exited 4: the real cause" "$r"
+check "  ... and 'installing (npm ci)' is printed before npm's own output" yes "$(awk '/installing \(npm ci\)/ && !s { s = NR } /^added 1 package$/ && !a { a = NR } END { print (s && a && s < a) ? "yes" : "no" }' "$W/out-a")"
+mkdir -p "$W/nomk"; printf '#!/bin/bash\ncase "$*" in *land-step*) exit 1 ;; esac\nexec /usr/bin/mktemp "$@"\n' > "$W/nomk/mktemp"; chmod +x "$W/nomk/mktemp"
+: > "$W/npm-calls"
+r="$(PATH="$W/nomk:$PATH" run a 'true')"
+check "no temp file for a step's output: refused, never run blind" "1|npm ci in the deploy worktree at ${SHA:0:7} did not run: no temp file for its output could be made" "$r"
+check "  ... and npm never ran" 0 "$(wc -l < "$W/npm-calls" | tr -d ' ')"
 r="$(LAND_DEPLOY_LOCK="$W/ro/x/deploy.lock" PATH="$W/bin:$PATH" TMPDIR="$W/tmp" bash -c 'mkdir -p "$W/ro"; chmod 500 "$W/ro"; "$W/run.sh" a true')"
 chmod 700 "$W/ro" 2>/dev/null
 if [ "$(id -u)" = 0 ]; then echo "  skip the unopenable lock (root writes anywhere)"; else

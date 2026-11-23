@@ -620,7 +620,7 @@ record_production() { # $1 sha  $2 note -> one GitHub deployment (environment pr
 LAND_MIN_FREE_GB="${LAND_MIN_FREE_GB:-4}"
 LAND_DEPLOY_WAIT="${LAND_DEPLOY_WAIT:-1800}"
 LAND_DEPLOY_LOCK="${LAND_DEPLOY_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/land/deploy.lock}"
-DEPLOY_WHY=""; DEPLOY_OUT=""
+DEPLOY_WHY=""
 # deploy_tail: why a step failed, on one line. The tool's own last lines (a TypeScript or wrangler
 # error), then npm's error block from its top, where npm names the cause ("code EUSAGE", "Missing:
 # left-pad@1.3.0 from lock file", "ENOSPC: no space left on device"). npm's filler is dropped: bare
@@ -664,15 +664,19 @@ deploy_tail() { # $1 file -> that line, each part at most 120 characters and 400
   [ -n "$t" ] || { echo "it printed nothing"; return; }
   printf '%s\n' "$t"
 }
-deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to $DEPLOY_OUT, then the terminal
-  local rc
+deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to its own file, then the terminal
+  local rc out
   # Into a file, never a pipe: a pipe makes land wait for every process holding its write end, so a
   # daemon the deploy left behind (`wrangler dev &`) would hang land for ever, holding the deploy lock
-  # (22 Nov 2026 recheck). Bash waits for the command alone; its leftovers can write to the file all
-  # they like. The output is printed when the step ends.
-  (cd "$2" && eval "$3") 9>&- > "$DEPLOY_OUT" 2>&1; rc=$?
-  cat "$DEPLOY_OUT"
-  [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$DEPLOY_OUT")"
+  # (22 Nov 2026 recheck). Bash waits for the command alone. Each step gets a FRESH file, removed when
+  # it ends: a child an earlier step left running writes only into that step's unlinked file, never
+  # into the next step's reason (22 Nov 2026 follow-up). The output is printed when the step ends.
+  out="$(mktemp "${TMPDIR:-/tmp}/land-step.XXXXXX")" \
+    || { DEPLOY_WHY="$1 did not run: no temp file for its output could be made"; return 1; }
+  (cd "$2" && eval "$3") 9>&- > "$out" 2>&1; rc=$?
+  cat "$out"
+  [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$out")"
+  rm -f "$out"
   return "$rc"
 }
 deploy_lock() { # -> 0 holding the one local-deploy lock on fd 9 | 1 with DEPLOY_WHY set
@@ -706,15 +710,16 @@ deploy_space() { # -> 0 when the temp volume has LAND_MIN_FREE_GB free | 1 with 
   return 1
 }
 deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says why, for the caller's STOPPED line
-  local sha="$1" cmd="$2" wt rc inst
+  local sha="$1" cmd="$2" wt rc inst wout
   DEPLOY_WHY=""
   deploy_lock || return 1
   wt="$(mktemp -d -t land-deploy.XXXXXX)" || { exec 9>&-; DEPLOY_WHY="could not make a temp folder for the deploy worktree"; return 1; }
-  DEPLOY_OUT="$wt.out"
-  if ! git worktree add -q --detach "$wt" "$sha" 9>&- >"$DEPLOY_OUT" 2>&1; then
-    DEPLOY_WHY="could not check out ${sha:0:7} into a worktree: $(deploy_tail "$DEPLOY_OUT")"
-    rm -rf "$wt" "$DEPLOY_OUT"; exec 9>&-; return 1
+  wout="$wt.out"
+  if ! git worktree add -q --detach "$wt" "$sha" 9>&- >"$wout" 2>&1; then
+    DEPLOY_WHY="could not check out ${sha:0:7} into a worktree: $(deploy_tail "$wout")"
+    rm -rf "$wt" "$wout"; exec 9>&-; return 1
   fi
+  rm -f "$wout"
   rc=0; inst=""
   if [ -f "$wt/package-lock.json" ]; then
     if [ -d "$REPO_DIR/node_modules" ] && cmp -s "$wt/package-lock.json" "$REPO_DIR/package-lock.json"; then
@@ -724,6 +729,7 @@ deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says 
   # Free space is read only before an install: a linked node_modules writes next to nothing.
   if [ -n "$inst" ] && ! deploy_space; then rc=1
   elif [ "$inst" = ci ]; then
+    echo "     installing (npm ci) in the deploy worktree at ${sha:0:7}…"
     deploy_step "npm ci in the deploy worktree at ${sha:0:7}" "$wt" 'npm ci --no-audit --no-fund --loglevel=error'; rc=$?
   elif [ "$inst" = install ]; then
     # No lockfile at the sha (aplayer-mode keeps it untracked): `npm ci` cannot run, and a worktree
@@ -731,6 +737,7 @@ deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says 
     # errors). Install in the worktree, seeded with this checkout's lockfile when there is one, so
     # workspace packages resolve to the sha's own packages/, not this checkout's working tree.
     [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$wt/package-lock.json"
+    echo "     installing (npm install, no lockfile at the sha) in the deploy worktree at ${sha:0:7}…"
     deploy_step "npm install in the deploy worktree at ${sha:0:7}" "$wt" 'npm install --no-audit --no-fund --loglevel=error'; rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
@@ -738,7 +745,7 @@ deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says 
     deploy_step "the deploy command" "$wt" "$cmd"; rc=$?
   fi
   git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-  rm -f "$DEPLOY_OUT"; exec 9>&-
+  exec 9>&-
   return "$rc"
 }
 # --- deploy_at end ---

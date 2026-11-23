@@ -174,9 +174,11 @@ land_exit() { # $1 exit code. A land that ended green under her bypass notes its
   local rc="$1"
   if [ "$rc" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ]; then note_eng_check || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
+  # A TERM, HUP or Ctrl-C mid-deploy leaves no temp worktree or step file (deploy_cleanup, in deploy_at).
+  if declare -F deploy_cleanup >/dev/null; then deploy_cleanup; fi
   exit "$rc"
 }
-trap 'land_exit $?' EXIT
+trap 'land_exit $?' EXIT # bash runs it on TERM, HUP and INT too (tests/test-land-local-ship.sh)
 gh_kind() { # stderr text -> network | auth | api
   # A GitHub 5xx is "did not answer", never a refusal. 30 Oct 2026: during a GitHub incident
   # the merge call of three green PRs (how-we-know#256, local-guides-generator#140,
@@ -620,7 +622,18 @@ record_production() { # $1 sha  $2 note -> one GitHub deployment (environment pr
 LAND_MIN_FREE_GB="${LAND_MIN_FREE_GB:-4}"
 LAND_DEPLOY_WAIT="${LAND_DEPLOY_WAIT:-1800}"
 LAND_DEPLOY_LOCK="${LAND_DEPLOY_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/land/deploy.lock}"
-DEPLOY_WHY=""
+DEPLOY_WHY=""; DEPLOY_WT=""; DEPLOY_WT_REPO=""; DEPLOY_STEP_FILE=""
+deploy_cleanup() { # removes what this land's deploy made and has not removed yet: its step file, its worktree
+  # Run on every exit, land_exit included (bash runs the EXIT trap on TERM, HUP and INT too), so a
+  # signal mid-deploy leaks nothing (22 Nov 2026 review of #153: each kill left a land-step file and
+  # a registered worktree). Only paths this land made, named by its own mktemp templates, are removed.
+  case "$DEPLOY_STEP_FILE" in */land-step.*|*/land-deploy.*.out) rm -f "$DEPLOY_STEP_FILE" ;; esac
+  DEPLOY_STEP_FILE=""
+  case "$DEPLOY_WT" in */land-deploy.*)
+    git -C "${DEPLOY_WT_REPO:-.}" worktree remove --force "$DEPLOY_WT" >/dev/null 2>&1 || rm -rf "$DEPLOY_WT" ;;
+  esac
+  DEPLOY_WT=""; DEPLOY_WT_REPO=""
+}
 # deploy_tail: why a step failed, on one line. The tool's own last lines (a TypeScript or wrangler
 # error), then npm's error block from its top, where npm names the cause ("code EUSAGE", "Missing:
 # left-pad@1.3.0 from lock file", "ENOSPC: no space left on device"). npm's filler is dropped: bare
@@ -671,12 +684,13 @@ deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to i
   # (22 Nov 2026 recheck). Bash waits for the command alone. Each step gets a FRESH file, removed when
   # it ends: a child an earlier step left running writes only into that step's unlinked file, never
   # into the next step's reason (22 Nov 2026 follow-up). The output is printed when the step ends.
-  out="$(mktemp "${TMPDIR:-/tmp}/land-step.XXXXXX")" \
+  out="$(mktemp "${TMPDIR:-/tmp}/land-step.XXXXXX" 2>/dev/null)" \
     || { DEPLOY_WHY="$1 did not run: no temp file for its output could be made"; return 1; }
+  DEPLOY_STEP_FILE="$out" # so a signal mid-step still removes it (deploy_cleanup)
   (cd "$2" && eval "$3") 9>&- > "$out" 2>&1; rc=$?
   cat "$out"
   [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$out")"
-  rm -f "$out"
+  rm -f "$out"; DEPLOY_STEP_FILE=""
   return "$rc"
 }
 deploy_lock() { # -> 0 holding the one local-deploy lock on fd 9 | 1 with DEPLOY_WHY set
@@ -713,13 +727,14 @@ deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says 
   local sha="$1" cmd="$2" wt rc inst wout
   DEPLOY_WHY=""
   deploy_lock || return 1
-  wt="$(mktemp -d -t land-deploy.XXXXXX)" || { exec 9>&-; DEPLOY_WHY="could not make a temp folder for the deploy worktree"; return 1; }
-  wout="$wt.out"
+  # In TMPDIR, the volume deploy_space reads (macOS `mktemp -t` ignores TMPDIR).
+  wt="$(mktemp -d "${TMPDIR:-/tmp}/land-deploy.XXXXXX" 2>/dev/null)" || { exec 9>&-; DEPLOY_WHY="could not make a temp folder for the deploy worktree"; return 1; }
+  DEPLOY_WT="$wt"; DEPLOY_WT_REPO="$PWD"; wout="$wt.out"; DEPLOY_STEP_FILE="$wout"
   if ! git worktree add -q --detach "$wt" "$sha" 9>&- >"$wout" 2>&1; then
     DEPLOY_WHY="could not check out ${sha:0:7} into a worktree: $(deploy_tail "$wout")"
-    rm -rf "$wt" "$wout"; exec 9>&-; return 1
+    deploy_cleanup; exec 9>&-; return 1
   fi
-  rm -f "$wout"
+  rm -f "$wout"; DEPLOY_STEP_FILE=""
   rc=0; inst=""
   if [ -f "$wt/package-lock.json" ]; then
     if [ -d "$REPO_DIR/node_modules" ] && cmp -s "$wt/package-lock.json" "$REPO_DIR/package-lock.json"; then
@@ -741,11 +756,10 @@ deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says 
     deploy_step "npm install in the deploy worktree at ${sha:0:7}" "$wt" 'npm install --no-audit --no-fund --loglevel=error'; rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
-    echo "     in $wt @ ${sha:0:7}: $cmd"
+    echo "     running the deploy command at ${sha:0:7}…"
     deploy_step "the deploy command" "$wt" "$cmd"; rc=$?
   fi
-  git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-  exec 9>&-
+  deploy_cleanup; exec 9>&-
   return "$rc"
 }
 # --- deploy_at end ---

@@ -1,0 +1,241 @@
+#!/bin/bash
+# pr-watch — no open PR in any seq23 repo sits red or unmoved for 30+ minutes without being picked up.
+#
+# WHY THIS EXISTS (her words 23 Nov 2026, boss-os #552 red for 3 h with nobody acting): "how do we catch and
+# stop this issue?" CLAUDE.md: "anything idle 30+ minutes is named stuck"; "Waiting is a script's job".
+#
+# Every 30 minutes, 10:00-21:59 CT (launchd com.seq.pr-watch, class LIGHT; it also checks the window itself,
+# so 07:00-09:59 it reads nothing), it lists every open, non-draft PR in the owner's repos and calls a PR
+# STUCK when nothing has moved on it for PR_WATCH_QUIET_MIN (30) minutes (its last commit, and every check's
+# start and end, are all that old) and no live land-after holds it. For each stuck PR:
+#   green, the owner's own PR     -> starts `land-after <pr> --repo <r>` (its review-class gate decides: a PR that
+#                                    needs a fresh reviewer's PASS is refused with exit 4 -> "needs a reviewer").
+#                                    At most PR_WATCH_MAX_LANDS (3) a run; a sheet that already says FAIL for this
+#                                    head is reported, never started again; a do-not-merge/hold/wip label is respected.
+#   green, anyone else's PR       -> reported only (Dependabot, a stranger: never landed by this).
+#   red                           -> one line: the failing check, the first failing test line, the link. No fix path
+#                                    takes one red PR during the day (ci-sweep runs Tue/Sat nights; sr-fix is Search
+#                                    Readiness), so the line goes where the coordinator reads first.
+#   checks pending 30+ min        -> one line naming them.
+# The lines replace the "Stuck PRs" block in ~/HANDOFF.md Today (right under the Jobs list; rewritten each run,
+# never appended), and ONE macOS banner (ci-sweep-notify.sh --banner) names PRs not bannered yet today.
+# It never closes, pushes to, comments on or edits a PR: every gh call goes through a read-only allowlist.
+#
+#   pr-watch              one run (launchd)
+#   pr-watch --dry-run    read and classify only, ignoring the window: starts nothing (land-after --dry-run),
+#                         writes nothing, no banner; prints the block it would write
+#   pr-watch --self-test  runs tests/test-pr-watch.sh
+#
+# Exit: 0 every open PR was read; 2 some PR could not be read ("couldn't check" lines, never "none stuck");
+# 3 NAMED STOP: the PR list itself could not be read, or the window could not be read; 4 the HANDOFF block
+# could not be written (the banner still went).
+# Last line: `OUTPUT pr-watch: <n> open checked, <s> stuck, <l> lands started, <u> couldn't check`.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OWNER="${PR_WATCH_OWNER:-seq23}"
+QUIET="${PR_WATCH_QUIET_MIN:-30}"
+MAXL="${PR_WATCH_MAX_LANDS:-3}"
+STATE="${PR_WATCH_STATE:-$HOME/Library/Logs/pr-watch/state}"
+HANDOFF="${PR_WATCH_HANDOFF:-$HOME/HANDOFF.md}"
+LA="${PR_WATCH_LAND_AFTER:-$HERE/land-after}"
+NOTIFY="${PR_WATCH_NOTIFY:-$HERE/ci-sweep-notify.sh}"
+MW="${PR_WATCH_MAC_WINDOW:-$HERE/mac-window}"
+TASKS="$HOME/Work/tasks"
+NOW="${PR_WATCH_NOW_EPOCH:-$(date +%s)}"
+LIMIT="${PR_WATCH_LIMIT:-500}"
+DRY=""
+
+say() { printf 'pr-watch: %s\n' "$*"; }
+age() { if [ "$1" -lt 120 ]; then printf '%s min' "$1"; elif [ "$1" -lt 2880 ]; then printf '%s h' $(($1 / 60)); else printf '%s d' $(($1 / 1440)); fi; }
+case "${1:-}" in
+  --dry-run) DRY=1 ;;
+  --self-test) exec "$HERE/tests/test-pr-watch.sh" ;;
+  -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") : ;;
+  *) say "unknown argument $1 (pr-watch [--dry-run | --self-test])"; exit 3 ;;
+esac
+
+# Central time for the day key and the HANDOFF stamp (jq: the same on macOS and CI's Linux).
+ct() { TZ=America/Chicago jq -rn --argjson t "$NOW" --arg f "$1" '$t | strflocaltime($f)'; }
+DAY="$(ct '%Y-%m-%d')"; STAMP="$(ct '%H:%M')"
+
+# --- the window: 10:00-21:59 CT (LIGHT). Before anything is read. --------------------------------------
+if [ -z "$DRY" ]; then
+  wout="$("$MW" check LIGHT 2>&1)"; wrc=$?
+  case $wrc in
+    0) : ;;
+    1) say "${wout:-OUTSIDE_WINDOW LIGHT} — nothing read, nothing started"; exit 0 ;;
+    *) say "NAMED STOP [MAC_WINDOW_UNREAD] mac-window check exited $wrc (${wout:0:200}); nothing read"; exit 3 ;;
+  esac
+fi
+
+# --- read-only GitHub: the only gh calls this makes. Anything else is refused, never run. --------------
+ghr() {
+  case "${1:-} ${2:-}" in
+    "search prs"|"pr view"|"pr checks"|"run view") gh "$@" ;;
+    *) echo "pr-watch refused a non-read gh call: gh $*" >&2; return 99 ;;
+  esac
+}
+
+LINES=(); KEYS=(); UNK=0; STUCK=0; LANDS=0; OPEN=0; HELD=0; RED=0
+add() { LINES+=("$2"); KEYS+=("$1"); }   # $1 key (repo#n, for the banner), $2 the HANDOFF line
+unk() { UNK=$((UNK + 1)); LINES+=("- **couldn't check** $1"); KEYS+=(""); }
+
+# --- the HANDOFF block: replaced each run, inside Today, right under the Jobs list ----------------------
+write_handoff() { # stdin: the block's lines
+  local block; block="$(cat)"
+  [ -n "$DRY" ] && { printf '%s\n' "$block"; return 0; }
+  BLOCK="$block" HANDOFF="$HANDOFF" python3 - <<'PY'
+import os, re, fcntl
+path, block = os.environ["HANDOFF"], os.environ["BLOCK"].rstrip() + "\n"
+S, E, BS, BE = "<!-- TODAY:START -->", "<!-- TODAY:END -->", "<!-- STUCK-PRS:START -->", "<!-- STUCK-PRS:END -->"
+# The same lock as handoff-on-compact.sh and land: one writer at a time.
+lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+doc = open(path).read() if os.path.exists(path) else ""
+if S not in doc or E not in doc:
+    doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + E + "\n"
+head, rest = doc.split(S, 1)
+body, tail = rest.split(E, 1)
+body = re.sub(re.escape(BS) + r".*?" + re.escape(BE) + r"\n*", "", body, flags=re.S)   # every old copy, a carried one too
+mine = BS + "\n" + block + BE + "\n\n"
+JE = "<!-- JOBS:END -->"
+if JE in body:
+    a, b = body.split(JE, 1)
+    body = a + JE + "\n\n" + mine + b.lstrip("\n")
+else:
+    m = re.match(r"\s*(<!-- day:[^>]*-->\n)?(_[^\n]*_\n)?\n*", body)
+    body = body[:m.end()] + mine + body[m.end():]
+tmp = path + ".pr-watch.tmp"
+open(tmp, "w").write(head + S + body + E + tail)
+os.replace(tmp, path)
+PY
+}
+
+banner() { # title subtitle body
+  [ -n "$DRY" ] && return 0
+  "$NOTIFY" --banner "$1" "$2" "$3" >/dev/null 2>&1 || say "the banner could not be shown"
+}
+notified() { [ -f "$STATE/notified-$DAY" ] && grep -qxF -- "$1" "$STATE/notified-$DAY"; }
+
+# --- 1. every open PR ---------------------------------------------------------------------------------
+[ -n "$DRY" ] || mkdir -p "$STATE" || { say "NAMED STOP [NO_STATE_DIR] cannot create $STATE"; exit 3; }
+[ -n "$DRY" ] || find "$STATE" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null
+ERR="$(mktemp)"; trap 'rm -f "$ERR"' EXIT
+LIST="$(ghr search prs --owner "$OWNER" --state open --limit "$LIMIT" --json repository,number,title,author,isDraft,url 2>"$ERR")"
+if ! jq -e 'type == "array"' <<<"$LIST" >/dev/null 2>&1; then
+  why="$(tr '\n' ' ' < "$ERR" | cut -c1-200)"; [ -n "$why" ] || why="GitHub's answer was not a list"
+  say "NAMED STOP [PR_LIST_FAILED] couldn't check: the open PRs could not be listed ($why). Nothing is known about any PR."
+  printf '### Stuck PRs (pr-watch %s CT)\n- **couldn'"'"'t check** — the open PRs could not be listed (%s); nothing is known about any PR until the next try in 30 min.\n' "$STAMP" "$why" \
+    | write_handoff || say "the HANDOFF block could not be written either"
+  notified outage || { banner "Stuck PRs" "couldn't check" "pr-watch could not list the open PRs: $why"; [ -n "$DRY" ] || echo outage >> "$STATE/notified-$DAY"; }
+  echo "OUTPUT pr-watch: couldn't check (PR list unreadable)"
+  exit 3
+fi
+[ "$(jq length <<<"$LIST")" -ge "$LIMIT" ] && unk "— the list stopped at $LIMIT PRs; any past it went unread"
+
+# A task sheet whose line 1 names this PR: its slug, so the land's result lands on the builder's own sheet.
+sheet_for() { # repo n -> path of the open sheet naming repo#n on line 1
+  local f; for f in "$TASKS"/*.md; do [ -f "$f" ] && head -1 "$f" | grep -qF " $1#$2 " && { printf '%s' "$f"; return 0; }; done; return 1
+}
+first_fail_line() { # repo job-link sha n -> the first failing test line from the job's failed log (cached per head)
+  local repo="$1" link="$2" sha="$3" n="$4" job cache line
+  job="$(grep -oE '/job/[0-9]+' <<<"$link" | grep -oE '[0-9]+')" || { printf 'no Actions log (%s)' "${link:-no link}"; return; }
+  cache="$STATE/fail-${repo//\//_}-$n-${sha:0:12}"
+  [ -s "$cache" ] && { cat "$cache"; return; }
+  local log; log="$(mktemp)"
+  ghr run view --job "$job" -R "$repo" --log-failed 2>/dev/null | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | cut -f3- > "$log"
+  line="$(grep -m1 -E 'not ok |FAIL[: ]|✗|✖|×|AssertionError|Error: |error TS|FAILED' "$log" || grep -m1 '##\[error\]' "$log")"
+  rm -f "$log"
+  line="$(printf '%s' "$line" | sed -E 's/^[0-9T:.-]+Z //; s/^[[:space:]]+//' | cut -c1-220)"
+  [ -n "$line" ] || { printf 'its log named no failing line'; return; }
+  [ -n "$DRY" ] || printf '%s' "$line" > "$cache"
+  printf '%s' "$line"
+}
+
+# --- 2. each PR --------------------------------------------------------------------------------------------
+cd "$HOME" || exit 3   # land-after finds the repo's checkout under ~/GitHub, never this folder
+while IFS=$'\x1f' read -r repo n author draft title url; do
+  [ -n "$repo" ] || continue
+  [ "$draft" = true ] && continue
+  OPEN=$((OPEN + 1))
+  if "$LA" --holds "$repo" "$n" >/dev/null 2>&1; then HELD=$((HELD + 1)); continue; fi
+  view="$(ghr pr view "$n" -R "$repo" --json headRefOid,commits,labels 2>"$ERR")"
+  jq -e '.headRefOid | type == "string"' <<<"$view" >/dev/null 2>&1 \
+    || { unk "$repo#$n — its head could not be read ($(head -c 120 "$ERR" | tr '\n' ' '))"; continue; }
+  checks="$(ghr pr checks "$n" -R "$repo" --json name,bucket,startedAt,completedAt,link 2>"$ERR")"
+  if ! jq -e 'type == "array"' <<<"$checks" >/dev/null 2>&1; then
+    if grep -q "no checks reported" "$ERR"; then checks='[]'
+    else unk "$repo#$n — its checks could not be read ($(head -c 120 "$ERR" | tr '\n' ' '))"; continue; fi
+  fi
+  IFS=$'\x1f' read -r st quiet fname flink pend sha labels < <(jq -rn --argjson c "$checks" --argjson v "$view" --argjson now "$NOW" '
+    def t: if . == null or . == "" or startswith("0001") then null else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
+    ([($v.commits // [] | last | .committedDate? | t)] + [$c[] | (.startedAt | t), (.completedAt | t)] | map(select(. != null))) as $ts
+    | (if ($ts | length) == 0 then 0 else ($ts | max) end) as $last
+    | ([$c[] | select(.bucket == "fail" or .bucket == "cancel")] | first // {}) as $f
+    | [ (if $f.name then "red" elif any($c[]; .bucket == "pending") then "pending" else "green" end),
+        ((($now - $last) / 60) | floor | tostring), ($f.name // ""), ($f.link // ""),
+        ([$c[] | select(.bucket == "pending") | .name] | join(", ")), $v.headRefOid,
+        ([$v.labels // [] | .[] | .name | ascii_downcase] | join(",")) ] | join("\u001f")')
+  [ -n "${st:-}" ] || { unk "$repo#$n — its checks could not be judged"; continue; }
+  [ "$quiet" -ge "$QUIET" ] || continue          # something moved in the last 30 min: someone is on it
+  STUCK=$((STUCK + 1)); key="$repo#$n"; short="${title:0:70}"; [ "${#title}" -gt 70 ] && short="${short% *}…"; quiet="$(age "$quiet")"
+  case "$st" in
+    red)
+      add "$key" "- **$key red** $quiet: \`$fname\` — $(first_fail_line "$repo" "$flink" "$sha" "$n") ($flink) — $short"; RED=$((RED + 1)) ;;
+    pending)
+      add "$key" "- **$key checks pending** $quiet: $pend ($url) — $short" ;;
+    green)
+      if [ "$author" != "$OWNER" ]; then
+        add "$key" "- **$key green** $quiet, by $author: reported only (pr-watch lands only $OWNER's own PRs) ($url) — $short"; continue
+      fi
+      if grep -qE '(^|,)(do-not-merge|do not merge|hold|wip)(,|$)' <<<"$labels"; then
+        add "$key" "- **$key green** $quiet, labelled hold/do-not-merge: left alone ($url) — $short"; continue
+      fi
+      sheet="$(sheet_for "$repo" "$n")"; slug=""
+      if [ -n "$sheet" ]; then
+        if head -1 "$sheet" | grep -qE "^STATUS: FAIL $repo#$n $sha( |$)"; then
+          add "$key" "- **$key green, but its land FAILED at this head**: $(head -1 "$sheet" | cut -c1-200) — sheet $sheet (not started again)"; continue
+        fi
+        slug="$(basename "$sheet" .md)"
+      fi
+      if [ "$LANDS" -ge "$MAXL" ]; then add "$key" "- **$key green** $quiet: queued for the next run ($MAXL lands a run) ($url) — $short"; continue; fi
+      out="$(LAND_AFTER_RATE_WAIT_SECS=120 LAND_AFTER_READ_PATIENCE_SECS=60 "$LA" "$n" --repo "$repo" ${slug:+--task "$slug"} ${DRY:+--dry-run} 2>&1)"; lrc=$?
+      why="$(printf '%s' "$out" | grep -m1 -E 'REFUSED|could not verify|would land|started' | sed -E 's/^land-after: //; s/^REFUSED — //')"
+      # "needs a reviewer": only the reason, never land-after's whole how-to (it is on the PR's own refusal).
+      [ "$lrc" -eq 4 ] && why="$(sed -E 's/^[^ ]+ needs a review \((.*)\) and has no reviewer PASS line.*/\1, and no reviewer PASS/; s/ \(add `Review class: none.*\)\)/)/; s/ \(add `Review class: none[^)]*\)//' <<<"$why")"
+      why="${why:0:200}"
+      case $lrc in
+        0) if [ -n "$DRY" ]; then add "$key" "- **$key green** $quiet: would start land-after (dry run) — $short"
+           else LANDS=$((LANDS + 1)); add "$key" "- **$key green** $quiet: land started (\`land-after $n --repo $repo\`${slug:+ --task $slug}) — $short"; fi ;;
+        4) add "$key" "- **$key needs a reviewer** (green $quiet): ${why:-land-after asked for a fresh reviewer PASS} ($url)" ;;
+        75) unk "$key — land-after could not verify it (${why:-no reason given})" ;;
+        *) add "$key" "- **$key green** $quiet, land not started: ${why:-land-after exited $lrc} ($url)" ;;
+      esac ;;
+  esac
+done < <(jq -r '.[] | [.repository.nameWithOwner, (.number | tostring), (.author.login // "?"), (.isDraft | tostring),
+                       (.title | gsub("[\u001f\n\r]"; " ")), .url] | join("\u001f")' <<<"$LIST")
+
+# --- 3. the HANDOFF block and the banner --------------------------------------------------------------------
+{
+  printf '### Stuck PRs (pr-watch %s CT; quiet %s+ min, every 30 min 10:00-22:00)\n' "$STAMP" "$QUIET"
+  if [ "${#LINES[@]}" -eq 0 ]; then printf -- '- none stuck (%s open PRs checked%s)\n' "$OPEN" "$([ "$HELD" -gt 0 ] && printf '; %s being landed' "$HELD")"
+  else printf '%s\n' "${LINES[@]}"; fi
+  if [ "$HELD" -gt 0 ] && [ "${#LINES[@]}" -gt 0 ]; then printf -- '- (%s more being landed by land-after now)\n' "$HELD"; fi
+  if [ "$RED" -gt 0 ]; then printf -- '- _Red: no fix path takes one red PR by day (ci-sweep runs Tue/Sat nights); each goes to a builder._\n'; fi
+} | write_handoff; hrc=$?
+
+NEW=()
+for i in "${!KEYS[@]}"; do k="${KEYS[$i]}"; [ -n "$k" ] && ! notified "$k" && NEW+=("$k"); done
+[ "$UNK" -gt 0 ] && ! notified "unk" && NEW+=("unk")
+if [ "${#NEW[@]}" -gt 0 ]; then
+  names="$(printf '%s\n' "${NEW[@]}" | grep -v '^unk$' | sed 's#^[^/]*/##' | paste -sd ' ' -)"
+  [ "$UNK" -gt 0 ] && names="${names:+$names; }$UNK couldn't check"
+  banner "Stuck PRs" "$STUCK stuck, $LANDS lands started" "$names — see Stuck PRs in HANDOFF Today"
+  [ -n "$DRY" ] || printf '%s\n' "${NEW[@]}" >> "$STATE/notified-$DAY"
+fi
+
+[ "$hrc" -eq 0 ] || say "NAMED STOP [HANDOFF_NOT_WRITTEN] the Stuck PRs block could not be written to $HANDOFF"
+echo "OUTPUT pr-watch: $OPEN open checked, $STUCK stuck, $LANDS lands started, $UNK couldn't check${DRY:+ (dry run: nothing started or written)}"
+[ "$hrc" -eq 0 ] || exit 4
+[ "$UNK" -eq 0 ] || exit 2
+exit 0

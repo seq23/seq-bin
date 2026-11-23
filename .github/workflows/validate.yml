@@ -155,6 +155,12 @@ jobs:
       # on an unread answer or a land that merged nothing; cleanup only done/ and logs/ past 14 days.
       - name: land-after lands detached, refuses what it should, never reads could-not-check as PASS
         run: ./land-after --self-test
+      # 23 Nov 2026 (her question, boss-os #552 red 3 h: "how do we catch and stop this issue?"): pr-watch lands a
+      # quiet green PR through land-after or names it in HANDOFF; an unreadable list is couldn't check, never
+      # "none stuck"; a held PR is never started twice; one banner per PR per day; only read verbs reach gh;
+      # 07:00-09:59 CT it reads nothing.
+      - name: pr-watch picks up every PR quiet 30+ min, never none-stuck on an outage, read-only on GitHub
+        run: ./tests/test-pr-watch.sh
 
       - name: a named job is tailed, her own replies included
         run: ./tests/test-scooter-watch-named.sh

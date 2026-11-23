@@ -1,0 +1,192 @@
+#!/bin/bash
+# post-land-check — runs the checks `land` promises after a land, so none of them depends on anyone remembering
+# (her ask 23 Nov 2026: "close both gaps"). It reads the DUE lines `land` writes into Today in ~/HANDOFF.md:
+#
+#   - ENG-CHECK DUE <owner/repo>#<pr> <sha> — …   a land no fresh reviewer read (her bypass, or a Fast PR on
+#                                                  green CI). Fast PRs item 1: ONE batched engineering check of
+#                                                  the day's merged diffs, same day, never holding a land.
+#   - FORM-PROOF DUE <owner/repo>#<pr> <sha> — …  a land that touched a form (land's gate_forms). Her words
+#                                                  23 Nov 2026: "after theee fixes u need to test them"; the
+#                                                  live form gets a marked TEST submission right after deploy.
+#
+#   post-land-check                 every DUE line: each FORM-PROOF on its own, then all ENG-CHECKs in ONE batch
+#   post-land-check --now <key>     only the FORM-PROOF line for <owner/repo>#<pr> (land starts this, detached)
+#   post-land-check --dry-run       print what would run, run nothing
+#
+# Meaning is a model's job: each check is ONE `ai-run --role brain` (a fresh Claude that never built the PR).
+# Code only checks structure: after the run, the PR must carry a NEW comment from this account whose first line
+# is `Engineering check: PASS|FAIL — …` or `Form proof (production): PASS|FAIL — …`. That comment, never the
+# model's own word, turns the line DONE or FAIL (with the comment's link). No such comment leaves the line DUE
+# and the exit non-zero (rule 0: a run that proved nothing never ends 0). A FAIL, or a run that proved nothing,
+# raises a macOS banner; a form FAIL also files a GitHub issue on that repo (GitHub emails her: a broken live
+# form is a break a real person hits). Never an Open Loops row (her ruling 22 Nov 2026).
+#
+# Scheduled nightly by launchd/com.seq.post-land-check.plist (23:15 Central, inside the Mac's 22:00–07:00
+# window; an ai-run job, so it stays on the Mac: her ruling 22 Nov 2026). Exit: 0 every line got a verdict
+# (FAILs included: they are results, and they are raised) · 1 a line got no verdict · 2 HANDOFF unreadable.
+# Env (tests): POST_LAND_HANDOFF, POST_LAND_AI_RUN, POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text).
+set -uo pipefail
+
+HANDOFF="${POST_LAND_HANDOFF:-$HOME/HANDOFF.md}"
+AI_RUN="${POST_LAND_AI_RUN:-$HOME/bin/ai-run}"
+LOG="${POST_LAND_LOG:-$HOME/Work/tasks/logs/post-land-check.log}"
+NOW_KEY=""; DRY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --now) NOW_KEY="${2:-}"; shift ;;
+    --dry-run) DRY=1 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "post-land-check: unknown argument $1" >&2; exit 64 ;;
+  esac
+  shift
+done
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+say() { printf '%s %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$*" | tee -a "$LOG"; }
+notify() {
+  if [ -n "${POST_LAND_NOTIFY:-}" ]; then "$POST_LAND_NOTIFY" "$1"; return; fi
+  osascript -e "display notification \"${1//\"/\'}\" with title \"Post-land check\"" >/dev/null 2>&1 || true
+}
+
+[ -r "$HANDOFF" ] || { say "NAMED STOP [HANDOFF_UNREADABLE] $HANDOFF cannot be read: no DUE line could be checked"; notify "Post-land check could not read HANDOFF.md"; exit 2; }
+
+# The DUE lines: kind <TAB> key <TAB> sha <TAB> the rest.
+due_lines() {
+  sed -nE 's/^- (ENG-CHECK|FORM-PROOF) DUE ([^ ]+#[0-9]+) ([^ ]+) — (.*)$/\1\t\2\t\3\t\4/p' "$HANDOFF"
+}
+# DUE -> DONE|FAIL for one kind+key, the verdict's link appended. Same lock as land and the compaction hook.
+mark() { # $1 kind  $2 key  $3 DONE|FAIL  $4 link
+  python3 - "$HANDOFF" "$1" "$2" "$3" "$4" <<'PY'
+import os, re, sys, fcntl
+path, kind, key, verdict, link = sys.argv[1:6]
+lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+doc = open(path).read()
+pat = re.compile(r"(?m)^- " + re.escape(kind) + r" DUE " + re.escape(key) + r" (.*)$")
+doc2, n = pat.subn(lambda m: "- " + kind + " " + verdict + " " + key + " " + m.group(1) + " → " + link, doc, count=1)
+if n:
+    tmp = path + ".plc.tmp"; open(tmp, "w").write(doc2); os.replace(tmp, path)
+PY
+}
+# The newest comment on the PR, posted after $3 by this gh account, whose first line starts with $2.
+# stdout: "PASS|FAIL<TAB>url"; rc 1 none.
+verdict_comment() { # $1 owner/repo#pr  $2 marker  $3 ISO start time
+  local repo="${1%#*}" pr="${1##*#}" me
+  me="$(gh api user --jq .login 2>/dev/null)" || return 1
+  gh api --paginate "repos/$repo/issues/$pr/comments" 2>/dev/null \
+    | jq -rs --arg me "$me" --arg since "$3" --arg m "$2" '
+        add // [] | map(select(.user.login == $me and .created_at >= $since))
+        | map(. + {first: ((.body // "") | split("\n")[0] | gsub("^[#*> ]+"; ""))})
+        | map(select(.first | ascii_downcase | startswith($m | ascii_downcase)))
+        | last // empty
+        | ((.first | ascii_downcase | ltrimstr($m | ascii_downcase) | gsub("^[ :]+"; "") | ascii_upcase | .[0:4]) + "\t" + .html_url)' \
+    | grep -E '^(PASS|FAIL)	' | tail -1 | grep . || return 1
+}
+
+ENG_PROMPT_HEAD='You are a FRESH, independent reviewer (~/.claude/agents/reviewer.md). You did not build any of these PRs.
+They landed today with no reviewer reading them (her bypass, or a Fast PR on green CI). This is the ONE batched same-day
+engineering check her Fast PRs ruling promises (23 Nov 2026). Load the ship-ready skill, engineering.md: automatic fails 1-6.
+For EACH merged PR below: read its merged diff (gh pr diff <n> --repo <owner/repo>) and the code around it, and judge it
+against fails 1-6 plus the one question "built from scratch today with our tools, would it look like this?". Also check its
+"Forms:" line is honest: if it touches a form page or server path and says none, that is a FAIL.
+Then post ONE comment on that PR (gh pr comment <n> --repo <owner/repo> --body-file <file>) whose FIRST line is exactly
+  Engineering check: PASS — <what you read, one line>
+or
+  Engineering check: FAIL — <one line>
+followed by each finding as CONFIRMED/SUSPECTED with file:line and the fix. A fail blocks nothing now (it landed); it is fixed
+by a same-day follow-up PR the coordinator opens from your comment. Read-only: never push, merge, deploy, open a PR or send
+anything except these comments. Every repo is public: no LP names, deal terms, owner emails or secrets in a comment.
+THE PRs:'
+
+form_prompt() { # $1 key  $2 sha  $3 the rest of the line
+  cat <<EOF
+You are a FRESH checker. PR $1 (merge $2) just landed and was deployed. Its line says: $3
+Her rule (23 Nov 2026): "u need to make sure the forms are not broken … after theee fixes u need to test them". Prove every
+form this PR touches works on PRODUCTION now.
+1. Read the PR (gh pr view ${1##*#} --repo ${1%#*}; gh pr diff ...) and find every form whose page or server path it changed
+   ("undeclared" means you decide from the diff; if it touches no form at all, say so in the verdict, PASS).
+2. For each form: open its live production page, then make ONE real submission, clearly marked TEST in the name, subject and
+   message (e.g. name "TEST post-land-check", message "TEST — automated check after PR ${1##*#}, ignore"). Use the repo's
+   test route or test recipient when it has one (read its docs/ and the form handler). Test submissions need no yes (her
+   blanket approval, 23 Nov 2026) on any host, but NEVER to a real customer, never with a real person's details, and if the
+   form charges money, stop at the payment step and say so. Confirm it was RECEIVED (the success state AND the server's answer;
+   the stored row or the delivered email where you can read it), then mark that row test if the system has a way to.
+3. Post ONE comment on the PR (gh pr comment ${1##*#} --repo ${1%#*} --body-file <file>) whose FIRST line is exactly
+     Form proof (production): PASS — <each form, the TEST submission, the proof it was received>
+   or
+     Form proof (production): FAIL — <what broke, one line>
+   followed by the evidence (status codes, request or row ids, never a secret or a person's details).
+Never change code, push, merge or deploy. Every repo is public: no owner emails or secrets in the comment.
+EOF
+}
+
+run_ai() { # $1 label  $2 prompt -> rc of ai-run
+  [ -n "$DRY" ] && { say "[dry-run] would run ai-run --role brain for $1"; return 0; }
+  AI_RUN_CALLER=post-land-check "$AI_RUN" --role brain --network --cwd "$HOME" --out "$LOG" -- "$2" </dev/null
+}
+# One run per line at a time: land's detached --now and the nightly run never both submit the same form.
+LOCKS="${POST_LAND_LOCKS:-$HOME/.cache/post-land-check}"; mkdir -p "$LOCKS" 2>/dev/null
+HELD=()
+take() { # $1 key -> rc 1 when another run holds it
+  local d="$LOCKS/$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_').lock"
+  if mkdir "$d" 2>/dev/null; then HELD+=("$d"); return 0; fi
+  # A lock older than 2 hours belongs to a run that died: take it over.
+  if [ -n "$(find "$d" -maxdepth 0 -mmin +120 2>/dev/null)" ]; then HELD+=("$d"); return 0; fi
+  return 1
+}
+trap 'for d in "${HELD[@]:-}"; do [ -n "$d" ] && rmdir "$d" 2>/dev/null; done' EXIT
+
+fails=0; unproved=0; ran=0
+LINES="$(due_lines)"
+[ -n "$NOW_KEY" ] && LINES="$(awk -F'\t' -v k="$NOW_KEY" '$1 == "FORM-PROOF" && $2 == k' <<<"$LINES")"
+if [ -z "$LINES" ]; then say "nothing due${NOW_KEY:+ for $NOW_KEY} in $HANDOFF"; exit 0; fi
+
+# 1. Each form on its own, first: a broken live form is the urgent one.
+while IFS=$'\t' read -r kind key sha rest; do
+  [ "$kind" = FORM-PROOF ] || continue
+  take "$key" || { say "form proof: $key is being checked by another run"; continue; }
+  ran=$((ran + 1)); start="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  say "form proof: $key ($rest)"
+  run_ai "$key" "$(form_prompt "$key" "$sha" "$rest")"
+  [ -n "$DRY" ] && continue
+  if v="$(verdict_comment "$key" "Form proof (production)" "$start")"; then
+    verdict="${v%%	*}"; url="${v#*	}"
+    if [ "$verdict" = PASS ]; then mark FORM-PROOF "$key" DONE "$url"; say "  PASS $url"
+    else
+      mark FORM-PROOF "$key" FAIL "$url"; fails=$((fails + 1)); say "  FAIL $url"
+      notify "A live form FAILED its test after ${key}: $url"
+      gh issue create --repo "${key%#*}" --title "Live form check failed after #${key##*#}" \
+        --body "The production form check that runs after every form change failed: $url
+
+A real person filling this form may hit it now. Fix it today (her rule, 23 Nov 2026: forms are never left broken by a fix)." </dev/null >/dev/null 2>&1 \
+        || say "  (the GitHub issue could not be filed; the banner and HANDOFF line stand)"
+    fi
+  else
+    unproved=$((unproved + 1)); say "  NO VERDICT: no 'Form proof (production):' comment on $key after the run; the line stays DUE"
+    notify "Form proof for $key got no verdict; the line stays DUE in HANDOFF"
+  fi
+done <<<"$LINES"
+
+# 2. Every engineering check in ONE batch (Fast PRs item 1).
+ENG="$(awk -F'\t' '$1 == "ENG-CHECK"' <<<"$LINES")"
+if [ -n "$ENG" ] && [ -z "$NOW_KEY" ] && take "eng-check-batch"; then
+  ran=$((ran + 1)); start="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  list="$(awk -F'\t' '{ print "- " $2 " (merge " $3 "): " $4 }' <<<"$ENG")"
+  say "engineering check: $(wc -l <<<"$ENG" | tr -d ' ') PR(s) in one batch"
+  run_ai "the engineering batch" "$ENG_PROMPT_HEAD
+$list"
+  if [ -z "$DRY" ]; then
+    while IFS=$'\t' read -r kind key sha rest; do
+      if v="$(verdict_comment "$key" "Engineering check" "$start")"; then
+        verdict="${v%%	*}"; url="${v#*	}"
+        if [ "$verdict" = PASS ]; then mark ENG-CHECK "$key" DONE "$url"; say "  PASS $key $url"
+        else mark ENG-CHECK "$key" FAIL "$url"; fails=$((fails + 1)); say "  FAIL $key $url"; fi
+      else
+        unproved=$((unproved + 1)); say "  NO VERDICT: no 'Engineering check:' comment on $key after the run; the line stays DUE"
+      fi
+    done <<<"$ENG"
+  fi
+fi
+
+[ "$ran" -gt 0 ] || { say "nothing due${NOW_KEY:+ for $NOW_KEY}"; exit 0; }
+[ "$fails" -eq 0 ] || notify "Post-land check: $fails FAIL(s); each is marked FAIL in HANDOFF.md with its PR comment"
+if [ "$unproved" -gt 0 ]; then notify "Post-land check: $unproved line(s) got no verdict and stay DUE"; exit 1; fi
+exit 0

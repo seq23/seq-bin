@@ -23,14 +23,15 @@ git -C "$REPO" init -q; git -C "$REPO" config user.email t@example.invalid; git 
 echo '{"name":"x","version":"1.0.0"}' > "$REPO/package.json"; echo '{"lockfileVersion":3}' > "$REPO/package-lock.json"
 git -C "$REPO" add -A; git -C "$REPO" commit -qm init; SHA="$(git -C "$REPO" rev-parse HEAD)"
 
-# fake npm: FAKE_NPM=ok (prints a line), silent2 (prints nothing, exit 2), loud3 (many lines, exit 3)
+# fake npm: FAKE_NPM=ok (prints a line), silent2 (prints nothing, exit 2), or fixture:<name>:<rc> (prints
+# tests/fixtures/npm/<name>.out, output captured from REAL npm 11 on 22 Nov 2026, and exits rc)
 cat > "$W/bin/npm" <<'SH'
 #!/bin/bash
 echo "npm $*" >> "$W/npm-calls"
 case "${FAKE_NPM:-ok}" in
   ok) echo "added 1 package" ;;
   silent2) exit 2 ;;
-  loud3) for i in 1 2 3 4 5 6; do echo "npm error line $i"; done; echo "npm error ENOSPC: no space left on device, write"; exit 3 ;;
+  fixture:*) f="${FAKE_NPM#fixture:}"; cat "$FIX/${f%%:*}.out"; exit "${f##*:}" ;;
 esac
 SH
 # fake df: FAKE_DF_KB is the free KB on the temp volume; "fail" = df errors with no output
@@ -41,7 +42,7 @@ echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/disk3s1s1 239362496 13000000 ${FAKE_DF_KB:-99999999} 34% /"
 SH
 chmod +x "$W/bin/npm" "$W/bin/df"
-export W
+FIX="$HERE/fixtures/npm"; export W FIX
 
 # One deploy, in its own bash process (two land runs are two processes): prints "<rc>|<DEPLOY_WHY>".
 cat > "$W/run.sh" <<'SH'
@@ -67,9 +68,24 @@ check "a silent install failure is refused" 2 "${r%%|*}"
 check "  ... and says which step, its exit code and that it printed nothing" yes "$(has "$r" "npm ci in the deploy worktree at ${SHA:0:7} exited 2: it printed nothing")"
 check "  ... and the deploy command never ran" no "$([ -e "$W/ran" ] && echo yes || echo no)"
 check "  ... and the install is not silenced (--loglevel=error, never --silent)" "npm ci --no-audit --no-fund --loglevel=error" "$(head -1 "$W/npm-calls")"
-r="$(FAKE_NPM=loud3 run a 'true')"
-check "a loud install failure carries its LAST lines, not its first" yes "$(has "$r" "exited 3: npm error line 5 | npm error line 6 | npm error ENOSPC: no space left on device, write")"
-check "  ... and never its first line" yes "$(grep -q 'line 1' <<<"$r" && echo "no: $r" || echo yes)"
+# 22 Nov 2026 review F1: npm's filler (bare "npm error", usage, "Run npm help", "A complete log") hid the cause.
+filler() { grep -qE 'A complete log|Run "npm help|--install-strategy|Clean install a project|npm error \||\| \||> ' <<<"$1" && echo "no: $1" || echo yes; }
+r="$(FAKE_NPM=fixture:ci-mismatch:1 run a 'true')"
+check "real npm ci lockfile mismatch: npm's code and the package it names" yes "$(has "$r" "1|npm ci in the deploy worktree at ${SHA:0:7} exited 1: npm error code EUSAGE | ")"
+check "  ... and the line that names the cause" yes "$(has "$r" "Missing: left-pad@1.3.0 from lock file")"
+check "  ... and none of npm's filler" yes "$(filler "$r")"
+r="$(FAKE_NPM=fixture:install-enospc:228 run a 'true')"
+check "real npm ENOSPC: code and 'no space left on device'" yes "$(has "$r" "exited 228: npm error code ENOSPC | nospc ENOSPC: no space left on device")"
+check "  ... and none of npm's filler or its path/errno fields" yes "$(grep -qE 'errno|syscall|npm error path' <<<"$r" && echo "no: $r" || filler "$r")"
+r="$(run a 'cat "$FIX/nested-run.out"; exit 2')"
+check "real nested npm run failure: the tool's own error first" yes "$(has "$r" "the deploy command exited 2: src/index.ts(3,7): error TS2304: Cannot find name foo. | npm error Lifecycle script \`typecheck\` failed")"
+check "  ... and no '> ' script headers or filler" yes "$(filler "$r")"
+r="$(run a 'cat "$FIX/nested-run-quiet.out"; exit 2')"
+check "real nested npm run with its output hidden: npm's own block, its code and workspace" yes "$(has "$r" "exited 2: npm error Lifecycle script \`typecheck\` failed with error: | code 2 | workspace @apm/api@1.0.0")"
+r="$(run a 'cat "$FIX/missing-script.out"; exit 1')"
+check "real short npm error (missing script): its lines, without 'A complete log'" '1|the deploy command exited 1: npm error Missing script: "deploy" | To see a list of scripts, run: | npm run' "$r"
+r="$(run a 'for i in 1 2 3 4 5 6; do echo "step $i"; done; exit 3')"
+check "a long tool failure (no npm block) keeps its LAST 3 lines" "3|the deploy command exited 3: step 4 | step 5 | step 6" "$r"
 r="$(run a 'echo building; printf "\033[31mX [ERROR] Could not resolve @apm/ai\033[0m\n" >&2; exit 4')"
 check "a failing deploy command: its exit code and its stderr, colours stripped" "4|the deploy command exited 4: building | X [ERROR] Could not resolve @apm/ai" "$r"
 check "  ... and its output still reached the terminal" yes "$(grep -q 'Could not resolve' "$W/out-a" && echo yes || echo no)"
@@ -83,6 +99,14 @@ echo "== every caller puts the reason in its STOPPED line"
 CALLS="$(grep -E 'deploy_at "[^"]+" "\$(DEPLOY|STAGING)" \|\| die' "$LAND")"
 check "land has deploy callers to check (not zero)" yes "$([ "$(grep -c . <<<"$CALLS")" -ge 4 ] && echo yes || echo "no: $(grep -c . <<<"$CALLS")")"
 check "every deploy_at || die names \$DEPLOY_WHY" 0 "$(grep -vc 'DEPLOY_WHY' <<<"$CALLS")"
+# 22 Nov 2026 review F2: the reason comes first. land-after keeps a STOPPED line's first 600 characters, and
+# an opening of "#PR IS MERGED and $GREEN, but ..." (130-200 characters) pushed the reason past it.
+DIES="$(grep -E '\|\| die "[^"]*\$\{?DEPLOY_WHY' "$LAND")"
+check "deploy and D1 STOPPED lines to check (not zero)" yes "$([ "$(grep -c . <<<"$DIES")" -ge 6 ] && echo yes || echo "no: $(grep -c . <<<"$DIES")")"
+late="$(while IFS= read -r l; do o="${l#*|| die \"}"; o="${o%%\$\{DEPLOY_WHY*}"; o="${o%%\$DEPLOY_WHY*}"
+          o="$(sed -E 's/\$\{[A-Za-z0-9_]+:0:7\}/abc1234/g' <<<"$o")"   # a short sha prints 7 characters
+          { [ "${#o}" -gt 80 ] || grep -q 'GREEN' <<<"$o"; } && printf '%s; ' "$o"; done <<<"$DIES")"
+check "every one puts the reason within its first 80 characters, before \$GREEN" "" "$late"
 check "no STOPPED line says 'read the error, it explains itself'" 0 "$(grep -v '^#' "$LAND" | grep -c 'read the error, it explains itself')"
 # The D1 list reads its own output; DEPLOY_WHY must survive it (a $( ) subshell would drop it).
 D1="$(sed -n '/^# --- d1 begin/,/^# --- d1 end/p' "$LAND")"
@@ -118,6 +142,12 @@ r="$(FAKE_DF_KB=4194303 run a 'true')"
 check "one KB under the 4 GB floor: refused" yes "$(has "$r" "1|NAMED STOP [DISK_LOW]")"
 r="$(FAKE_DF_KB=4194304 run a 'true')"
 check "exactly the 4 GB floor: goes ahead" "0|" "$r"
+# node_modules linked from this checkout (same lockfile): nothing is installed, so free space is not read.
+mkdir "$REPO/node_modules"; : > "$W/npm-calls"
+r="$(FAKE_DF_KB=2097152 run a 'echo shipped')"
+check "2 GB free but node_modules linked (no install): goes ahead" "0|" "$r"
+check "  ... and npm never ran" 0 "$(grep -c . "$W/npm-calls")"
+rmdir "$REPO/node_modules"
 
 echo "== one local deploy at a time on this Mac"
 mkdir -p "$W/lock"; rm -rf "$W/busy"; : > "$W/overlap"
@@ -146,6 +176,14 @@ check "  ... and the next deploy did not wait" yes "$([ $((SECONDS - s)) -lt 2 ]
 r="$(run a 'sleep 6 >/dev/null 2>&1 & echo started')"
 s=$SECONDS; r2="$(LAND_DEPLOY_WAIT=3 run b 'true')"
 check "a child the deploy left running does not hold the lock" "0| 0|" "$r $r2"
+check "  ... and the next deploy did not wait" yes "$([ $((SECONDS - s)) -lt 2 ] && echo yes || echo "no: $((SECONDS - s)) s")"
+# 22 Nov 2026 review F3: a child that keeps the deploy's OUTPUT open (no redirect) keeps tee alive; a tee that
+# inherited fd 9 kept the lock after its land died, and the next land waited, then stopped DEPLOY_SLOT_BUSY.
+PATH="$W/bin:$PATH" TMPDIR="$W/tmp" LAND_DEPLOY_LOCK="$W/lock/deploy.lock" "$W/run.sh" a 'sleep 7 & echo started; sleep 7' > "$W/r3" & lp=$!
+for _ in $(seq 1 50); do grep -q started "$W/out-a" 2>/dev/null && break; sleep 0.1; done
+kill -9 "$lp" 2>/dev/null; wait "$lp" 2>/dev/null
+s=$SECONDS; r="$(LAND_DEPLOY_WAIT=3 run b 'true')"
+check "its land killed, a child still holding the deploy's output: the lock is free" "0|" "$r"
 check "  ... and the next deploy did not wait" yes "$([ $((SECONDS - s)) -lt 2 ] && echo yes || echo "no: $((SECONDS - s)) s")"
 r="$(LAND_DEPLOY_LOCK="$W/ro/x/deploy.lock" PATH="$W/bin:$PATH" TMPDIR="$W/tmp" bash -c 'mkdir -p "$W/ro"; chmod 500 "$W/ro"; "$W/run.sh" a true')"
 chmod 700 "$W/ro" 2>/dev/null

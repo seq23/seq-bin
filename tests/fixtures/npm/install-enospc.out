@@ -1,0 +1,8 @@
+npm error code ENOSPC
+npm error syscall open
+npm error path /tmp/land-fixture/mnt/proj/package-lock.json
+npm error errno -28
+npm error nospc ENOSPC: no space left on device, open '/tmp/land-fixture/mnt/proj/package-lock.json'
+npm error nospc There appears to be insufficient space on your system to finish.
+npm error nospc Clear up some disk space and try again.
+npm error A complete log of this run can be found in: /home/runner/.npm/_logs/2026-11-23T01_52_02_506Z-debug-0.log

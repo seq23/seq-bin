@@ -209,7 +209,7 @@ worker() {
   fail() { # $1 reason
     FINISHED=1
     local reason
-    reason="$(printf '%s' "$1" | tr '\n' ' ' | redact | cut -c1-220)"
+    reason="$(printf '%s' "$1" | tr '\n' ' ' | redact | cut -c1-600)"   # 600: a deploy STOPPED line is its reason (up to ~460) and then what was merged
     set_status "$SLUG" "STATUS: FAIL $REPO#$PR ${MERGE_SHA:-$HEADSHA} $(now) — $reason; log $LOG"
     echo "OUTPUT land-after $REPO#$PR FAIL — $reason"
     exit 1

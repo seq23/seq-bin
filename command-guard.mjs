@@ -194,7 +194,7 @@ function rerunProblem(a, env) {
 
 /** `gh pr create` with a fix of the last 30 days left unanswered: land's patch check, run when the PR opens. */
 function patchCheck(dir, body) {
-  const r = spawnSync(resolve(dirname(fileURLToPath(import.meta.url)), "pr-patch-check"), [dir, "/dev/stdin"], { input: body, encoding: "utf8", timeout: 20000 });
+  const r = spawnSync(resolve(dirname(fileURLToPath(import.meta.url)), "pr-patch-check"), [dir, "-"], { input: body, encoding: "utf8", timeout: 20000 });
   return { code: r.status, msg: (r.stdout || "").trim() };
 }
 function originSlug(dir) {

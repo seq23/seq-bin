@@ -15,6 +15,12 @@
 # does it wait for the reset: exit 75 and NAMED STOP [CODEX_LIMIT] resets <time from Codex's own message>.
 # Codex missing or not logged in with ChatGPT (callers such as ci-sweep hand that to Claude themselves):
 #   NAMED STOP [CODEX_UNAVAILABLE] ...   (exit 69)
+# A Claude usage limit (her plan's 5-hour or weekly window, 23 Nov 2026: "she can use claude and stop when
+# credits run out...no need for free bad llms here") is exit 76 and
+#   NAMED STOP [CLAUDE_LIMIT] resets <time from Claude's own message>
+# It never hands off to Codex or any free route: the caller saves where it was and the next slot resumes.
+# `claude -p` may print the notice and exit 0 ("[result:success] You've hit your weekly limit · resets 9am"),
+# so the notice is read from the output: a short run (<= 600 chars) that is the notice, on any exit code.
 #
 # THE INTERFACE IS SHARED. boss-os and west-peek-os call this file with exactly the flags above;
 # change them only together. Optional knobs, all additive (none changes the interface):
@@ -38,7 +44,7 @@
 # directories of --cwd's repo and of each repo directly under --cwd are added as writable roots.
 #
 # Every run appends one line to the usage log: time, role, engine, caller, exit.
-# Exit: the engine's own code; 75 CODEX_LIMIT; 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
+# Exit: the engine's own code; 75 CODEX_LIMIT; 76 CLAUDE_LIMIT; 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
 set -uo pipefail
 
 usage() {
@@ -214,6 +220,25 @@ if [ "$ENGINE_KIND" = codex ] && [ "$RC" -ne 0 ]; then
       exit $?
     fi
     stop 75 CODEX_LIMIT "resets ${RESET:-unknown (Codex gave no reset time: $(printf '%s' "$LIMIT_LINE" | cut -c1-160))} — the work waits for the reset (Claude fallback switched off for this job)."
+  fi
+fi
+
+# --- a Claude usage limit: a named stop, never a fallback --------------------------------------
+# Only a SHORT run counts (a real answer that discusses limits runs to paragraphs), and only Claude's
+# own wording: "You've hit your weekly limit · resets Oct 30 at 9am (America/New_York)", "5-hour limit
+# reached ∙ resets 3pm", "Claude AI usage limit reached|1759071600". The same list as boss-os
+# scripts/lib/seat-usage-limit.mjs.
+if [ "$ENGINE_KIND" = claude ]; then
+  NEW_OUT="$(tail -c +"$((START_BYTES + 1))" "$DEST")"
+  TRIMMED="$(printf '%s' "$NEW_OUT" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
+  if [ "${#TRIMMED}" -le 600 ] && printf '%s' "$TRIMMED" |
+      grep -qiE "(hit|reached) your ([a-z0-9-]+ ){0,2}limit|(5-hour|five-hour|weekly|session|daily|opus) (usage )?limit (reached|hit)|usage limit reached"; then
+    RESET="$(printf '%s' "$TRIMMED" | grep -oiE 'resets? (at |in )?[^|]{1,60}' | head -1 | sed -E 's/^[Rr]esets? (at )?//; s/[[:space:]]+$//')"
+    if [ -z "$RESET" ]; then
+      EPOCH="$(printf '%s' "$TRIMMED" | grep -oE '\|[[:space:]]*[0-9]{10}' | grep -oE '[0-9]{10}' | head -1)"
+      [ -n "$EPOCH" ] && RESET="$(date -r "$EPOCH" '+%b %-d at %-I:%M%p %Z' 2>/dev/null || date -d "@$EPOCH" '+%b %-d at %-I:%M%p %Z' 2>/dev/null)"
+    fi
+    stop 76 CLAUDE_LIMIT "resets ${RESET:-unknown (Claude gave no reset time: $(printf '%s' "$TRIMMED" | cut -c1-160))} — the work waits for the reset; no Codex or free fallback."
   fi
 fi
 

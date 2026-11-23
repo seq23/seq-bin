@@ -9,6 +9,8 @@
 #     claude call; a run that merely printed such a line and finished is not a limit;
 #   · codex missing, logged out, or logged in with a (billing) API key is CODEX_UNAVAILABLE, no claude;
 #   · --role brain runs `claude -p --model opus` and never codex;
+#   · a Claude usage limit (any exit code) is exit 76 and `NAMED STOP [CLAUDE_LIMIT] resets <time>`,
+#     never Codex or a free route; a long answer that merely discusses limits is not one;
 #   · --out appends as it happens and survives a kill, which reaches the engine;
 #   · every run appends one usage-log line; no tracked job sets AI_RUN_WORKER.
 # RULE 0: zero assertions is a failure.
@@ -50,7 +52,15 @@ cat > "$BIN/claude" <<'SH'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE/claude-args.log"
 cat > "$FAKE/claude-stdin"; pwd > "$FAKE/claude-pwd"
-echo "BRAIN-DONE"
+case "$(cat "$FAKE/claude-mode" 2>/dev/null)" in
+  weekly0) echo "You've hit your weekly limit · resets Oct 30 at 9am (America/New_York)"; exit 0 ;;
+  weekly1) echo "You've hit your weekly limit · resets 9am (America/New_York)"; exit 1 ;;
+  hour5)   echo "5-hour limit reached ∙ resets 3pm"; exit 1 ;;
+  epoch)   echo "Claude AI usage limit reached|1764000000"; exit 1 ;;
+  noreset) echo "You've hit your session limit"; exit 1 ;;
+  essay)   for i in $(seq 1 30); do echo "Paragraph $i: we discussed how you've hit your weekly limit in planning and what resets 9am means for the schedule."; done; exit 0 ;;
+  *)       echo "BRAIN-DONE" ;;
+esac
 SH
 chmod +x "$BIN"/*
 export FAKE="$TMP" AI_RUN_LOG="$TMP/ai-run.log"
@@ -180,6 +190,37 @@ check "a 100 KB prompt reaches the engine (rc $rc)" test "$rc" -eq 0
 check "a 100 KB prompt starts within 10 s" test $(( $(date +%s) - START )) -lt 10
 reset; out="$(env PATH="$BIN:$PATH" /bin/bash "$AI" --role worker -- "$(printf '  \n\t ')"; echo "rc=$?")"
 check "a blank prompt is still a NAMED STOP [NO_PROMPT] (rc 64)" grep -q 'rc=64$' <<<"$out"
+echo "=== 8. a Claude usage limit is exit 76 NAMED STOP [CLAUDE_LIMIT] resets <time>; never Codex or a free route (23 Nov 2026) ==="
+reset; echo weekly0 > "$TMP/claude-mode"
+out="$(run "$AI" --role brain --out "$TMP/out.log" -- "plan the week")"; rc=$?
+check "a limit notice with exit 0 is still exit 76 (rc=$rc)" [ "$rc" -eq 76 ]
+check "…named, with Claude's own reset time" grep -q 'NAMED STOP \[CLAUDE_LIMIT\] resets Oct 30 at 9am (America/New_York)' <<<"$out"
+check "…and the stop line is in --out too" grep -q 'NAMED STOP \[CLAUDE_LIMIT\]' "$TMP/out.log"
+check "…codex was never called" [ "$(codex_calls)" -eq 0 ]
+check "…claude ran once, not retried" [ "$(claude_calls)" -eq 1 ]
+check "…the usage log records stop=CLAUDE_LIMIT exit 76" grep -qE $'exit=76\tstop=CLAUDE_LIMIT$' "$AI_RUN_LOG"
+reset; echo weekly1 > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "a limit notice with exit 1 is exit 76 (rc=$rc)" grep -q 'CLAUDE_LIMIT\] resets 9am (America/New_York)' <<<"$out"
+reset; echo hour5 > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "the 5-hour wording is a CLAUDE_LIMIT (rc=$rc)" [ "$rc" -eq 76 ]
+check "…resets 3pm" grep -q 'CLAUDE_LIMIT\] resets 3pm' <<<"$out"
+reset; echo epoch > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "the epoch wording is a CLAUDE_LIMIT with a readable time (rc=$rc)" grep -qE 'CLAUDE_LIMIT\] resets [A-Z][a-z]{2} [0-9]+ at ' <<<"$out"
+reset; echo noreset > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "no reset time is still a CLAUDE_LIMIT saying so (rc=$rc)" grep -q 'CLAUDE_LIMIT\] resets unknown (Claude gave no reset time' <<<"$out"
+reset; echo essay > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "a long answer that only DISCUSSES limits is exit 0, not a stop (rc=$rc)" [ "$rc" -eq 0 ]
+absent "…no CLAUDE_LIMIT" grep -q CLAUDE_LIMIT <<<"$out"
+reset; echo limit > "$TMP/codex-mode"; echo weekly1 > "$TMP/claude-mode"
+out="$(run "$AI" --role worker -- "fix")"; rc=$?
+check "a Codex limit handed to a Claude that is also out ends at 76 CLAUDE_LIMIT (rc=$rc)" [ "$rc" -eq 76 ]
+check "…codex ran once, claude once, nothing else" [ "$(codex_calls)$(claude_calls)" = "11" ]
+
 echo
 [ "$asserts" -gt 0 ] || { echo "NAMED STOP [ZERO_ASSERTIONS] nothing was checked."; exit 3; }
 echo "$((asserts - failed))/$asserts passed"

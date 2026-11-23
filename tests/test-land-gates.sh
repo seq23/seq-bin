@@ -19,6 +19,7 @@ BLOCK="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND")"
 grep -q 'GATE_MSG="$(gate_pr "$PR" "$HEAD" "$PRMETA")"' "$LAND" || { echo "FAIL: land no longer calls gate_pr before merging"; exit 1; }
 grep -q 'BASELINE_RED="$(baseline_red "$CHECKS")" && die' "$LAND" || { echo "FAIL: land no longer reads the ship-ready-baseline check"; exit 1; }
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+export LAND_DIR="$W/landdir"; mkdir -p "$LAND_DIR"; printf '{"live": ["o/live"]}\n' > "$LAND_DIR/live-repos.json"   # the list beside land (its re-exec sets LAND_DIR)
 export GIT_AUTHOR_NAME=builder GIT_AUTHOR_EMAIL=builder@example.test GIT_COMMITTER_NAME=builder GIT_COMMITTER_EMAIL=builder@example.test
 fails=0; passes=0
 check() { local label="$1"; shift; if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); fi; }
@@ -46,7 +47,10 @@ meta() { # body [files json] [extra json] -> PR view JSON
   [ -n "${2:-}" ] || [ -n "${NOREVIEW:-}" ] || b="$b"$'\n''Ship-ready: PASS — code reviewer session_01REVIEW looked at the diff and its tests at @HEAD@; Engineering: PASS'
   jq -n --arg b "$b" --argjson f "$f" \
     '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
-      messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}'
+      messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}' \
+    | if [ -n "${FAST:-}" ]; then   # FAST: a PR in no review class (a launched repo, no label ever, a reasoned none)
+        jq -c '. + {labels: [], label_history: [], url: "https://github.com/o/live/pull/9"} | .body += "\nReview class: none — docs and tests only here"'
+      else cat; fi
 }
 # gh, for the one read the gates make: when a commit reached GitHub (its earliest check suite, review F5 of #137).
 # $W/suites/<sha> holds that epoch; none is a commit with no suite; $W/suites-down is GitHub not answering.
@@ -143,8 +147,10 @@ gate "$(meta "$(printf 'Notes\n- Ship-ready: PASS -- Codex review run 4412 looke
 check "an email template counts, and '--' and a list bullet are accepted" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"src/mail/welcome.ts"}]')"
 check "…and without the line the email is refused" [ "$RC" -eq 1 ]
+gate "$(FAST=1 meta "" '[{"path":"tests/site/x.test.tsx"},{"path":"README.md"},{"path":"docs/a.html"},{"path":"data/rows.json"}]')"
+check "outside the review classes, tests, docs and data need no line (rc 0)" [ "$RC" -eq 0 ]
 gate "$(meta "" '[{"path":"tests/site/x.test.tsx"},{"path":"README.md"},{"path":"docs/a.html"},{"path":"data/rows.json"}]')"
-check "tests, docs and data need no line (rc 0)" [ "$RC" -eq 0 ]
+check "a REVIEW-CLASS PR needs the PASS even for tests, docs and data (eng check of #155: data skipped review) -> refused" [ "$RC" -eq 1 ]
 
 echo "=== a reviewer's PASS on every code PR (22 Nov 2026, her words: make the reviewer gate real in land now) ==="
 CODE='[{"path":"worker/x.ts"},{"path":"README.md"}]'
@@ -323,13 +329,17 @@ proof 'Mutation proof: none — a change to none of the logic paths, comments on
 check "a reasoned none with a later 'none' in it -> allowed (the none sub is not greedy)" [ "$RC" -eq 0 ]
 proof $'## Mutation proof\nShip-ready: PASS — reviewer session_01REVIEW looked at the diff and its tests; Engineering: PASS'
 check "a reviewer's PASS line under the heading is not a proof row -> refused" [ "$RC" -eq 1 ]
-gate "$(NOPROOF=1 meta "Docs only." '[{"path":"README.md"},{"path":"tests/x.test.ts"}]')"
+gate "$(FAST=1 NOPROOF=1 meta "Docs only." '[{"path":"README.md"},{"path":"tests/x.test.ts"}]')"
 check "docs and tests only need no proof (rc 0)" [ "$RC" -eq 0 ]
 gate "$(NOPROOF=1 meta 'Owner override: "ship it, land it now" (22 Nov 2026 12:00 CT)')"
 check "her Owner override skips it (rc 0)" [ "$RC" -eq 0 ]
 }
 
 run_cases
+echo "=== the shipped live-repos.json (land's list of launched repos) ==="
+check "it parses as land reads it: a non-empty list of distinct seq23/<repo> strings, seq-bin itself on it" \
+  jq -e '(.live | type == "array" and length > 0 and all(.[]; type == "string" and test("^seq23/[A-Za-z0-9_.-]+$")))
+         and any(.live[]; . == "seq23/seq-bin") and ((.live | map(ascii_downcase) | unique | length) == (.live | length))' "$HERE/live-repos.json"
 echo "test-land-gates: $passes passed, $fails failed"
 [ "$fails" -eq 0 ] || exit 1
 
@@ -349,7 +359,7 @@ neg "a Ship-ready PASS that never asks about engineering" '/^covers_engineering(
 neg "a PASS that is never checked against its commit" '/^fresh_pass()/a\
   return 0'
 neg "main's own commits counted as the PR's new code" 's/ --name-only "\$1\.\.\$2" --not origin\/main$/ --name-only "$1..$2"/; s/git rev-list --merges "\$1\.\.\$2" --not origin\/main/git rev-list --merges "$1..$2"/; s/--cc --name-only/-m --name-only/'
-neg "a quality gate that sees no surfaces or code" 's/^  \[ -n "\$files\$code" \] || return 0$/  return 0/'
+neg "a quality gate that never asks for a review" 's/^  if \[ -n "\$launch" \]; then cls=.*$/  return 0/'
 neg "a mutation gate that never reads the body" '/^proof_listed()/a\
   return 0'
 echo "test-land-gates: every gate refuses what it should and lets through what it should"

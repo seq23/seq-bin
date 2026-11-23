@@ -1,7 +1,9 @@
 // Agent launch gate (her rulings 21-22 Nov 2026; weekend post-mortem 22 Nov: 59% of Fri-Sun spend was general-purpose
 // agents, which skipped this gate and the builder/reviewer 200K compaction cap and ran to 417K context).
 //  1. Work agents must be `builder` or `reviewer` (both carry autoCompactWindow 200K). Read-only helpers pass.
-//  2. A builder brief must carry the reviewer-POV sections (agent-brief skill).
+//  2. A builder brief must carry the reviewer-POV sections (agent-brief skill) and its REVIEW CLASS line
+//     (`REVIEW CLASS: none — <why>` or money|children|private-data|store|delete|launch — <why>), which the builder copies
+//     into the PR body as `Review class: ...`: land refuses a PR without it (eng check of #155, 23 Nov 2026).
 //  3. A review of a PR whose task sheet says FAIL is a re-check: the brief must carry "RECHECK OF:" (the failed items
 //     only, her ruling 21 Nov 2026), never a fresh full review (42% of the weekend went on reviews and redos).
 // No limit on how many agents run (her words 22 Nov 2026: "i dont want to cap the agents. i just want to make them work efficiently").
@@ -21,6 +23,7 @@ let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
   const p=(i.prompt||'').toUpperCase();
   if(t==='builder'){
     const need=['THE REVIEW YOU WILL FACE','HOW IT BREAKS','SELF-PROOF','HER WORDS'].filter(k=>!p.includes(k));
+    if(!/REVIEW CLASS:\s*(NONE|MONEY|CHILDREN|PRIVATE-DATA|STORE|DELETE|LAUNCH)\s*(—|–|--|-|:)\s*\S/.test(p))need.push('REVIEW CLASS: none|money|children|private-data|store|delete|launch — <why> (the builder copies it into the PR body as Review class: ...; land refuses a PR without it)');
     if(need.length){console.error('BRIEF_INCOMPLETE: builder brief is missing: '+need.join(', ')+'. Write it from the agent-brief skill (reviewer checks first, promise audit, same value everywhere, outage test per external read).');process.exit(2);}
   }
   if(t==='reviewer'&&!p.includes('RECHECK OF:')){

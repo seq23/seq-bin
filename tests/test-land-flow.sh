@@ -38,6 +38,9 @@ LAND="${LAND_UNDER_TEST:-$HERE/../land}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 # her bypass writes ENG-CHECK DUE into HANDOFF: never her real ~/HANDOFF.md from a test (case 21 points it elsewhere)
 export LAND_HANDOFF="$W/HANDOFF.md"
+# land reads live-repos.json beside itself (LAND_DIR = $W, where its fixture copy runs): o/r has launched, so its
+# PRs land on green CI unless a case makes them review-class.
+printf '{"live": ["o/r", "seq23/boss-os"]}\n' > "$W/live-repos.json"
 FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 # The build-first shape (staging on every land, a named e2e workflow, promote.yml on a green e2e)
 # has no live repo since both creator dashboards retired (3 Nov 2026), so these cases run against a
@@ -100,7 +103,15 @@ case "$a" in
   # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
   "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
-  "pr view "*"files,body,comments"*) sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}'; exit 0 ;;
+  # The PR's repo is its url (o/r, on the fixture live-repos.json unless a case says otherwise); no-url = GitHub left it out.
+  "pr view "*"files,body,comments"*) { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
+      | if [ -f "$FAKE_DIR/no-url" ]; then cat; else jq -c '.url //= "https://github.com/o/r/pull/7"'; fi \
+      | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi; exit 0 ;;
+  # label-events = every label ever added (gh's --jq answer over the PR's issue events); default none; tls = down.
+  "api --paginate repos/"*"/issues/7/events "*) answer label-events '[]' ;;
+  # live_add: seq-bin's list through the contents API (live-get = its answer), the PUT logged to live-put.
+  "api repos/seq23/seq-bin/contents/live-repos.json?ref=main"*) answer live-get "{\"sha\":\"$(printf b%.0s {1..40})\",\"content\":\"$(printf '{"live":["o/r"]}' | base64 | tr -d '\n')\"}" ;;
+  "api -X PUT repos/seq23/seq-bin/contents/live-repos.json "*) echo "$a" > "$FAKE_DIR/live-put"; answer live-put-answer "$(printf c%.0s {1..40})" ;;
   "run view 555 "*workflowName*) cat "$FAKE_DIR/pr-workflow" 2>/dev/null || echo "Fast Check"; exit 0 ;;
   "run view 555 "*) echo "$HEADSHA"; exit 0 ;;
   "pr view "*mergeStateStatus*) echo "MERGEABLE/CLEAN"; exit 0 ;;
@@ -325,6 +336,75 @@ fixture approvalprep fast; : > "$FAKE/same-tree"
 echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[],\"body\":\"Adds the page.\\nShip-ready: PASS — hostile-review session_01REVIEW looked at the Updates page, rendered: Updates at 320 and 390 px light and dark, at @HEAD@; Engineering: PASS$MP\",\"comments\":[]}" > "$FAKE/pr-meta"
 run_land approvalprep
 check "item 4: a fresh reviewer's PASS whose own line says rendered: needs no Clicked through line: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called && has "rendered by the reviewer: "'
+
+echo "=== 1f. the review class is written and sticky, and new until launched (eng check of #155, 23 Nov 2026) ==="
+code_pr() { # body [extra jq] -> a code PR in o/r with no PASS line, labels []
+  jq -nc --arg b "$1" '{files: [{path: "worker/x.ts"}], labels: [], body: $b, comments: []}' | jq -c "${2:-.}" > "$FAKE/pr-meta"
+}
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.$(printf "$MP")"
+run_land approvalprep
+check "safety: a code PR with labels [] and no Review class line is refused (rc 1, not merged), saying what to add" eval '[ "$RC" -eq 1 ] && has "no \`Review class:\` line" && has "Review class: none — <why>" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.
+Review class: none — log wording only$(printf "$MP")"
+run_land approvalprep
+check "promise: with 'Review class: none — log wording only' in a launched repo it lands with no PASS (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Moves the payout.
+Review class: money — changes how payouts are sent$(printf "$MP")"
+run_land approvalprep
+check "safety: 'Review class: money' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "Review class: money" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes it.
+Review class: none — <why>$(printf "$MP")"
+run_land approvalprep
+check "abuse: a placeholder none is no reason: refused, not merged" eval '[ "$RC" -eq 1 ] && has "gives no reason" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.labels = [{name: "bug"}]'
+echo '["review-required","bug"]' > "$FAKE/label-events"
+run_land approvalprep
+check "abuse: review-required labeled then removed still counts: refused, not merged" eval '[ "$RC" -eq 1 ] && has "taken off still counts" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"; echo tls > "$FAKE/label-events"
+run_land approvalprep
+check "outage: the label history unread: exit 75 'could not verify', not merged" eval '[ "$RC" -eq 75 ] && has "label history" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
+run_land approvalprep
+check "new until launched: a code-only PR in a repo not on live-repos.json is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "o/brand-new has not launched" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/O/R/pull/7"'
+run_land approvalprep
+check "promise: a listed repo is not slowed, whatever GitHub's case (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"
+cp "$W/live-repos.json" "$W/live-repos.keep"; echo '{"live": [' > "$W/live-repos.json"
+run_land approvalprep
+check "outage: live-repos.json unreadable: NAMED STOP [LIVE_REPOS_UNREAD], refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+rm -f "$W/live-repos.json"
+run_land approvalprep
+check "outage: live-repos.json missing: the same named stop, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+mv "$W/live-repos.keep" "$W/live-repos.json"
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"; : > "$FAKE/no-url"
+run_land approvalprep
+check "outage: no url in GitHub's answer: the repo (and its label history) unknown: never 0, not merged" eval '[ "$RC" -ne 0 ] && { has "repository could not be read" || has "label history"; } && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Lists my repo.$(printf "$MP")" '.files = [{path: "live-repos.json"}]'
+run_land approvalprep
+check "abuse: a PR that edits live-repos.json by hand is review-class: refused, not merged" eval '[ "$RC" -eq 1 ] && has "changes live-repos.json" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Big one.$(printf "$MP")" '.changedFiles = 140'
+run_land approvalprep
+check "abuse: GitHub listed 1 of 140 files: the rest are unread, refused, not merged" eval '[ "$RC" -eq 1 ] && has "listed only 1 of its 140 files" && ! merge_called'
+LP="Ship-ready: PASS — launch-review session_01LAUNCH looked at the home page, 404 and store listing at @HEAD@; Engineering: PASS
+Launch-ready: PASS — launch-review session_01LAUNCH looked at the logo, banner, bio, links, starter posts and 404 at @HEAD@"
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Launches it.
+$LP$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
+run_land approvalprep
+check "launch: a fresh Launch-ready PASS in an unlisted repo lands (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
+check "…and commits o/brand-new onto seq-bin's live-repos.json, pinned to the file's sha" eval 'grep -q "sha=$(printf b%.0s {1..40})" "$FAKE/live-put" && sed -nE "s/.*content=([A-Za-z0-9+\/=]+).*/\1/p" "$FAKE/live-put" | base64 -d | jq -e ".live == [\"o/brand-new\",\"o/r\"]" >/dev/null'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Launches it.
+${LP/Launch-ready: PASS — launch-review session_01LAUNCH/Launch-ready: PASS — builder}$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7" | .author = {login: "builder"}'
+run_land approvalprep
+check "abuse: a Launch-ready PASS signed by the builder lists nothing: merged on its Ship-ready PASS, no PUT, says why" eval '[ "$RC" -eq 0 ] && merge_called && [ ! -f "$FAKE/live-put" ] && has "stays off live-repos.json"'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Launches it.
+$LP$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'; echo 502 > "$FAKE/live-put-answer"
+run_land approvalprep
+check "outage: the list commit refused: merged, but exit 5 with NAMED STOP [LIVE_REPO_NOT_ADDED], never 0" eval '[ "$RC" -eq 5 ] && merge_called && has "NAMED STOP [LIVE_REPO_NOT_ADDED]"'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Launches it.
+$LP$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'; echo tls > "$FAKE/live-get"
+run_land approvalprep
+check "outage: the list unreadable on GitHub: exit 5, the named stop, nothing written" eval '[ "$RC" -eq 5 ] && has "NAMED STOP [LIVE_REPO_NOT_ADDED]" && [ ! -f "$FAKE/live-put" ]'
 
 echo "=== 2. checkout on a feature branch: not switched to main ==="
 fixture approvalprep

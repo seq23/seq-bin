@@ -42,6 +42,18 @@ cat > "$TMP/bin/grid" <<'S'
 #!/bin/bash
 exit 0
 S
+# The Divine 10 security lanes (ci-sweep-alert-lanes.sh, 23 Nov 2026), stubbed: FAKE_ALERT picks
+# what it prints. Its own reads are tested in tests/test-alert-lanes.sh; here, what the probe does
+# with them.
+cat > "$TMP/bin/alerts" <<'S'
+#!/bin/bash
+case "${FAKE_ALERT:-}" in
+  red)     printf 'RED\tr\tsecurity: code-scanning\tr|security|code-scanning|2|99\t2 open code-scanning alerts\n' ;;
+  pending) printf 'PENDING\tr\tsecurity: dependabot\tr|security|dependabot|ALERTS_RATE_LIMITED\tNAMED STOP [ALERTS_RATE_LIMITED] unknown\n' ;;
+  fail)    echo 'NAMED STOP [NO_SECURITY_CONFIG] gone' >&2; exit 3 ;;
+esac
+exit 0
+S
 cat > "$TMP/bin/gh" <<'S'
 #!/bin/bash
 # Fake gh for test-probe-window.sh. FAKE_MODE picks what the cron's OWN run list answers.
@@ -80,7 +92,7 @@ case_() { # mode want_rc grep_for_line [triggers_bin]
   local mode="$1" want="$2" pat="$3" trig="${4:-$TMP/bin/triggers}" rc
   PATH="$TMP/bin:$PATH" FAKE_MODE="${FAKE_MODE_OVERRIDE:-$mode}" CI_SWEEP_GITHUB_DIR="$TMP/gh" CI_SWEEP_OWNER=seq23 \
     CI_SWEEP_TRIGGERS_BIN="$trig" CI_SWEEP_GRID_LANES_BIN="$TMP/bin/grid" \
-    "$PROBE" >"$TMP/out" 2>"$TMP/err"; rc=$?
+    CI_SWEEP_ALERT_LANES_BIN="${ALERT_BIN_OVERRIDE:-$TMP/bin/alerts}" "$PROBE" >"$TMP/out" 2>"$TMP/err"; rc=$?
   n=$((n+1))
   if [ "$rc" = "$want" ] && grep -qE "$pat" "$TMP/out"; then echo "  ok   $mode → $rc ($(grep -E "$pat" "$TMP/out" | cut -f1,3,4 | tr '\t' ' '))"
   else echo "  FAIL $mode → rc $rc (want $want), wanted a line matching '$pat'; got:"; sed 's/^/         /' "$TMP/out"; fails=$((fails+1)); fi
@@ -107,6 +119,39 @@ FAKE_WF='[{"name":"check","state":"disabled_manually","path":".github/workflows/
 FAKE_WF='[]' case_ deleted 1 '^SILENT	r	\(none\)	r\|NO_WORKFLOWS'
 FAKE_WF='[{"name":"check","state":"disabled_manually","path":".github/workflows/check.yml"},{"name":"e2e","state":"disabled_inactivity","path":".github/workflows/e2e.yml"}]' \
   case_ inactive 1 '^SILENT	r	\(none\)	r\|NO_WORKFLOWS'
+
+# Divine 10 security lanes reach the sweep: RED is fix work (exit 1), PENDING is unknown (exit 2,
+# never green; the CI lanes here are all green, so the exit code is the alert lanes' alone), and a lanes script that failed or is missing is a named stop (exit 3), never a
+# green probe that read no alerts.
+FAKE_MODE_OVERRIDE=window FAKE_ALERT=red     case_ alertred  1 '^RED	r	security: code-scanning	'
+FAKE_MODE_OVERRIDE=window FAKE_ALERT=pending case_ alertpend 2 '^PENDING	r	security: dependabot	.*ALERTS_RATE_LIMITED'
+stop_case() { # name want_rc stop alerts_bin
+  local rc
+  PATH="$TMP/bin:$PATH" FAKE_MODE=window CI_SWEEP_GITHUB_DIR="$TMP/gh" CI_SWEEP_OWNER=seq23 \
+    CI_SWEEP_TRIGGERS_BIN="$TMP/bin/triggers" CI_SWEEP_GRID_LANES_BIN="$TMP/bin/grid" \
+    CI_SWEEP_ALERT_LANES_BIN="$4" "$PROBE" >"$TMP/out" 2>"$TMP/err"; rc=$?
+  n=$((n+1))
+  if [ "$rc" = "$2" ] && grep -q "$3" "$TMP/err"; then echo "  ok   $1 → $rc ($3)"
+  else echo "  FAIL $1 → rc $rc (want $2 with $3); stderr:"; sed 's/^/         /' "$TMP/err"; fails=$((fails+1)); fi
+}
+FAKE_ALERT=fail stop_case alertfail    3 'ALERT_LANES_FAILED' "$TMP/bin/alerts"
+stop_case                 alertmissing 3 'NO_ALERT_LANES'     /nonexistent/alerts
+
+# End to end with the REAL ci-sweep-alert-lanes.sh: this fake gh answers every alert read with an
+# empty list and has no CodeQL analysis, which must reach the sweep as RED NO_CODEQL_ANALYSIS
+# (exit 1), never a green fleet.
+echo '{"ruleset":{"rules":[{"type":"deletion"}]},"repos":[{"repo":"seq23/r","protect":false,"why_not":"test repo"}]}' > "$TMP/security.json"
+FAKE_MODE_OVERRIDE=window CI_SWEEP_SECURITY_CONFIG="$TMP/security.json" ALERT_BIN_OVERRIDE="$ROOT/ci-sweep-alert-lanes.sh" \
+  case_ alertreal 1 '^RED	r	security: code-scanning	r\|security\|code-scanning\|NO_CODEQL_ANALYSIS'
+
+# A parked repo (Boss OS repos.json category "parked") gets no security lane either.
+mkdir -p "$TMP/boss/src/shared/boss/maps"
+echo '[{"repo":"r","category":"parked"}]' > "$TMP/boss/src/shared/boss/maps/repos.json"
+n=$((n+1))
+BOSS_OS_REPO="$TMP/boss" PATH="$TMP/bin:$PATH" FAKE_MODE=window FAKE_ALERT=red CI_SWEEP_GITHUB_DIR="$TMP/gh" CI_SWEEP_OWNER=seq23 \
+  CI_SWEEP_TRIGGERS_BIN="$TMP/bin/triggers" CI_SWEEP_GRID_LANES_BIN="$TMP/bin/grid" CI_SWEEP_ALERT_LANES_BIN="$TMP/bin/alerts" \
+  "$PROBE" >"$TMP/out" 2>"$TMP/err"
+if grep -q 'security:' "$TMP/out"; then echo "  FAIL alertparked — a parked repo got a security lane"; fails=$((fails+1)); else echo "  ok   alertparked → no security lane for a parked repo"; fi
 
 [ "$n" -gt 0 ] || { echo "FAIL: examined zero cases"; exit 1; }
 [ "$fails" -eq 0 ] || { echo "test-probe-window: $fails failure(s)"; exit 1; }

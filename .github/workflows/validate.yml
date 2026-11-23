@@ -194,6 +194,12 @@ jobs:
       - name: ci-sweep-probe.sh must not call a lane outside the run-list window NEVER_RAN
         run: ./tests/test-probe-window.sh
 
+      # 23 Nov 2026 (d10-scan-protect): the Divine 10 repos' code-scanning, secret-scanning and
+      # Dependabot alerts are sweep lanes; an unread list (403/404/rate limit/5xx/no CodeQL
+      # analysis) is RED or PENDING with a named stop, never clean. Fake gh only.
+      - name: ci-sweep-alert-lanes.sh turns every alert type into fix work and never calls an unread list clean
+        run: ./tests/test-alert-lanes.sh
+
       # Owner ruling 3 Nov 2026: Codex does the hands-on work, Claude only the brains, and a
       # Codex usage limit waits (exit 75, CODEX_LIMIT) — never handed to Claude. Stub binaries only.
       # 22 Nov 2026: one Play products tool and one RevenueCat tool for every app (they were copies per repo).

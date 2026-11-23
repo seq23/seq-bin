@@ -123,6 +123,33 @@ in ADDED lines. It also names any PR that changes code and touches no test or va
 This is not a hurdle to route around — if a fix genuinely needs one of those, stop and say
 so in the report rather than landing it.
 
+## Security lanes — GitHub's own findings on the Divine 10 repos (23 Nov 2026)
+
+Her words: "every repo that is a divine 10 business should get locked down and an audit".
+A lane named `security: <type>` comes from `~/bin/ci-sweep-alert-lanes.sh` reading the 12
+repos in `~/bin/ci-sweep-security.json`. It is fix work like a red build, in the same PR
+discipline (worktree, tests, a PR you do not merge):
+
+- **`security: code-scanning`** — fix the code CodeQL flagged (the detail names rule, file
+  and line; the full list is on the repo's Security tab or `gh api repos/seq23/<repo>/code-scanning/alerts?state=open`).
+  The alert closes when CodeQL re-analyses main after the merge.
+- **`security: dependabot`** — bump to the fixed version, lockfile included, and run the
+  repo's tests. A package with no fix yet: drop or replace it if the code allows, else
+  leave it and name it in the report.
+- **`security: secret-scanning`** — a key that reached the repo. Revoking it needs her
+  vendor account: work that repo's other lanes first, then PARK it naming the key type
+  and alert number. Never print, copy or commit the secret, and never resolve the alert.
+- **`NO_CODEQL_ANALYSIS` / `SCANNING_OFF_OR_NO_ACCESS` / `security: ruleset`** — the scanner
+  is off or the main-branch ruleset lost a rule. For these 12 repos ONLY, you may turn
+  CodeQL default setup, secret scanning, push protection and Dependabot alerts back on, and
+  re-create the ruleset exactly as `.ruleset` in `ci-sweep-security.json` says (never add a
+  bypass actor, never a rule it does not list). That is the one exception to "do not
+  change account settings".
+- **Never dismiss an alert**, close one by hand, or switch a query or scanner off: that is
+  weakening a check, the defect this sweep exists to prevent.
+- A **PENDING** security lane (`ALERTS_RATE_LIMITED` / `ALERTS_UNREADABLE`) means GitHub did
+  not answer; it is unknown, not clean. Nothing to fix; the next probe reads it again.
+
 ## Merging: the wrapper lands your fix, not you
 
 - **Open a PR and drive its checks to green. Do NOT merge it.** After your round the
@@ -147,7 +174,8 @@ so in the report rather than landing it.
 - Never merge with --admin, and never merge a PR yourself.
 - NEVER force-push. Never delete a branch that is not merged. Never rewrite main.
 - Never delete videos, files, or data; retire by flag, not deletion.
-- Do not change account settings, billing, or DNS. If a fix needs one, stop and say so.
+- Do not change account settings, billing, or DNS (the one exception: the Divine 10 security
+  settings above, restored exactly as `ci-sweep-security.json` says). If a fix needs one, stop and say so.
 
 ## Report
 

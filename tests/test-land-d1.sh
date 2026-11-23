@@ -11,9 +11,10 @@
 # shellcheck disable=SC2034 # NAME, PR_PATHS: read by the evaluated land blocks
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LAND="$HERE/../land"
+LAND="${LAND_UNDER_TEST:-$HERE/../land}"
 ROUTES="$(sed -n '/^# --- routes begin/,/^# --- routes end/p' "$LAND")"
-BLOCK="$(sed -n '/^# --- d1 begin/,/^# --- d1 end/p' "$LAND")"
+# deploy_tail (deploy_at block) names why a list failed; the tests stub deploy_at itself.
+BLOCK="$(sed -n '/^deploy_tail() {/,/^}/p;/^# --- d1 begin/,/^# --- d1 end/p' "$LAND")"
 [ -n "$ROUTES" ] || { echo "FAIL: land no longer carries the routes block"; exit 1; }
 [ -n "$BLOCK" ] || { echo "FAIL: land no longer carries the d1 block"; exit 1; }
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -104,7 +105,7 @@ echo "== where land calls it"
 L_PRE="$(grep -n 'd1_premerge "\$HEAD" || die "NAMED STOP \[D1_MIGRATION_FAILED\]' "$LAND" | cut -d: -f1 | head -1 || true)"
 L_MERGE="$(grep -n 'gh pr merge "\$PR" --squash --match-head-commit' "$LAND" | cut -d: -f1 | head -1 || true)"
 L_POST="$(grep -n 'd1_postmerge "\$MSHA_PAGES" || die "NAMED STOP \[D1_MIGRATIONS_PENDING\]' "$LAND" | cut -d: -f1 | head -1 || true)"
-L_LANDED="$(grep -n 'say "LANDED — #\$PR is merged, main is green, and all \$PW_N Cloudflare builds' "$LAND" | cut -d: -f1 | head -1 || true)"
+L_LANDED="$(grep -n 'say "LANDED — #\$PR is merged, \$GREEN, and all \$PW_N Cloudflare builds' "$LAND" | cut -d: -f1 | head -1 || true)"
 check "the pre-merge apply is called, and BEFORE gh pr merge" yes "$([ -n "$L_PRE" ] && [ -n "$L_MERGE" ] && [ "$L_PRE" -lt "$L_MERGE" ] && echo yes || echo "no (${L_PRE:-missing} vs ${L_MERGE:-missing})")"
 check "the post-merge pending check is called, and BEFORE the self-deploy LANDED" yes "$([ -n "$L_POST" ] && [ -n "$L_LANDED" ] && [ "$L_POST" -lt "$L_LANDED" ] && echo yes || echo "no (${L_POST:-missing} vs ${L_LANDED:-missing})")"
 

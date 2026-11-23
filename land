@@ -282,7 +282,7 @@ case "$NAME" in
   # 2 Oct 2026: e2e is dispatch-only; `land <pr>` ships a small change on the fast check and runs
   # the suite after a large one — and then WAITS for deploy.yml (PROMOTE_WF) instead of racing it
   # with a second `d1 migrations apply` from the laptop.
-  boss-os)              DEPLOY="npm run -s vault:run -- npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
+  boss-os)              DEPLOY="npm run --loglevel=error vault:run -- npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
   # 6 Oct 2026: Workers Builds is upload-only for west-peek-live. Production ships ONLY through
   # .github/workflows/deploy-cloudflare-worker.yml ("Deploy Cloudflare Worker"): workflow_run on a
   # green "Repository validation" of a push to main, D1 migrations, deploy, postdeploy smoke. Before
@@ -414,7 +414,7 @@ case "$NAME" in
   # Added 8 Oct 2026 when land refused aplayer-mode #47.
   # 8 Nov 2026: wrangler has no local login, so both scripts run inside the Boss OS vault (its
   # CLOUDFLARE_API_TOKEN), as boss-os does (#75); without it #64 stopped on "set CLOUDFLARE_API_TOKEN".
-  aplayer-mode)         DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")' ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
+  aplayer-mode)         DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")' ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
   # Time2Read (seq23/dailystory, time-2-read.com): Supabase edge functions ship through the repo's
   # own deploy-functions.yml ("Deploy Edge Functions") on every push to main, with its post-deploy
   # boot smoke; land waits for that run on the merge commit. The front end is a Lovable project and
@@ -603,15 +603,84 @@ record_production() { # $1 sha  $2 note -> one GitHub deployment (environment pr
 # main's checks read — not a branch checkout, not a working tree with edits. node_modules is
 # shared from this checkout when the lockfile at that sha is identical (the repo convention for
 # worktrees); otherwise `npm ci` in the worktree.
-deploy_at() { # $1 sha  $2 command
+# THE REAL ERROR IN THE STOPPED LINE, ONE DEPLOY AT A TIME, NEVER ON A FULL DISK (22 Nov 2026: boss-os
+# and aplayer-mode#103 landed at the same time, each ran a full `npm ci` into its own temp copy, the
+# disk filled, and both stopped with "read the error, it explains itself" over no error at all: the
+# install ran --silent and the deploy under `npm run -s`, which silences every npm beneath it).
+#  - DEPLOY_WHY is set on every failure, and every caller puts it in its STOPPED line: the step, its
+#    exit code and its own last lines, or "it printed nothing". A 2-line tail of land carries it.
+#  - one local deploy at a time on this Mac: an flock on LAND_DEPLOY_LOCK, released when the deploy
+#    ends or its land dies (no stale lock to clear); a second waits up to LAND_DEPLOY_WAIT seconds,
+#    then stops, named. The lock is taken BEFORE free space is read, so the space read is the space it gets.
+#  - free space is read before any install: under LAND_MIN_FREE_GB stops, named; an unreadable read
+#    stops too, never "enough". 4 GB: one install here is ~0.7 GB of node_modules plus npm's cache
+#    and the build, and macOS swap (22 GB at peak) grows on the same volume.
+# --- deploy_at begin (tests/test-land-local-ship.sh evals this block verbatim) ---
+LAND_MIN_FREE_GB="${LAND_MIN_FREE_GB:-4}"
+LAND_DEPLOY_WAIT="${LAND_DEPLOY_WAIT:-1800}"
+LAND_DEPLOY_LOCK="${LAND_DEPLOY_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/land/deploy.lock}"
+DEPLOY_WHY=""; DEPLOY_OUT=""
+deploy_tail() { # $1 file -> its last 3 non-blank lines on one line (colours stripped), or "it printed nothing"
+  local t
+  t="$(perl -ne 's/\e\[[0-9;?]*[A-Za-z]//g; s/\r//g; s/^\s+|\s+$//g; push @l, $_ if length; END { @l = @l[-3..-1] if @l > 3; print join(" | ", @l) }' "$1" 2>/dev/null)"
+  [ -n "$t" ] || { echo "it printed nothing"; return; }
+  [ "${#t}" -le 400 ] || t="…${t: -400}"
+  printf '%s\n' "$t"
+}
+deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to the terminal AND $DEPLOY_OUT
+  local rc
+  : > "$DEPLOY_OUT"
+  (cd "$2" && eval "$3") 9>&- 2>&1 | tee "$DEPLOY_OUT"; rc="${PIPESTATUS[0]}"
+  [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$DEPLOY_OUT")"
+  return "$rc"
+}
+deploy_lock() { # -> 0 holding the one local-deploy lock on fd 9 | 1 with DEPLOY_WHY set
+  local waited=0 r
+  mkdir -p "$(dirname "$LAND_DEPLOY_LOCK")" 2>/dev/null && exec 9>>"$LAND_DEPLOY_LOCK" \
+    || { DEPLOY_WHY="NAMED STOP [DEPLOY_LOCK_UNAVAILABLE] the one-deploy-at-a-time lock $LAND_DEPLOY_LOCK could not be opened, so nothing was deployed"; return 1; }
+  while :; do
+    perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 2; flock($fh, LOCK_EX|LOCK_NB) and exit 0; exit($!{EWOULDBLOCK} ? 1 : 2)'; r=$?
+    case "$r" in
+      0) printf '%s %s %s\n' "$$" "${NAME:-?}" "$(date '+%H:%M')" > "$LAND_DEPLOY_LOCK.owner" 2>/dev/null; return 0 ;;
+      1) : ;;
+      *) exec 9>&-; DEPLOY_WHY="NAMED STOP [DEPLOY_LOCK_UNAVAILABLE] the one-deploy-at-a-time lock $LAND_DEPLOY_LOCK could not be taken (perl flock failed), so nothing was deployed"; return 1 ;;
+    esac
+    [ "$waited" -eq 0 ] && echo "     waiting: another local deploy is running on this Mac (pid, repo, start: $(cat "$LAND_DEPLOY_LOCK.owner" 2>/dev/null || echo "unknown")); one at a time, up to $(((LAND_DEPLOY_WAIT + 59) / 60)) min"
+    if [ "$waited" -ge "$LAND_DEPLOY_WAIT" ]; then
+      exec 9>&-
+      DEPLOY_WHY="NAMED STOP [DEPLOY_SLOT_BUSY] another local deploy held this Mac's deploy lock for $(((LAND_DEPLOY_WAIT + 59) / 60)) min (pid, repo, start: $(cat "$LAND_DEPLOY_LOCK.owner" 2>/dev/null || echo "unknown")), so nothing was deployed; land again when it finishes"
+      return 1
+    fi
+    sleep "${LAND_DEPLOY_POLL:-10}"; waited=$((waited + ${LAND_DEPLOY_POLL:-10}))
+  done
+}
+deploy_space() { # -> 0 when the temp volume has LAND_MIN_FREE_GB free | 1 with DEPLOY_WHY set (low or unreadable)
+  local tmp="${TMPDIR:-/tmp}" kb
+  kb="$(df -Pk "$tmp" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  case "$kb" in ''|*[!0-9]*)
+    DEPLOY_WHY="NAMED STOP [DISK_UNREADABLE] free space on $tmp could not be read (df said '${kb:-nothing}'), so nothing was installed or deployed"; return 1 ;;
+  esac
+  [ "$kb" -ge $((LAND_MIN_FREE_GB * 1024 * 1024)) ] && return 0
+  DEPLOY_WHY="NAMED STOP [DISK_LOW] only $((kb / 1024 / 1024)) GB free on $tmp; a local deploy needs $LAND_MIN_FREE_GB GB (a full npm install into a temp copy), so nothing was installed or deployed. Free space, then land again"
+  return 1
+}
+deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says why, for the caller's STOPPED line
   local sha="$1" cmd="$2" wt rc
-  wt="$(mktemp -d -t land-deploy.XXXXXX)" || return 1
-  git worktree add -q --detach "$wt" "$sha" || { rm -rf "$wt"; echo "     could not check out $sha into a worktree"; return 1; }
+  DEPLOY_WHY=""
+  deploy_lock || return 1
+  deploy_space || { exec 9>&-; return 1; }
+  wt="$(mktemp -d -t land-deploy.XXXXXX)" || { exec 9>&-; DEPLOY_WHY="could not make a temp folder for the deploy worktree"; return 1; }
+  DEPLOY_OUT="$wt.out"
+  if ! git worktree add -q --detach "$wt" "$sha" 9>&- >"$DEPLOY_OUT" 2>&1; then
+    DEPLOY_WHY="could not check out ${sha:0:7} into a worktree: $(deploy_tail "$DEPLOY_OUT")"
+    rm -rf "$wt" "$DEPLOY_OUT"; exec 9>&-; return 1
+  fi
+  rc=0
   if [ -f "$wt/package-lock.json" ]; then
     if [ -d "$REPO_DIR/node_modules" ] && cmp -s "$wt/package-lock.json" "$REPO_DIR/package-lock.json"; then
       ln -s "$(cd "$REPO_DIR/node_modules" && pwd -P)" "$wt/node_modules"
     else
-      (cd "$wt" && npm ci --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; return 1; }
+      deploy_step "npm ci in the deploy worktree at ${sha:0:7}" "$wt" 'npm ci --no-audit --no-fund --loglevel=error'; rc=$?
     fi
   elif [ -f "$wt/package.json" ]; then
     # No lockfile at the sha (aplayer-mode keeps it untracked): `npm ci` cannot run, and a worktree
@@ -619,12 +688,17 @@ deploy_at() { # $1 sha  $2 command
     # errors). Install in the worktree, seeded with this checkout's lockfile when there is one, so
     # workspace packages resolve to the sha's own packages/, not this checkout's working tree.
     [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$wt/package-lock.json"
-    (cd "$wt" && npm install --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; echo "     npm install failed in the worktree at ${sha:0:7}"; return 1; }
+    deploy_step "npm install in the deploy worktree at ${sha:0:7}" "$wt" 'npm install --no-audit --no-fund --loglevel=error'; rc=$?
   fi
-  (cd "$wt" && echo "     in $wt @ ${sha:0:7}: $cmd" && eval "$cmd"); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "     in $wt @ ${sha:0:7}: $cmd"
+    deploy_step "the deploy command" "$wt" "$cmd"; rc=$?
+  fi
   git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-  return $rc
+  rm -f "$DEPLOY_OUT"; exec 9>&-
+  return "$rc"
 }
+# --- deploy_at end ---
 smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to serve the new version
   local body="" i
   for i in 1 2 3 4 5 6 7 8; do
@@ -752,7 +826,7 @@ pr_large_reason() { large_reason "$PR_ADD" "$PR_DEL" "$PR_FILES" <<<"$PR_PATHS";
 # said "No migrations to apply". So the D1 calls use the caller's CLOUDFLARE_API_TOKEN when set, else
 # run inside the Boss OS vault (its CLOUDFLARE_API_TOKEN), as the aplayer-mode deploy does. The token
 # is injected, never printed. An unreadable list still fails closed (d1_none_pending).
-vault_run() { (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- "$@"); }
+vault_run() { (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- "$@"); }
 cf_token_run() { # run "$@" in $PWD with a Cloudflare token: the caller's, else the vault's
   if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then "$@"; return; fi
   vault_run sh -c 'cd "$1" && shift && exec "$@"' sh "$PWD" "$@"
@@ -762,9 +836,14 @@ D1_LIST='cf_token_run npx wrangler d1 migrations list "$D1_PREMERGE" --remote'
 touches_migrations() { grep -qE '(^|/)migrations/'; } # PR paths on stdin -> 0 when any is a migration
 d1_none_pending() { # $1 sha -> 0 only when wrangler, from that sha's wrangler.toml, says nothing is pending
   local out
-  out="$(deploy_at "$1" "$D1_LIST" 2>&1)" || { printf '%s\n' "$out" | tail -5; return 1; }
-  printf '%s\n' "$out" | tail -3
-  grep -q 'No migrations to apply' <<<"$out"
+  # Not in a $( ) subshell, so DEPLOY_WHY reaches the caller's STOPPED line; the output goes to a file.
+  local out
+  out="$(mktemp -t land-d1-list.XXXXXX)" || { DEPLOY_WHY="could not make a temp file for the D1 list"; return 1; }
+  deploy_at "$1" "$D1_LIST" > "$out" 2>&1 || { tail -5 "$out"; rm -f "$out"; return 1; }
+  tail -3 "$out"
+  grep -q 'No migrations to apply' "$out"; local r=$?
+  [ "$r" -eq 0 ] || DEPLOY_WHY="wrangler did not say 'No migrations to apply': $(deploy_tail "$out")"
+  rm -f "$out"; return "$r"
 }
 d1_apply_at() { # $1 sha -> 0 applied and nothing left pending | 1 (named by the caller)
   deploy_at "$1" "$D1_APPLY" || return 1
@@ -896,7 +975,7 @@ if [ "$MODE" = promote ]; then
     if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed; read the $PROMOTE_VIA run."; fi
     [ "$(production_sha)" = "$CAND" ] || die "$PROMOTE_VIA ran green for ${CAND:0:7} but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
   else
-  deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed — read the error, it explains itself. Production's record is unchanged (still ${PROD:-unrecorded})."
+  deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed: $DEPLOY_WHY. Production's record is unchanged (still ${PROD:-unrecorded})."
   say "4/4  smoke + record"
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   record_production "$CAND" "land --promote from ${CAND:0:7}"
@@ -1445,7 +1524,7 @@ case "$GATE_RC" in
 esac
 if [ -n "$D1_PREMERGE" ]; then
   pr_size "$PR"
-  d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (output above), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."
+  d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (${DEPLOY_WHY:-output above}), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."
 fi
 
 RECENT="$(recent_lands "$PR")"
@@ -1794,6 +1873,7 @@ pages_cf_sources() { # -> one JSON array [{name,inc,exc}] of the Pages projects 
   # vault's Cloudflare token reads the same Pages list; it is held in a variable, never printed.
   n=""; [ -z "$tok" ] || n="$(curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=1" 2>/dev/null)"
   if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$n"; then
+    # -s stays here alone: this reads a VALUE, and npm's banner would land in it. Empty = unreadable.
     tok="$( (cd "$HOME/GitHub/boss-os" 2>/dev/null && npm run -s vault:run -- sh -c 'printf %s "$CLOUDFLARE_API_TOKEN"') 2>/dev/null)"
     [ -n "$tok" ] || return 1
   fi
@@ -1924,7 +2004,7 @@ if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
-  d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] #$PR IS MERGED and $NAME is deploying it, but D1 $D1_PREMERGE still has migrations pending (or could not be read) on ${MSHA_PAGES:0:7} — the live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
+  d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] #$PR IS MERGED and $NAME is deploying it, but D1 $D1_PREMERGE still has migrations pending (or could not be read) on ${MSHA_PAGES:0:7}: ${DEPLOY_WHY:-see the output above}. The live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
   [ -z "${DROPPED_PUSH:-}" ] || pages_kick || say "     the Pages build could not be triggered (above); pages_watch will report it unconfirmed"
   PW_OUT="$(pages_watch "$MSHA_PAGES" "$PAGES_PROJECTS")"; PW=$?
   [ -z "$PW_OUT" ] || printf '%s\n' "$PW_OUT"
@@ -2085,7 +2165,7 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   # on, removed afterwards.
   DSHA="$(git rev-parse origin/main 2>/dev/null)"
   [ -n "$DSHA" ] || die "#$PR IS MERGED and $GREEN, but origin/main could not be read here, so nothing was deployed. Re-run 'land $PR'."
-  deploy_at "$DSHA" "$DEPLOY" || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
+  deploy_at "$DSHA" "$DEPLOY" || die "#$PR IS MERGED and $GREEN, but the deploy from ${DSHA:0:7} failed: $DEPLOY_WHY (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions)"
   say "LANDED — #$PR is merged, $GREEN, and it is in production."
   exit 0
 fi
@@ -2130,7 +2210,7 @@ ship_production() { # $1 sha  $2 deployment note
     [ "$(production_sha)" = "$1" ] || die "#$PR IS MERGED and $PROMOTE_VIA ran green for ${1:0:7}, but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
     echo "     recorded by $PROMOTE_VIA: production = ${1:0:7}"
   else
-  deploy_at "$1" "$DEPLOY" || die "#$PR IS MERGED and $GREEN, but the production deploy from ${1:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
+  deploy_at "$1" "$DEPLOY" || die "#$PR IS MERGED and $GREEN, but the production deploy from ${1:0:7} failed: $DEPLOY_WHY (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions)."
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   [ -z "$E2E_WF" ] || record_production "$1" "$2"
   fi
@@ -2140,7 +2220,7 @@ for step in $PLAN; do
   case "$step" in
     staging)
       say "     staging <- ${MSHA:0:7}"
-      deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and $GREEN, but the STAGING deploy from ${MSHA:0:7} failed — read the error, it explains itself. Production untouched."
+      deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and $GREEN, but the STAGING deploy from ${MSHA:0:7} failed: $DEPLOY_WHY. Production untouched."
       ;;
     production)
       if [ -z "$SMALL_NOTE" ]; then

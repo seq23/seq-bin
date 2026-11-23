@@ -71,6 +71,9 @@ jobs:
       # 22 Nov 2026, west-peek-os #584: "main is green", then DEPLOY_RUN_NOT_FOUND, while CI was still queued.
       - name: land waits for main's CI before looking for the run CI triggers
         run: ./tests/test-land-gate-wait.sh
+      # 22 Nov 2026: two overlapping local deploys filled the disk and both STOPPED over no error.
+      - name: land's local release step names its error, runs one at a time, never on a full disk
+        run: ./tests/test-land-local-ship.sh
       - name: pass-line posts only a sign-off land will read, through land's own parser
         run: ./tests/test-pass-line.sh
 

@@ -153,6 +153,14 @@ la 7 --task fastplain
 check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]
 check "…and lands: PASS on line 1, in done/" eval 'lockgone && line1 "$T/done/fastplain.md" | grep -q "^STATUS: PASS t/fixture#7 "'
 
+# 23 Nov 2026: lands lost because the worker ran inside an agent's worktree that was removed right after.
+reset "Fixes it."; echo '[]' > "$FAKE/labels"
+git -C "$W/repo" worktree add -q "$W/wt-agent" -b agent-branch 2>/dev/null
+(cd "$W/wt-agent" && "$LA" 7 --task fromwt) > "$W/out" 2>&1; RC=$?
+git -C "$W/repo" worktree remove --force "$W/wt-agent"
+check "started from a linked worktree that is removed at once: the worker runs in the main checkout and lands" \
+  eval '[ "$RC" -eq 0 ] && lockgone && line1 "$T/done/fromwt.md" | grep -q "^STATUS: PASS t/fixture#7 " && grep -qE "in (/private)?$W/repo [(]sheet" "$T"/logs/fromwt-7.log'
+
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
 la 7 --task noclass
 check "safety: no Review class line and no PASS: refused, saying what to add, nothing started" eval '[ "$RC" -eq 1 ] && has "Review class: none — <why>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclass.md" ]'

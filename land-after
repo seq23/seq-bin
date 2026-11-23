@@ -12,8 +12,9 @@
 # lander; this never merges by itself), confirms the merge on GitHub, runs each --then in order, and writes
 # the result where the next reader finds it:
 #   ~/Work/tasks/<slug>.md      line 1 `STATUS: landing|PASS|FAIL <owner/repo>#<pr> <sha> <date>[ — <step>; log <path>]`
-#                               PASS → moved to ~/Work/tasks/done/; FAIL stays open, with an Open Loops row
-#                               (owner claude) naming the PR, the failing step and the sheet.
+#                               PASS → moved to ~/Work/tasks/done/; FAIL stays open for the coordinator, who
+#                               reads line 1 and fixes it that session. Never a row on her Open Loops list (her
+#                               ruling 22 Nov 2026: "they should have been done today and 0 out").
 #   ~/Work/tasks/logs/<slug>-<pr>.log   everything land printed, secrets masked.
 #
 #   land-after --status      one line per open sheet (its line 1 and path), for HANDOFF's Jobs list; a
@@ -22,7 +23,7 @@
 #   land-after --self-test   runs tests/test-land-after.sh.
 #
 #   land-after --sweep       (nightly, housekeeping.sh) a `landing` sheet whose worker is gone (power loss,
-#                            kill -9) becomes FAIL unknown with its Open Loops row, so nothing waits unseen.
+#                            kill -9) becomes FAIL unknown on its sheet, so nothing waits unseen.
 #
 # A sheet is one job's: line 1 naming another <owner/repo>#<n> is refused, and one land at a time holds each
 # PR and each sheet (two atomic locks). The PASS line may stand in the body or in a comment by the repo's
@@ -39,8 +40,8 @@ SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 TASKS="${LAND_AFTER_TASKS:-$HOME/Work/tasks}"
 DONE="$TASKS/done"; LOGS="$TASKS/logs"; LOCKS="$TASKS/locks"
 LAND_BIN="${LAND_AFTER_LAND:-$HERE/land}"          # tests point this at a fake lander
-LAND_SRC="$HERE/land"                               # the gates and Open Loops blocks are read from the real one
-LAND_DIR="${LAND_DIR:-$HERE}"                    # open-loops.mjs and land-surfaces.json sit beside land
+LAND_SRC="$HERE/land"                               # the gates block is read from the real one
+LAND_DIR="${LAND_DIR:-$HERE}"                    # land-surfaces.json sits beside land (the gates read it)
 POLL="${LAND_AFTER_POLL_SECS:-30}"
 CHECKS_MAX="${LAND_AFTER_CHECKS_MAX_SECS:-2700}"    # 45 min for the PR's checks to finish
 APPEAR_MAX="${LAND_AFTER_APPEAR_SECS:-300}"         # 5 min for checks to show up at all
@@ -91,10 +92,10 @@ sheet_owner() { # $1 slug -> the <owner/repo>#<n> its line 1 names (empty when i
 # --- the reviewer's PASS line, read with land's own gate functions (one definition, never a copy) ---
 load_land_blocks() {
   local block
-  block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p; /^# --- open_loops begin/,/^# --- open_loops end/p' "$LAND_SRC" 2>/dev/null)"
+  block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  declare -F review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in open_loops_post >/dev/null
+  declare -F review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -119,27 +120,9 @@ move_done() { # $1 slug -> done/<slug>.md (an older done copy of the same slug i
   mv "$TASKS/$1.md" "$dest" && printf '%s\n' "$dest"
 }
 
-# One FAIL row on Open Loops (owner claude) naming the PR, the step, the log and the sheet; noted on the sheet.
-file_fail_row() { # $1 repo $2 pr $3 slug $4 reason $5 log
-  local stop="LAND_AFTER_PR_$2" body out msg
-  body="$(jq -nc --arg repo "$1" --arg stop "$stop" --arg pr "$2" --arg reason "$4" --arg log "$5" --arg sheet "$TASKS/$3.md" --arg slug "$3" \
-    '{repo: $repo, stop: $stop, owner: "claude", business: "personal",
-      title: "Land of \($repo)#\($pr) failed: \($reason | .[0:90])",
-      finish_line: "\($repo)#\($pr) merged and deployed green, or closed with a reason",
-      next_step: "Read \($log), fix the failing step (\($reason | .[0:120])) on \($repo)#\($pr), then run land-after \($pr) --task \($slug) again (sheet \($sheet))."}')"
-  if out="$(open_loops_post "$body")"; then
-    add_note "$3" "Open Loops row $stop filed (owner claude): $(tail -1 <<<"$out")"
-    echo "Open Loops row $stop filed (owner claude)"
-  else
-    msg="$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")"
-    add_note "$3" "Open Loops row was NOT filed ($msg); file it by hand: cd ~/GitHub/boss-os && npm run -s vault:run -- node $OPEN_LOOPS_POSTER '<body in the log>'"
-    echo "NAMED STOP [LAND_AFTER_LOOP_NOT_FILED] the Open Loops row was NOT filed ($msg). Body: $body"
-  fi
-}
-
 # ============================== --sweep (nightly) ==============================
 # A worker killed outright (power loss, forced shutdown, kill -9) runs no trap and files nothing; its sheet
-# would say "landing" until someone reads --status. This turns each such sheet into a FAIL with its row.
+# would say "landing" until someone reads --status. This turns each such sheet into a FAIL on line 1.
 sweep() {
   local f slug line rp repo pr pid n=0
   for f in "$TASKS"/*.md; do
@@ -152,7 +135,6 @@ sweep() {
     rp="$(sheet_owner "$slug")"; repo="${rp%#*}"; pr="${rp##*#}"
     [ -n "$rp" ] || { repo="?"; pr="?"; }
     set_status "$slug" "STATUS: FAIL $rp $(awk '{print $4}' <<<"$line") $(now) — unknown: the land-after worker is gone (power loss, forced shutdown or kill); nothing says whether it merged. Read the log, then run land-after again; log $LOGS/$slug-$pr.log"
-    [ "$pr" = "?" ] || file_fail_row "$repo" "$pr" "$slug" "unknown: the land-after worker died mid-land" "$LOGS/$slug-$pr.log"
     drop_lock "$(slug_lock "$slug")"
     n=$((n + 1)); say "$slug: landing with no live worker -> FAIL unknown"
   done
@@ -221,7 +203,7 @@ worker() {
   ERRF="$(mktemp)"; LANDOUT="$(mktemp)"
   trap 'rm -f "$ERRF" "$LANDOUT"; drop_lock "$LOCK"; drop_lock "$SLOCK"' EXIT
   trap '[ -n "$FINISHED" ] || fail "unknown: land-after was stopped by a signal mid-land (sleep, reboot or kill); read the log, then run land-after again"' TERM HUP INT
-  local SHEET="$TASKS/$SLUG.md" STOP="LAND_AFTER_PR_$PR" MERGE_SHA=""
+  local SHEET="$TASKS/$SLUG.md" MERGE_SHA=""
   echo "=== land-after worker $(now) pid $$: $REPO#$PR in $DIR (sheet $SHEET)"
 
   fail() { # $1 reason
@@ -229,7 +211,6 @@ worker() {
     local reason
     reason="$(printf '%s' "$1" | tr '\n' ' ' | redact | cut -c1-220)"
     set_status "$SLUG" "STATUS: FAIL $REPO#$PR ${MERGE_SHA:-$HEADSHA} $(now) — $reason; log $LOG"
-    file_fail_row "$REPO" "$PR" "$SLUG" "$reason" "$LOG"
     echo "OUTPUT land-after $REPO#$PR FAIL — $reason"
     exit 1
   }
@@ -286,13 +267,9 @@ worker() {
     [ "$rc" -eq 0 ] || fail "then failed (exit $rc): $cmd"
   done
 
-  # 5. PASS: line 1, a FAIL row of an earlier try closed, the sheet moved to done/.
+  # 5. PASS: line 1, the sheet moved to done/.
   FINISHED=1
   set_status "$SLUG" "STATUS: PASS $REPO#$PR $MERGE_SHA $(now)"
-  if grep -q "Open Loops row $STOP filed" "$SHEET" 2>/dev/null; then
-    open_loops_post "$(jq -nc --arg repo "$REPO" --arg stop "$STOP" '{repo: $repo, stop: $stop, owner: "claude", business: "personal", cleared: true, finish_line: "merged and deployed green"}')" >/dev/null \
-      && echo "Open Loops row $STOP closed" || echo "Open Loops row $STOP could not be closed; close it by hand"
-  fi
   local dest; dest="$(move_done "$SLUG")" || dest="$SHEET (could not be moved to done/)"
   echo "OUTPUT land-after $REPO#$PR PASS $MERGE_SHA — sheet $dest"
   exit 0

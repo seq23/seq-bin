@@ -16,7 +16,7 @@
 #   land 96         # that PR number
 #   land 96 --owner="<her words>"  # HER bypass (21 Nov 2026): skips the review, click-through and patch
 #                      # sign-offs; CI, the safety checks, deploy and smoke still run. Only when SHE says ship it.
-#                      # Once green, an engineering check of the merged diff is filed on Open Loops for the next day.
+#                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/HANDOFF.md Today (same-day review).
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
@@ -170,9 +170,11 @@ unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing 
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 RATE_UNTIL_FILE="$(mktemp -t land-rate-until.XXXXXX)" || { rm -f "$GH_ERR_FILE"; exit 1; } # rate_wait's deadline, below
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
-land_exit() { # $1 exit code. A land that ended green under her bypass files its engineering check.
-  [ "$1" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ] && file_bypass_check
+land_exit() { # $1 exit code. A land that ended green under her bypass notes its same-day engineering check.
+  local rc="$1"
+  if [ "$rc" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ]; then note_eng_check || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
+  exit "$rc"
 }
 trap 'land_exit $?' EXIT
 gh_kind() { # stderr text -> network | auth | api
@@ -1292,30 +1294,48 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
 # landed under `Owner override:` skipped its engineering review, so once it is green and deployed land
-# files ONE Open Loops row (one per repo#PR, the intake upserts) for the next day: the merged diff is
-# checked against every automatic fail in engineering.md. It never blocks or fails the land; a failed post is printed loudly
-# with the command that files it by hand.
-# --- open_loops begin (land-after evals this block verbatim: the ONE way ~/bin's bash posts a row) ---
-# open_loops_post '<json body>' -> prints the poster's output; rc 0 posted | non-zero not posted.
-# The token comes from the Boss OS vault at run time (LAND_OPEN_LOOPS_NO_VAULT=1: from the environment, tests).
-OPEN_LOOPS_POSTER="${LAND_DIR:-$HOME/bin}/open-loops.mjs"
-open_loops_post() {
-  local boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
-  if [ "${LAND_OPEN_LOOPS_NO_VAULT:-}" = 1 ]; then node "$OPEN_LOOPS_POSTER" "$1" 2>&1
-  else (cd "$boss" 2>/dev/null && npm run -s vault:run -- node "$OPEN_LOOPS_POSTER" "$1" 2>&1); fi
-}
-# --- open_loops end ---
-file_bypass_check() {
-  local slug body out poster="$OPEN_LOOPS_POSTER" boss="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}"
+# writes ONE line into the Today section of ~/HANDOFF.md (the coordinator's start-here; the handoff hook
+# keeps a line there all day) and prints it:
+#   - ENG-CHECK DUE <owner/repo>#<pr> <merge sha> — landed under her bypass <time CT>; ...
+# The coordinator launches the same-day reviewer from it, then turns DUE into DONE. It is never a row on
+# her Open Loops list (her ruling 22 Nov 2026, on Monday's list: "they should have been done today and
+# 0 out"; that list is only her decisions, money, her-only accounts and waits on someone else). A re-run
+# on the same PR adds no second line (nor after its DUE was turned into DONE). A line that cannot be written is NAMED STOP [ENG_CHECK_NOT_NOTED],
+# exit 4: the PR IS landed but its check is not noted, so it never ends a silent 0.
+LAND_RC_ENG_CHECK_NOT_NOTED=4
+note_eng_check() {
+  local slug sha line out handoff="${LAND_HANDOFF:-$HOME/HANDOFF.md}"
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
-  body="$(jq -nc --arg repo "$slug" --arg pr "$PR" '{repo: $repo, stop: "OWNER_BYPASS_PR_\($pr)", owner: "claude", business: "personal",
-    title: "Engineering check of \($repo)#\($pr) (landed under her bypass)",
-    finish_line: "every automatic fail in engineering.md checked on the merged diff; fails fixed or dated",
-    next_step: "Read the merged change against the automatic fails in engineering.md; fix each fail now or give it a dated row."}')"
-  if out="$(open_loops_post "$body")"; then echo "     engineering check of $slug#$PR filed on Open Loops for tomorrow ($(tail -1 <<<"$out"))"; return 0; fi
-  printf '\n\033[31;1mNAMED STOP [BYPASS_CHECK_NOT_FILED] #%s LANDED, but its engineering check was NOT filed on Open Loops: %s\nFile it by hand:  cd %s && npm run -s vault:run -- node %s '"'"'%s'"'"'\033[0m\n' \
-    "$PR" "$(grep -m1 -E 'NAMED STOP|Error' <<<"$out" || tail -1 <<<"$out")" "$boss" "$poster" "$body"
-  return 0
+  sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
+  line="ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — landed under her bypass $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today"
+  # One writer at a time with the PreCompact hook (handoff-on-compact.sh takes the same lock), then an
+  # atomic replace. The line goes after the Jobs list, where the hook keeps hand-written lines all day.
+  if out="$(python3 -c '
+import os, re, sys, fcntl
+path, key, line = sys.argv[1], sys.argv[2], sys.argv[3]
+S, E, JE = "<!-- TODAY:START -->", "<!-- TODAY:END -->", "<!-- JOBS:END -->"
+lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+doc = open(path).read() if os.path.exists(path) else ""
+if re.search(r"(?m)^- ENG-CHECK (DUE|DONE) " + re.escape(key) + " ", doc):
+    print("ENG-CHECK for " + key + " is already in " + path); sys.exit(0)
+item = "- " + line + "\n"
+if S not in doc or E not in doc:
+    doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + item + E + "\n"
+else:
+    head, rest = doc.split(S, 1); body, tail = rest.split(E, 1)
+    if JE in body:
+        a, b = body.split(JE, 1); body = a + JE + "\n" + item + (b[1:] if b.startswith("\n") else b)
+    else:
+        m = re.match(r"\n?(<!-- day:[^>]*-->\n)?(_[^\n]*_\n)?", body)
+        body = body[:m.end()] + item + body[m.end():]
+    doc = head + S + body + E + tail
+tmp = path + ".land.tmp"
+open(tmp, "w").write(doc); os.replace(tmp, path)
+print(line + "  (in " + path + ", Today)")
+' "$handoff" "$slug#$PR" "$line" 2>&1)"; then echo "     $out"; return 0; fi
+  printf '\n\033[31;1mNAMED STOP [ENG_CHECK_NOT_NOTED] #%s LANDED, but its same-day engineering check was NOT written to %s: %s\nAdd this line to Today in %s by hand:\n  - %s\033[0m\n' \
+    "$PR" "$handoff" "$(tail -1 <<<"$out")" "$handoff" "$line"
+  return 1
 }
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
@@ -1392,7 +1412,7 @@ if [ -n "$OWNER_WORDS" ]; then
     printf '%s\n\nOwner override: "%s" (%s)\n' "$OBODY" "$OWNER_WORDS" "$(TZ=America/Chicago date '+%d %b %Y %H:%M CT')" \
       | gh pr edit "$PR" --body-file - >/dev/null || die "the owner override could not be written to PR #$PR"
   fi
-  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; an engineering check of the merged diff is filed for tomorrow)"
+  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
 PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
@@ -1461,8 +1481,8 @@ if [ "$MERGE_RC" -ne 0 ]; then
 fi
 fi
 
-# Landed under her bypass (this run's --owner, or the override already on the PR): the exit trap files
-# the engineering check once the land ends green (file_bypass_check).
+# Landed under her bypass (this run's --owner, or the override already on the PR): the exit trap notes
+# the same-day engineering check once the land ends green (note_eng_check).
 { [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; } && LAND_BYPASSED=1
 say "3/5  syncing main"
 # THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`

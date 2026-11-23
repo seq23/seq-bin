@@ -1,11 +1,12 @@
 #!/bin/bash
-# land-after, driven for real (a real detached worker, a fake gh, a fake lander, a stub Open Loops intake)
+# land-after, driven for real (a real detached worker, a fake gh, a fake lander, a stub Open Loops intake that
+# must see ZERO posts: a land's result goes on its task sheet, never on her Open Loops list, 22 Nov 2026)
 # against a fake HOME. Each case is a way it breaks (22 Nov 2026 brief, "how it breaks"):
 #   abuse/mistake  no PASS line, a builder-signed PASS, the same PR twice, a slug with / or .. -> refused, nothing started
 #   data loss      only its own sheet is touched; cleanup touches only done/ and logs/ past 14 days; a sheet
 #                  deleted mid-land is recreated with the result; secrets never reach the log
 #   outage         gh rate-limited, land "could not verify", the merge unreadable after land -> FAIL unknown, never
-#                  PASS; Open Loops down -> FAIL still on the sheet and in the log, saying the row was not filed;
+#                  PASS; any FAIL (red, rate limit, network, auth, dead worker) -> line 1 FAIL and zero posts;
 #                  a killed worker -> --status says stale, never running
 #   rule 0         land exits 0 having merged nothing -> FAIL LAND_MERGED_NOTHING
 #   detached       the worker finishes after the starting shell AND its whole process group are gone
@@ -23,16 +24,15 @@ trap '[ -n "$STUB" ] && kill "$STUB" 2>/dev/null; rm -rf "$W"' EXIT
 export HOME="$W/home"; mkdir -p "$HOME"
 T="$HOME/Work/tasks"; FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0 LAND_AFTER_READ_PATIENCE_SECS=3
-export LAND_OPEN_LOOPS_NO_VAULT=1 BOSS_OPEN_LOOPS_TOKEN=olt_testtoken123 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+export BOSS_OPEN_LOOPS_TOKEN=olt_testtoken123 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 pass=0; failn=0
 check() { local d="$1"; shift; if "$@"; then pass=$((pass + 1)); echo "  ok  $d"; else failn=$((failn + 1)); echo "  FAIL $d"; fi; }
 
-# --- a stub Open Loops intake (the real open-loops.mjs posts to it) ---
+# --- a stub Open Loops intake: the real poster (open-loops.mjs) would post here; nothing may ---
 cat > "$W/stub.mjs" <<'JS'
 import http from "node:http"; import fs from "node:fs";
 const dir = process.argv[2];
 http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => {
-  if (fs.existsSync(`${dir}/down`)) { res.writeHead(500); return res.end("down"); }
   fs.appendFileSync(`${dir}/posts.jsonl`, JSON.stringify(JSON.parse(b)) + "\n");
   res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, data: { action: "opened" } }));
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
@@ -87,6 +87,8 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   nomerge) echo "1/5  verifying"; exit 0 ;;
   red) echo "4/5  e2e"; printf '\033[31mSTOPPED: NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 9 ended failure\033[0m\n'; exit 1 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
+  ratelimited) printf '\033[31mSTOPPED: could not verify (rate limit) — HTTP 403: API rate limit exceeded. Nothing was merged by this step\033[0m\n'; exit 75 ;;
+  authfail) printf '\033[31mSTOPPED: could not verify (auth) — HTTP 401: Requires authentication. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"
           echo "npm npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 google AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
           echo "cf Zk3pQ9vX2mL7nR4tY8wB1cD6fG0hJ5kM3sA9qE2u commit 0123456789abcdef0123456789abcdef01234567"
@@ -104,12 +106,12 @@ HEADSHA="$(git -C "$W/repo" rev-parse HEAD)"; export HEADSHA; git -C "$W/repo" r
 # land reads 7-40 hex characters with at least one a-f as a commit: an all-digit prefix is lengthened, never a flake.
 eval "$(grep '^sha_name() ' "$(dirname "$LA")/land")"   # land's own helper, never a copy
 GOOD="Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land at $(sha_name "$HEADSHA"); Engineering: PASS"
-reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; rm -f "$W/api/down"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
+reset() { rm -f "$FAKE"/*; : > "$W/api/posts.jsonl"; printf '%s' "${1-$GOOD}" > "$FAKE/body"; }
 la() { (cd "$W/repo" && "$LA" "$@") > "$W/out" 2>&1; RC=$?; }
 lockgone() { local _; for _ in $(seq 1 150); do [ -z "$(find "$T/locks" -name '*.lock' 2>/dev/null)" ] && return 0; sleep 0.2; done; return 1; }
 has() { grep -qF -- "$1" "$W/out"; }
 line1() { head -1 "$1" 2>/dev/null; }
-posts() { cat "$W/api/posts.jsonl" 2>/dev/null; }
+no_posts() { [ ! -s "$W/api/posts.jsonl" ]; }
 
 echo "=== abuse and mistakes: refused, nothing started ==="
 reset "Fixes it."
@@ -155,7 +157,7 @@ check "…pending checks were waited for before land" eval '[ "$(grep -c "^pr ch
 check "…land ran in the repo's checkout" grep -q "pwd=$(cd "$W/repo" && pwd -P)" "$FAKE/land-log"
 check "…the log ends with the OUTPUT line" grep -q '^OUTPUT land-after t/fixture#7 PASS bbbbbbb' "$T/logs/job1-7.log"
 check "…another agent's sheet is byte for byte the same" eval '[ "$(cksum < "$T/other.md")" = "$OTHER_SUM" ]'
-check "…nothing posted to Open Loops on a green land" eval '[ -z "$(posts)" ]'
+check "…nothing posted to Open Loops on a green land" no_posts
 rm -f "$T/other.md"
 
 echo "=== the same PR twice: the second is refused by the lock ==="
@@ -167,22 +169,22 @@ check "second start on the same PR: refused" eval '[ "$RC" -eq 1 ] && has "alrea
 check "…and it wrote no sheet of its own" eval '[ ! -e "$T/second.md" ] && [ ! -e "$T/logs/second-8.log" ]'
 lockgone; check "…the first still ends PASS" eval 'line1 "$T/done/first.md" | grep -q "^STATUS: PASS"'
 
-echo "=== red: FAIL with the step and log on line 1, one Open Loops row, sheet stays open ==="
+echo "=== red: FAIL with the step and log on line 1, sheet stays open, NOTHING on Open Loops ==="
 reset; echo red > "$FAKE/land-mode"
 la 9 --task redjob; lockgone
 check "STATUS: FAIL names the failing step and the log" eval 'line1 "$T/redjob.md" | grep -q "^STATUS: FAIL t/fixture#9 .*E2E_RED_AFTER_LARGE_CHANGE.*log $T/logs/redjob-9.log"'
 check "…sheet stays open (not in done/)" eval '[ -f "$T/redjob.md" ] && [ ! -e "$T/done/redjob.md" ]'
-check "…one row, owner claude, stop LAND_AFTER_PR_9" eval '[ "$(posts | grep -c .)" -eq 1 ] && posts | jq -e "select(.owner == \"claude\" and .stop == \"LAND_AFTER_PR_9\" and .repo == \"t/fixture\")" >/dev/null'
-check "…next_step is one sentence naming the PR, the step and the sheet" eval 'posts | jq -r .next_step | grep -q "E2E_RED.*t/fixture#9.*$T/redjob.md"'
-check "…the sheet says the row was filed" grep -q 'Open Loops row LAND_AFTER_PR_9 filed' "$T/redjob.md"
-# A later green try closes the row.
+check "…zero posts to the Open Loops intake" no_posts
+check "…the log ends with the FAIL OUTPUT line naming the step" grep -q '^OUTPUT land-after t/fixture#9 FAIL — .*E2E_RED_AFTER_LARGE_CHANGE' "$T/logs/redjob-9.log"
+# A later green try of the same sheet ends PASS, still posting nothing.
 reset; la 9 --task redjob; lockgone
-check "a later green try of the same PR: PASS and the row closed" eval 'line1 "$T/done/redjob.md" | grep -q "^STATUS: PASS" && posts | jq -e "select(.stop == \"LAND_AFTER_PR_9\" and .cleared == true)" >/dev/null'
+check "a later green try of the same PR: PASS, zero posts" eval 'line1 "$T/done/redjob.md" | grep -q "^STATUS: PASS" && no_posts'
 
 echo "=== outage: unknown, never PASS ==="
 reset; echo ratelimit > "$FAKE/checks-mode"; echo $(( $(date +%s) + 7200 )) > "$FAKE/reset-at"
 la 10 --task ratelimited; lockgone
 check "allowance spent with its reset after the wait ends: FAIL unknown naming the reset, land never ran" eval 'line1 "$T/ratelimited.md" | grep -q "^STATUS: FAIL .*unknown: .*rate limit: GitHub.s allowance resets in 12[01] min" && [ ! -f "$FAKE/land-ran" ]'
+check "…zero posts to the Open Loops intake" no_posts
 check "…and it did not burn the wait asking again (one checks read)" eval '[ "$(grep -c "^pr checks" "$FAKE/gh-log")" -eq 1 ]'
 reset; echo flaky > "$FAKE/checks-mode"
 LAND_AFTER_READ_PATIENCE_SECS=10 la 23 --task flaky; lockgone   # 1+2 s of backoff; 10 s so a slow second never gives up early
@@ -192,18 +194,19 @@ LAND_AFTER_READ_PATIENCE_SECS=1 la 24 --task waitreset; lockgone
 check "F2: allowance spent, resetting inside the wait: one sleep to the reset (past the 1 s patience), then PASS" eval 'line1 "$T/done/waitreset.md" | grep -q "^STATUS: PASS" && grep -q "waiting [0-9]*s for its reset" "$T/logs/waitreset-24.log"'
 reset; echo ratelimit-until > "$FAKE/view-mode"; echo $(( $(date +%s) + 2 )) > "$FAKE/reset-at"
 la 25 --task ratelaunch; lockgone
-check "allowance spent when land-after starts (22 Nov 2026, #134): waits for the reset, then lands; no FAIL, no row" eval 'line1 "$T/done/ratelaunch.md" | grep -q "^STATUS: PASS" && [ -f "$FAKE/land-ran" ] && ! posts | jq -e "select(.cleared != true)" >/dev/null'
+check "allowance spent when land-after starts (22 Nov 2026, #134): waits for the reset, then lands; no FAIL, zero posts" eval 'line1 "$T/done/ratelaunch.md" | grep -q "^STATUS: PASS" && [ -f "$FAKE/land-ran" ] && no_posts'
 reset; echo unverified > "$FAKE/land-mode"
 la 11 --task netdown; lockgone
-check "land exit 75 (network down mid-land): FAIL unknown" eval 'line1 "$T/netdown.md" | grep -q "^STATUS: FAIL .*unknown: STOPPED: could not verify"'
+check "land exit 75 (network down mid-land): FAIL unknown, zero posts" eval 'line1 "$T/netdown.md" | grep -q "^STATUS: FAIL .*unknown: STOPPED: could not verify" && no_posts'
+reset; echo ratelimited > "$FAKE/land-mode"
+la 26 --task landrate; lockgone
+check "land stopped by a spent allowance (exit 75): FAIL unknown with its STOPPED line on line 1, zero posts" eval 'line1 "$T/landrate.md" | grep -q "^STATUS: FAIL t/fixture#26 .*unknown: STOPPED: could not verify (rate limit)" && no_posts'
+reset; echo authfail > "$FAKE/land-mode"
+la 27 --task landauth; lockgone
+check "land stopped by a failed sign-in (exit 75, auth): FAIL unknown with its STOPPED line, never PASS, zero posts" eval 'line1 "$T/landauth.md" | grep -q "^STATUS: FAIL t/fixture#27 .*unknown: STOPPED: could not verify (auth)" && [ ! -e "$T/done/landauth.md" ] && no_posts'
 reset; echo down-after-land > "$FAKE/view-mode"
 la 12 --task cantconfirm; lockgone
 check "land green but the merge unreadable after: FAIL unknown, never PASS" eval 'line1 "$T/cantconfirm.md" | grep -q "^STATUS: FAIL .*unknown: land exited 0 but the merge could not be confirmed" && [ ! -e "$T/done/cantconfirm.md" ]'
-reset; echo red > "$FAKE/land-mode"; : > "$W/api/down"
-la 13 --task loopsdown; lockgone
-check "Open Loops down: FAIL still on line 1" eval 'line1 "$T/loopsdown.md" | grep -q "^STATUS: FAIL t/fixture#13"'
-check "…the sheet says the row was NOT filed" grep -q 'Open Loops row was NOT filed' "$T/loopsdown.md"
-check "…and so does the log" grep -q 'NAMED STOP \[LAND_AFTER_LOOP_NOT_FILED\]' "$T/logs/loopsdown-13.log"
 
 echo "=== rule 0: land exits 0 having merged nothing ==="
 reset; echo nomerge > "$FAKE/land-mode"
@@ -262,7 +265,7 @@ echo "=== N4: --sweep files a land whose worker is gone ==="
 old 0.01 "$T/killed.md"; : > "$W/api/posts.jsonl"
 "$LA" --sweep > "$W/out" 2>&1
 check "a landing sheet with a dead worker: FAIL unknown naming the dead worker" eval 'line1 "$T/killed.md" | grep -q "^STATUS: FAIL t/fixture#20 .*unknown: the land-after worker is gone"'
-check "…its Open Loops row is filed (stop LAND_AFTER_PR_20)" eval 'posts | jq -e "select(.stop == \"LAND_AFTER_PR_20\")" >/dev/null'
+check "…zero posts to the Open Loops intake" no_posts
 check "…its dead slug lock is dropped, and the OUTPUT line counts it" eval '[ ! -e "$T/locks/slugs/killed.lock" ] && has "OUTPUT land-after sweep: 2 dead land(s) filed"'
 rm -rf "$T/locks/t_fixture-20.lock"; rm -f "$T/killed.md" "$T/oldlanding.md"
 # A dead holder's lock does not block a new land of that PR.

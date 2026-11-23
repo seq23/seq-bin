@@ -61,10 +61,17 @@ case "$1 $2" in
     st=OPEN; mc=null; [ -f "$F/merged" ] && { st=MERGED; mc='{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'; }
     cm="$(cat "$F/comments" 2>/dev/null || echo '[]')"
     lb="$(cat "$F/labels" 2>/dev/null || echo null)"   # labels: absent = not in GitHub's answer (unread)
-    jq -n --arg head "$HEADSHA" --arg body "$(mode body)" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" --argjson lb "$lb" \
+    # url: the repo the PR is in (default seq23/seq-bin, on the shipped live-repos.json); a Review class: none line
+    # is in every body unless no-class.
+    body="$(mode body)"; [ -f "$F/no-class" ] || body="$body"$'\n\n''Review class: none — a fixture change in no risk class'
+    jq -n --arg head "$HEADSHA" --arg body "$body" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" --argjson lb "$lb" \
+      --arg url "$(cat "$F/url" 2>/dev/null || echo "https://github.com/seq23/seq-bin/pull/$3")" \
       '{state: $st, body: $body, comments: $cm, headRefOid: $head, headRefName: "feat", title: "A change",
-        url: "https://github.com/t/fixture/pull/\($n)", author: {login: "builder-bot"}, commits: [], mergeCommit: $mc}
+        url: $url, author: {login: "builder-bot"}, commits: [], mergeCommit: $mc, files: [{path: "worker/x.ts"}]}
        + (if $lb == null then {} else {labels: $lb} end)' ;;
+  "api --paginate") # every label ever added (gh's --jq answer over the issue events): $F/label-events, default none; down = no answer
+    [ "$(mode label-events)" = down ] && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
+    cat "$F/label-events" 2>/dev/null || echo '[]'; exit 0 ;;
   "pr checks")
     case "$(mode checks-mode)" in
       ratelimit) echo "HTTP 403: API rate limit exceeded for user" >&2; exit 1 ;;
@@ -145,6 +152,22 @@ reset "Fixes it."; echo '[]' > "$FAKE/labels"
 la 7 --task fastplain
 check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]
 check "…and lands: PASS on line 1, in done/" eval 'lockgone && line1 "$T/done/fastplain.md" | grep -q "^STATUS: PASS t/fixture#7 "'
+
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
+la 7 --task noclass
+check "safety: no Review class line and no PASS: refused, saying what to add, nothing started" eval '[ "$RC" -eq 1 ] && has "Review class: none — <why>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclass.md" ]'
+reset $'Fixes it.\nReview class: none — log wording only'; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
+la 7 --task noneclass
+check "happy path: 'Review class: none — log wording only', no PASS: started at once (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo '["review-required"]' > "$FAKE/label-events"
+la 7 --task wasLabeled
+check "abuse: review-required added then taken off, no PASS: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/wasLabeled.md" ]'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo down > "$FAKE/label-events"
+la 7 --task evdown
+check "outage: the label history unread: exit 75 'could not verify', nothing started" eval '[ "$RC" -eq 75 ] && has "label history" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/evdown.md" ]'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo "https://github.com/t/fixture/pull/7" > "$FAKE/url"
+la 7 --task unlisted
+check "new until launched: a repo not on live-repos.json, no PASS: refused, nothing started" eval '[ "$RC" -eq 1 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/unlisted.md" ]'
 
 echo "=== green, detached: survives the starting shell and its whole process group; only its own sheet is touched ==="
 reset; mkdir -p "$T"

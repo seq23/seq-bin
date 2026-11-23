@@ -170,9 +170,10 @@ unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing 
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 RATE_UNTIL_FILE="$(mktemp -t land-rate-until.XXXXXX)" || { rm -f "$GH_ERR_FILE"; exit 1; } # rate_wait's deadline, below
 gh_err() { cat "$GH_ERR_FILE" 2>/dev/null; }
-land_exit() { # $1 exit code. A land that ended green under her bypass notes its same-day engineering check.
+land_exit() { # $1 exit code. A land that ended green under her bypass notes its same-day engineering check; a landed launch lists its repo.
   local rc="$1"
   if [ "$rc" -eq 0 ] && [ -n "${LAND_BYPASSED:-}" ]; then note_eng_check || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
+  if [ "$rc" -eq 0 ] && [ -n "${LIVE_ADD:-}" ]; then live_add "$LIVE_ADD" "$PR" || rc="$LAND_RC_LIVE_NOT_ADDED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
   # A TERM, HUP or Ctrl-C mid-deploy leaves no temp worktree or step file (deploy_cleanup, in deploy_at).
   if declare -F deploy_cleanup >/dev/null; then deploy_cleanup; fi
@@ -1108,9 +1109,9 @@ rate_reset_in() { # -> seconds until GitHub's spent allowance comes back (its re
 #     such fix. Functions use git's default funcname rule (a line starting with a letter, _ or $ opens
 #     one; it runs to the next); history is `git log -L` on the merge base. 19 Nov 2026, west-peek-os:
 #     webPropertyChange.ts took #527, #531, #532, #537, #540, #546 and #551 in one day.
-#  2. SHIP-READY. A REVIEW-CLASS PR (review_class: the `review-required` label, or labels unread; or a first
-#     public launch) that changes what a person sees (land-surfaces.json: pages, app screens, emails,
-#     video/social output, per repo type) or code stops unless its body has
+#  2. SHIP-READY. A REVIEW-CLASS PR (review_class: the `review-required` label, a repo not on live-repos.json,
+#     a change to that list, or anything unread; or a first public launch: a launch marker or the first thing
+#     people see, per land-surfaces.json) stops, whatever it changes, unless its body has
 #     `Ship-ready: PASS — <reviewer> looked at <real output>` (in the body, or in a comment by the repo's
 #     owner account: `review_text`) from a reviewer who is not the builder
 #     (the PR's author, its commit authors and co-authors, their Claude sessions). Something NEW going
@@ -1290,15 +1291,74 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
 }
 # FAST PRs (her ruling 23 Nov 2026, item 1: "review only what can really hurt"): a fresh reviewer's PASS is
 # required only of a REVIEW-CLASS PR: money, children's or private data, store submissions, deleting people's
-# data, first public launches. No repo carries a classification of its own, so the class is the PR's
-# `review-required` label (set by whoever writes the brief), plus the launch markers below (a first public launch).
-# Labels that could not be read are a review-class PR: unknown is never "no review needed".
-# Everything else lands on green CI; the day's merged diffs get ONE batched engineering check after.
-review_class() { # stdin: PR view JSON (labels) -> rc 0 when it needs a reviewer's PASS, with why on stdout
-  local j; j="$(cat)"
+# data, first public launches, and EVERY PR in a repo not yet launched. The class is the PR's `review-required`
+# label (set by whoever writes the brief), its repo missing from live-repos.json, a change to that list itself,
+# plus the launch markers below (a first public launch). Anything unread is a review-class PR: unknown is never
+# "no review needed". Everything else lands on green CI; the day's merged diffs get ONE batched engineering check.
+# NEW UNTIL LAUNCHED (her ruling 23 Nov 2026: "i do want a full reviewer process for any NEW repo"; asked where the
+# line is: "new until launched"). live-repos.json, beside land in seq-bin, lists every launched repo (owner/repo).
+# Only land's launch path writes it (live_add: a fresh reviewer's Launch-ready PASS, landed green); a PR that
+# changes it by hand is review-class itself, so no builder lists its own repo to dodge the review.
+# Read beside the land that runs (LAND_DIR is set by land's own re-exec, never by a caller): no env var points it
+# at another list.
+LAND_LIVE_REPOS="${LAND_DIR:-$HOME/bin}/live-repos.json"
+LAND_LIVE_HOME="seq23/seq-bin"   # the repo that holds live-repos.json (live_add commits to its main)
+pr_repo() { # stdin: PR view JSON (url) -> its owner/repo (rc 1 when GitHub's answer has none)
+  jq -r '.url // ""' 2>/dev/null | sed -nE 's#^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/[0-9]+/?$#\1#p' | grep .
+}
+live_repo() { # $1 owner/repo -> rc 0 on live-repos.json | 1 not on it | 2 the list could not be read
+  jq -e '.live | type == "array" and length > 0 and all(.[]; type == "string")' "$LAND_LIVE_REPOS" >/dev/null 2>&1 || return 2
+  jq -e --arg r "$1" 'any(.live[]; ascii_downcase == ($r | ascii_downcase))' "$LAND_LIVE_REPOS" >/dev/null 2>&1
+}
+# THE CLASS IS WRITTEN, AND A LABEL NEVER COMES OFF (eng check of #155, 23 Nov 2026: nothing applied the label and a
+# builder could remove it). Every PR body carries `Review class: none — <why, 3+ words>` or the class it is in
+# (money | children | private-data | store | delete | launch — <why>); the brief names it (brief-gate). A missing
+# or unreasoned line is a class, never a guess of none; a review-required label added EVER (label_history: GitHub's
+# issue events, read once by land and land-after) still counts after it is taken off.
+REVIEW_CLASSES="money|children|private-data|store|delete|launch"
+with_label_history() { # $1 PR; stdin: PR view JSON (url) -> it, plus .label_history (every label ever added; null = unread)
+  local j repo ev try; j="$(cat)"
+  if repo="$(pr_repo <<<"$j")"; then
+    for try in 1 2; do
+      ev="$(gh api --paginate "repos/$repo/issues/$1/events" --jq '[.[] | select(.event == "labeled") | .label.name]' 2>/dev/null)" \
+        && ev="$(jq -sc 'add // []' <<<"$ev" 2>/dev/null)" && jq -e 'type == "array"' <<<"$ev" >/dev/null 2>&1 \
+        && { jq -c --argjson h "$ev" '.label_history = $h' <<<"$j"; return 0; }
+      [ "$try" -eq 2 ] || sleep "${LAND_RETRY_SECS:-2}"
+    done
+  fi
+  jq -c '.label_history = null' <<<"$j"
+}
+class_line() { # stdin: PR body -> rc 0 with why on stdout when its Review class line puts it in a class (or is missing)
+  local lines bad
+  lines="$(sed -nE 's/^[[:space:]]*([-*][[:space:]]+)?(\*\*)?Review class:(\*\*)?[[:space:]]*//p' | tr -d '\r')"
+  [ -n "$lines" ] || { echo "its body has no \`Review class:\` line (add \`Review class: none — <why>\`, or the class: ${REVIEW_CLASSES//|/, })"; return 0; }
+  bad="$(grep -viE '^(none|no)[[:space:]]*(—|–|--|-|:)' <<<"$lines" | head -1)"
+  [ -n "$bad" ] && { echo "its body says Review class: ${bad%%[[:space:]—]*}"; return 0; }
+  grep -viE '^(none|no)[[:space:]]*(—|–|--|-|:)[[:space:]]*[^[:space:]<]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" | grep -q . \
+    && { echo "its \`Review class: none\` gives no reason (3+ words after the dash)"; return 0; }
+  return 1
+}
+review_class() { # stdin: PR view JSON (labels, label_history, body, files, changedFiles, url) -> rc 0 when it needs a reviewer's PASS, with why on stdout
+  local j repo rc why; j="$(cat)"
   jq -e '.labels | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its labels could not be read"; return 0; }
   jq -e 'any(.labels[]; (.name // "") == "review-required")' <<<"$j" >/dev/null 2>&1 && { echo "it carries the review-required label"; return 0; }
-  return 1
+  jq -e '.label_history | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its label history could not be read"; return 0; }
+  jq -e 'any(.label_history[]; . == "review-required")' <<<"$j" >/dev/null 2>&1 \
+    && { echo "it was labeled review-required (a label taken off still counts)"; return 0; }
+  why="$(jq -r '.body // ""' <<<"$j" | class_line)" && { echo "$why"; return 0; }
+  jq -e '.files | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its files could not be read"; return 0; }
+  jq -e '(.changedFiles // (.files | length)) > (.files | length)' <<<"$j" >/dev/null 2>&1 \
+    && { echo "GitHub listed only $(jq '.files | length' <<<"$j") of its $(jq '.changedFiles' <<<"$j") files, so the rest are unread"; return 0; }
+  jq -e 'any(.files[]; (.path // "") | test("(^|/)live-repos\\.json$"))' <<<"$j" >/dev/null 2>&1 \
+    && { echo "it changes live-repos.json, the list of launched repos that land without a review (only land's launch path writes it)"; return 0; }
+  repo="$(pr_repo <<<"$j")" || { echo "its repository could not be read from GitHub's answer, so whether it has launched is unknown"; return 0; }
+  live_repo "$repo"; rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) echo "$repo has not launched (not on seq-bin's live-repos.json: new until launched; a landed Launch-ready PASS adds it)" ;;
+    *) echo "NAMED STOP [LIVE_REPOS_UNREAD] $LAND_LIVE_REPOS could not be read, so whether $repo has launched is unknown: restore it from seq-bin main" ;;
+  esac
+  return 0
 }
 ship_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what the PR does  $5 what the reviewer looks at
   # -> rc 0 when a fresh reviewer (not the builder) stands on the last Ship-ready PASS line, with Engineering: PASS,
@@ -1329,15 +1389,24 @@ clicked_or_rendered() { # $1 PR  $2 PR view JSON  $3 head -> rc 0 with the line 
   [ "$rc" -eq 0 ] && { printf 'rendered by the reviewer: %s\n' "$(cut -c1-140 <<<"$line")"; return 0; }
   return "$rc"
 }
-gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
+launch_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what goes public -> rc 0 when a fresh reviewer (not the builder)
+  # stands on the last Launch-ready PASS line, for this head | 1 refused, one line on stdout | 75 could not read.
+  # One check, used by the launch gate and by live_add's decision to list the repo, never two copies.
+  local reviewer msg
+  reviewer="$(review_text <<<"$2" | signoff Launch-ready)" \
+    || { echo "PR #$1 puts something new in public ($4): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
+  is_builder "$reviewer" "$(builders <<<"$2")" \
+    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
+  msg="$(fresh_pass Launch-ready "$1" "$3" "$2")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+}
+gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, url, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
   # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every REVIEW-CLASS PR (review_class, or a first
-  # public launch) that changes what people see OR code (patch_code: tests, docs and data are not code).
-  local tree re files code what look added launch reviewer ids msg why cls
+  # public launch), whatever it changes. Other PRs land on green CI.
+  local tree re files code what look added launch msg cls
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
   re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
   files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
-  [ -n "$files$code" ] || return 0
   launch=""
   if [ -n "$files" ]; then   # Launch-ready is for something new in public, never for code alone
     added="$(jq -r '.files[]?.path' <<<"$2" | while IFS= read -r p; do grep -qxF -- "$p" <<<"$tree" || printf '%s\n' "$p"; done)"
@@ -1346,16 +1415,11 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, author, commits)
   fi
   if [ -n "$launch" ]; then cls="it puts something new in public"; else cls="$(review_class <<<"$2")" || return 0; fi
   if [ -n "$files" ]; then what="needs a review ($cls) and changes what people see ($(head -3 <<<"$files" | paste -sd' ' -))"; look="the real output: page at 390 px, rendered email, frames"
-  else what="needs a review ($cls) and changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"; fi
+  elif [ -n "$code" ]; then what="needs a review ($cls) and changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"
+  else what="needs a review ($cls) and changes $(jq -r '.files[]?.path' <<<"$2" | head -3 | paste -sd' ' -)"; look="the diff"; fi
   msg="$(ship_pass "$1" "$2" "$3" "$what" "$look")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   [ -n "$launch" ] || return 0
-  ids="$(builders <<<"$2")"
-  reviewer="$(review_text <<<"$2" | signoff Launch-ready)" \
-    || { echo "PR #$1 puts something new in public ($(head -2 <<<"$launch" | paste -sd' ' -)): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
-  is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
-  msg="$(fresh_pass Launch-ready "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
-  return 0
+  msg="$(launch_pass "$1" "$2" "$3" "$(head -2 <<<"$launch" | paste -sd' ' -)")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
 }
 patch_code() { # stdin: paths -> those that hold code (functions), not data, docs, media or lockfiles
   grep -vE '(^|/)(tests?|__tests__|e2e|fixtures)/|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$|\.(json|jsonc|md|mdx|txt|csv|tsv|lock|svg|snap|ya?ml|html?|css|scss|xml|png|jpe?g|gif|webp|avif|ico|mp4|mov|mp3|wav|pdf)$' || true
@@ -1518,6 +1582,34 @@ print(line + "  (in " + path + ", Today)")
     "$PR" "$handoff" "$(tail -1 <<<"$out")" "$handoff" "$line"
   return 1
 }
+# --- live_add begin (tests/test-land-gates.sh evals this block) ---
+# THE LAUNCH PATH WRITES live-repos.json, NOTHING ELSE DOES (23 Nov 2026). Once a PR with a fresh reviewer's
+# Launch-ready PASS has landed green, its repo is committed onto the list on seq-bin's main through GitHub's
+# contents API (one commit, the file's blob sha pinned, so a concurrent edit is read again, never overwritten).
+# ~/bin, which land reads, takes it at its next fast-forward (any seq-bin land); until then the repo is still
+# reviewed: the safe side. Not written: NAMED STOP [LIVE_REPO_NOT_ADDED], exit 5 — the PR IS landed, its repo
+# is not listed, so it never ends a silent 0.
+LAND_RC_LIVE_NOT_ADDED=5
+live_add() { # $1 owner/repo  $2 PR -> rc 0 listed (or already there) | 1 not, the named stop printed
+  local cur sha new enc out why="" try
+  for try in 1 2; do
+    cur="$(gh api "repos/$LAND_LIVE_HOME/contents/live-repos.json?ref=main" 2>&1)" || { why="the list could not be read: $(tail -1 <<<"$cur")"; continue; }
+    sha="$(jq -r '.sha // empty' <<<"$cur" 2>/dev/null)"
+    new="$(jq -r '.content // empty | gsub("\n"; "") | @base64d' <<<"$cur" 2>/dev/null \
+      | jq -e --arg r "$1" 'select(.live | type == "array") | if any(.live[]; ascii_downcase == ($r | ascii_downcase)) then "LISTED" else (.live += [$r] | .live |= sort_by(ascii_downcase)) end' 2>/dev/null)" \
+      && [ -n "$sha" ] || { why="GitHub's answer held no readable list"; continue; }
+    [ "$new" = '"LISTED"' ] && { echo "     $1 is already on live-repos.json"; return 0; }
+    enc="$(jq -Rrs '@base64' <<<"$new")"
+    out="$(gh api -X PUT "repos/$LAND_LIVE_HOME/contents/live-repos.json" -f message="live-repos: add $1 (launched: Launch-ready PASS landed on $1#$2)" \
+      -f content="$enc" -f sha="$sha" -f branch=main -q '.commit.sha' 2>&1)" \
+      && grep -qE '^[0-9a-f]{40}$' <<<"$out" \
+      && { echo "     $1 added to live-repos.json on $LAND_LIVE_HOME main ($(sha_name "$out")); land reads it from ~/bin's next fast-forward"; return 0; }
+    why="the commit was refused: $(tail -1 <<<"$out")"
+  done
+  printf '\n\033[31;1mNAMED STOP [LIVE_REPO_NOT_ADDED] #%s LANDED, but %s was NOT added to live-repos.json (%s), so its PRs still need a review. Add "%s" to live-repos.json in a seq-bin PR (review-class: its reviewer checks the Launch-ready PASS on #%s).\033[0m\n' "$2" "$1" "$why" "$1" "$2"
+  return 1
+}
+# --- live_add end ---
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
 
@@ -1590,8 +1682,11 @@ if [ -n "$OWNER_WORDS" ]; then
   fi
   say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
-PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels)" \
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
+PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
+jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
+  || unverified network "PR #$PR's label history (its issue events) could not be read, so whether it was ever labeled review-required is unknown"
 # An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
 HEAD="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
@@ -1612,6 +1707,19 @@ case "$GATE_RC" in
   75) unverified network "$GATE_MSG" ;;
   *) die "$GATE_MSG" ;;
 esac
+# A LANDED LAUNCH LISTS ITS REPO (new until launched, 23 Nov 2026). A PR carrying a fresh reviewer's Launch-ready
+# PASS for this head (launch_pass, the launch gate's own check) in a repo not yet on live-repos.json is added to
+# the list by the exit trap once the land ends green (live_add). Never under her bypass: no review stood.
+LIVE_ADD=""
+if ! jq -r '.body // ""' <<<"$PRMETA" | owner_override && review_text <<<"$PRMETA" | signoff Launch-ready >/dev/null; then
+  LREPO="$(pr_repo <<<"$PRMETA")"
+  if [ -n "$LREPO" ] && ! live_repo "$LREPO"; then
+    LMSG="$(launch_pass "$PR" "$PRMETA" "$HEAD" "the launch")"; LRC=$?
+    [ "$LRC" -eq 75 ] && unverified network "PR #$PR's Launch-ready PASS could not be checked against its head"
+    if [ "$LRC" -eq 0 ]; then LIVE_ADD="$LREPO"; say "    launch: $LREPO goes on live-repos.json once this land ends green"
+    else say "    launch: $LREPO stays off live-repos.json, its Launch-ready PASS does not count: $LMSG"; fi
+  fi
+fi
 # CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
 # 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
 # every section, and only a click would have caught it. So a PR that changes a screen people operate

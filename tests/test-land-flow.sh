@@ -36,6 +36,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LAND="${LAND_UNDER_TEST:-$HERE/../land}"
 [ -f "$LAND" ] || { echo "FAIL: no land at $LAND"; exit 1; }
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+# her bypass writes ENG-CHECK DUE into HANDOFF: never her real ~/HANDOFF.md from a test (case 21 points it elsewhere)
+export LAND_HANDOFF="$W/HANDOFF.md"
 FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 # The build-first shape (staging on every land, a named e2e workflow, promote.yml on a green e2e)
 # has no live repo since both creator dashboards retired (3 Nov 2026), so these cases run against a
@@ -815,51 +817,112 @@ LAND="$BROKEN" run_promote build-first-fixture
 check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
 check "…without ever watching run 777" eval '! grep -q "^api repos/{owner}/{repo}/actions/runs/777" "$FAKE/calls"'
 
-echo "=== 21. her bypass files ONE engineering check on Open Loops after a green land, never blocks it ==="
+echo "=== 21. her bypass: ENG-CHECK DUE goes into HANDOFF Today, never a row on her Open Loops list (22 Nov 2026) ==="
+# A stub intake stands where Boss OS would be, with a token and the real poster beside land, so a land that
+# posted anything at all would be counted here. Every case below must leave it at zero posts.
 cat > "$W/stub.mjs" <<'JS'
 import http from "node:http"; import fs from "node:fs";
 const dir = process.argv[2];
 http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => {
-  if (fs.existsSync(`${dir}/down`)) { res.writeHead(500); return res.end("down"); }
-  fs.appendFileSync(`${dir}/posts.jsonl`, JSON.stringify({ auth: req.headers.authorization, body: JSON.parse(b) }) + "\n");
+  fs.appendFileSync(`${dir}/posts.jsonl`, JSON.stringify({ url: req.url, body: b }) + "\n");
   res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true, data: { action: "opened" } }));
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
-cp "$HERE/../open-loops.mjs" "$W/"   # the poster sits beside land (the fixture copy runs from $W)
+cp "$HERE/../open-loops.mjs" "$W/"   # the poster beside land: LAND_DIR is $W when land re-runs from its temp copy
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
 OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$W/api/port")/intake"
-export LAND_OPEN_LOOPS_NO_VAULT=1 BOSS_OPEN_LOOPS_TOKEN=olt_test OPEN_LOOPS_URL
-posts() { cat "$W/api/posts.jsonl" 2>/dev/null; }
-# shellcheck disable=SC2034 # read inside the eval below
-TOMORROW="$(TZ=America/Chicago date -v+1d +%F 2>/dev/null || TZ=America/Chicago date -d tomorrow +%F)"
-fixture approvalprep
+export BOSS_OPEN_LOOPS_TOKEN=olt_test OPEN_LOOPS_URL
+no_posts() { [ ! -s "$W/api/posts.jsonl" ]; }
+# A HANDOFF shaped like hers: PINNED above, a Jobs list and a hand-written line in Today, a session note below.
+mkdir -p "$W/hh"; export LAND_HANDOFF="$W/hh/HANDOFF.md"
+handoff_fixture() {
+  cat > "$LAND_HANDOFF" <<MD
+# HANDOFF
+## PINNED
+PINNED-STAYS
+## Today (temporary: in flight + done today; replaced each day, never stacked)
+<!-- TODAY:START -->
+<!-- day:$(date '+%Y-%m-%d') -->
+_$(date '+%A %-d %B %Y')_
+
+<!-- JOBS:START -->
+### Jobs (open task sheets, from \`land-after --status\`)
+- none open
+<!-- JOBS:END -->
+
+HAND-WRITTEN-STATUS
+
+### Session note — earlier
+<!-- compaction:x trigger:auto session:sess-1 -->
+NOTE-BODY
+<!-- TODAY:END -->
+AFTER-TODAY-STAYS
+MD
+}
+due_lines() { grep -c '^- ENG-CHECK DUE ' "$LAND_HANDOFF" 2>/dev/null || true; }
+# Today's region only (between the markers), so a line written outside it never counts.
+today_region() { sed -n '/<!-- TODAY:START -->/,/<!-- TODAY:END -->/p' "$LAND_HANDOFF"; }
+handoff_fixture; cp "$LAND_HANDOFF" "$W/hh/before"; fixture approvalprep
 echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=the important thing is our rules dont allow things to be built cheaply'
 check "a changed screen with no review, under --owner: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
 check "…her words went on the PR" eval 'jq -r .body "$FAKE/pr-meta" | grep -q "^Owner override: \"the important thing is our rules"'
-check "…ONE row was posted, with the token" eval '[ "$(posts | grep -c .)" -eq 1 ] && posts | jq -e "select(.auth == \"Bearer olt_test\")" >/dev/null'
-check "…titled for the repo and PR, owner claude, due tomorrow (Central)" eval 'posts | jq -e --arg d "$TOMORROW" "select(.body.title == \"Engineering check of seq23/approvalprep#7 (landed under her bypass)\" and .body.owner == \"claude\" and .body.next_date == \$d and .body.stop == \"OWNER_BYPASS_PR_7\")" >/dev/null'
-check "…with the finish line" eval 'posts | jq -e "select(.body.finish_line == \"every automatic fail in engineering.md checked on the merged diff; fails fixed or dated\")" >/dev/null'
-check "…and land says it filed it" has "engineering check of seq23/approvalprep#7 filed on Open Loops for tomorrow"
-: > "$W/api/posts.jsonl"; fixture approvalprep
-run_land approvalprep
-check "a land with no bypass posts nothing" eval '[ "$RC" -eq 0 ] && [ -z "$(posts)" ]'
+check "…NOTHING was posted to Open Loops (stub intake: zero posts)" no_posts
+check "…ONE line, ENG-CHECK DUE <repo>#<pr> <merge sha>, inside Today" eval '[ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed under her bypass "'
+check "…right after the Jobs list, above the hand-written status" eval 'today_region | grep -A1 "^<!-- JOBS:END -->" | tail -1 | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 "'
+check "…every other line of HANDOFF exactly as it was" eval 'diff <(grep -v "^- ENG-CHECK DUE " "$LAND_HANDOFF") "$W/hh/before" >/dev/null'
+check "…and land prints the line" has "ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA"
+# The real PreCompact hook rewrites Today on every compaction: the line must survive it the same day.
+printf '#!/bin/bash\necho "land-after: no open task sheets"\n' > "$W/hh/la-stub"; chmod +x "$W/hh/la-stub"
+echo '{"session_id":"sess-2","trigger":"auto"}' | HOME="$W/hh" LAND_AFTER_BIN="$W/hh/la-stub" HANDOFF_TEST_SUMMARY="## In flight
+- SESS-2-NOTE" bash "$HERE/../handoff-on-compact.sh" >/dev/null 2>&1
+check "…a same-day compaction (the real hook) keeps the line in Today" eval 'grep -q SESS-2-NOTE "$LAND_HANDOFF" && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA "'
 fixture approvalprep; : > "$FAKE/merged"
 echo '{"files":[{"path":"README.md"}],"body":"x\n\nOwner override: \"ship it now please\" (21 Nov 2026 10:00 CT)","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=ship it now please'
-check "a re-run on the already-merged bypass PR files it (the intake keeps one row per repo#PR)" eval '[ "$RC" -eq 0 ] && [ "$(posts | grep -c .)" -eq 1 ]'
-: > "$W/api/posts.jsonl"; : > "$W/api/down"; fixture approvalprep
+check "a re-run on the already-merged bypass PR: rc 0, still ONE line, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && no_posts'
+perl -pi -e 's{^- ENG-CHECK DUE (seq23/approvalprep#7 )}{- ENG-CHECK DONE $1}' "$LAND_HANDOFF"   # the reviewer ran
+run_land approvalprep '--owner=ship it now please'
+check "a re-run after the check was marked DONE: rc 0, no new DUE line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && grep -c "^- ENG-CHECK DONE seq23/approvalprep#7 " "$LAND_HANDOFF" | grep -qx 1'
+handoff_fixture; fixture approvalprep
+run_land approvalprep
+check "a land with no bypass: rc 0, no ENG-CHECK line, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && no_posts'
+printf '# HANDOFF\n## PINNED\nPINNED-STAYS\n' > "$LAND_HANDOFF"; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "the API down: the land still ends rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
-check "…and says so loudly, with the command that files it by hand" eval 'has "NAMED STOP [BYPASS_CHECK_NOT_FILED]" && has "File it by hand:  cd "'
-rm -f "$W/api/down"; : > "$W/api/posts.jsonl"; fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+check "a HANDOFF with no Today section yet: one is added at the end, with the line inside it" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 " && head -3 "$LAND_HANDOFF" | grep -q PINNED-STAYS'
+handoff_fixture; perl -0pi -e 's{<!-- JOBS:START -->.*?<!-- JOBS:END -->\n\n}{}s' "$LAND_HANDOFF"; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "a Today with no Jobs list yet: the line goes right under the date line, above the hand-written status" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -A1 "^_.*_$" | tail -1 | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 " && grep -q HAND-WRITTEN-STATUS "$LAND_HANDOFF"'
+# Outage: HANDOFF cannot be written. The PR IS landed; the land must not end a silent 0.
+handoff_fixture; chmod 555 "$W/hh"; chmod 444 "$LAND_HANDOFF"; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+chmod 755 "$W/hh"; chmod 644 "$LAND_HANDOFF"
+check "HANDOFF unwritable: merged, but exit 4, never 0" eval 'merge_called && [ "$RC" -eq 4 ]'
+check "…NAMED STOP [ENG_CHECK_NOT_NOTED] saying it LANDED, with the line to add by hand" eval 'has "NAMED STOP [ENG_CHECK_NOT_NOTED] #7 LANDED" && has "  - ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA"'
+check "…and still nothing posted to Open Loops" no_posts
+# Failures under her bypass: refused with their STOPPED line, non-zero, no line, nothing posted.
+handoff_fixture; fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 echo '[{"name":"test","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/1"}]' > "$FAKE/checks"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "a red PR under --owner is still refused, and nothing is filed" eval '[ "$RC" -eq 1 ] && ! merge_called && [ -z "$(posts)" ]'
-unset LAND_OPEN_LOOPS_NO_VAULT BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
+check "a red PR under --owner: refused rc 1 with STOPPED, not merged, no line, nothing posted" eval '[ "$RC" -eq 1 ] && has "STOPPED" && ! merge_called && [ "$(due_lines)" -eq 0 ] && no_posts'
+fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+echo 401 > "$FAKE/head"
+echo '[{"name":"Cloudflare Pages","bucket":"pass","link":"https://dash.cloudflare.com/x/fe13d725-4827-bc619"}]' > "$FAKE/checks"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "auth failed (401) under --owner: exit 75 'STOPPED: could not verify (auth)', not merged, no line, nothing posted" eval '[ "$RC" -eq 75 ] && has "STOPPED: could not verify (auth)" && ! merge_called && [ "$(due_lines)" -eq 0 ] && no_posts'
+fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+echo ratelimit > "$FAKE/checks"
+OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=1 bash "$LAND" 7 '--owner=land it deploy it finish it' 2>&1)"; RC=$?
+check "rate limited past the bound under --owner: exit 75 'STOPPED: could not verify (rate limit)', not merged, no line, nothing posted" eval '[ "$RC" -eq 75 ] && has "STOPPED: could not verify (rate limit)" && ! merge_called && [ "$(due_lines)" -eq 0 ] && no_posts'
+# The land path never names the intake at all (the old poster block is gone, not kept beside the new line).
+check "land and land-after name no Open Loops poster or intake" eval '! grep -nE "open-loops|open_loops|/intake|OPEN_LOOPS" "$HERE/../land" "$HERE/../land-after"'
+unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
+export LAND_HANDOFF="$W/HANDOFF.md"
 
 # Rule 0: this must have examined something.
 [ "$passes" -ge 160 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }

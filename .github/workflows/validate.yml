@@ -76,6 +76,8 @@ jobs:
         run: ./tests/test-land-local-ship.sh
       - name: pass-line posts only a sign-off land will read, through land's own parser
         run: ./tests/test-pass-line.sh
+      - name: the Open Loops mirror hook rebuilds only after Open Loops changes and is never silent on an outage
+        run: ./tests/test-open-loops-mirror-hook.sh
 
       # seq-bin's last land step fast-forwards the launchd copy (the main checkout, ~/bin), never
       # the worktree land runs from (20 Nov 2026: a false STOPPED after a good merge from a worktree).

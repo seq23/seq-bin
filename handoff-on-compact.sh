@@ -14,6 +14,15 @@ set -uo pipefail
 
 HANDOFF="$HOME/HANDOFF.md"
 INPUT="$(cat)"
+# A SUBAGENT's compaction is not a session handoff (23 Nov 2026, measured): Claude Code fires PreCompact
+# inside subagents with the PARENT's session_id and transcript_path plus the subagent's agent_id, so this
+# hook re-summarised the coordinator's transcript with an Opus call (~94K weighted tokens, up to 150 s added
+# to the subagent's compaction) for every subagent compaction: ~290 a day once the 200K cap made them
+# frequent. The subagent's own record is its task sheet. Unreadable input falls through to a normal note.
+if [ -n "$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null)" ]; then
+  echo "handoff-on-compact: skipped, a subagent's compaction (its task sheet is its record)" >&2
+  exit 0
+fi
 SESSION="$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)"
 TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)"
 TRIGGER="$(printf '%s' "$INPUT" | jq -r '.trigger // "auto"' 2>/dev/null)"

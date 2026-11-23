@@ -84,5 +84,25 @@ run sess-11 "## In flight
 [ "$(grep -c 'JOBS:START' "$H")" = 1 ] || bad "jobs: the Jobs list was stacked, not replaced"
 grep -q 'job-a' "$H" && bad "jobs: a closed sheet stayed on the list"
 grep -q 'NOTE-SESS-10b' "$H" || bad "jobs: a session note was lost when the Jobs list was replaced"
+# Subagent compactions (23 Nov 2026): Claude Code sends the PARENT's session_id + transcript_path plus the
+# subagent's agent_id. The hook must not call the model or touch HANDOFF.md then; a main-session compaction
+# with the same transcript still does both; unreadable input still writes a stamped note.
+mkdir -p "$T/fakebin"; printf '{"type":"user","message":{"content":"TRANSCRIPT-TEXT"}}\n' > "$T/t.jsonl"
+cat > "$T/fakebin/claude" <<'SH'
+#!/bin/bash
+echo call >> "$HOME/claude-calls"; printf '## In flight\n- FAKE-MODEL-NOTE\n'
+SH
+chmod +x "$T/fakebin/claude"
+hook(){ printf '%s' "$1" | PATH="$T/fakebin:$PATH" bash "$S" >/dev/null 2>&1; }
+before="$(cat "$H")"
+hook "{\"session_id\":\"sess-12\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\",\"agent_id\":\"a123\",\"agent_type\":\"builder\"}"
+[ -e "$T/claude-calls" ] && bad "subagent compaction: the summariser model was called"
+[ "$(cat "$H")" = "$before" ] || bad "subagent compaction: HANDOFF.md was changed"
+hook "{\"session_id\":\"sess-12\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\"}"
+[ "$(cat "$T/claude-calls" 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || bad "main compaction: the summariser was not called exactly once"
+grep -q 'FAKE-MODEL-NOTE' "$H" || bad "main compaction: the model's note was not written"
+before="$(cat "$H")"
+hook 'not json {'
+[ "$(cat "$H")" = "$before" ] && bad "unreadable hook input: no stamped note was written"
 rm -rf "$T"
 [ $fail = 0 ] && echo "PASS test-handoff-keeps-curated" || exit 1

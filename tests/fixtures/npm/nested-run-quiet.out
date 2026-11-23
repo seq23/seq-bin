@@ -1,0 +1,11 @@
+
+> nest-fixture@1.0.0 deploy
+> npm run typecheck -w @apm/api >/dev/null || exit 2
+
+npm error Lifecycle script `typecheck` failed with error:
+npm error code 2
+npm error path /tmp/land-fixture/nest/packages/api
+npm error workspace @apm/api@1.0.0
+npm error location /tmp/land-fixture/nest/packages/api
+npm error command failed
+npm error command sh -c echo "src/index.ts(3,7): error TS2304: Cannot find name foo."; exit 2

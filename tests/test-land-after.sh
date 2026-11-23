@@ -88,6 +88,7 @@ case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   red) echo "4/5  e2e"; printf '\033[31mSTOPPED: NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 9 ended failure\033[0m\n'; exit 1 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   ratelimited) printf '\033[31mSTOPPED: could not verify (rate limit) — HTTP 403: API rate limit exceeded. Nothing was merged by this step\033[0m\n'; exit 75 ;;
+  deployfail) printf '\033[31mSTOPPED: the deploy from abc1234 failed: npm ci in the deploy worktree at abc1234 exited 1: %s. #%s IS MERGED and main is green (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions).\033[0m\n' "$(cat "$F/why")" "$1"; : > "$F/merged"; exit 1 ;;
   authfail) printf '\033[31mSTOPPED: could not verify (auth) — HTTP 401: Requires authentication. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   secret) echo "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456 CLOUDFLARE_API_TOKEN=cfsecretvalue123"
           echo "npm npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 google AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
@@ -209,6 +210,13 @@ la 12 --task cantconfirm; lockgone
 check "land green but the merge unreadable after: FAIL unknown, never PASS" eval 'line1 "$T/cantconfirm.md" | grep -q "^STATUS: FAIL .*unknown: land exited 0 but the merge could not be confirmed" && [ ! -e "$T/done/cantconfirm.md" ]'
 
 echo "=== rule 0: land exits 0 having merged nothing ==="
+# 22 Nov 2026 review F2: a deploy STOPPED line runs ~400 characters; the cause (npm's "Missing: ...") sat past
+# a 220-character cut. The reason here is land's own deploy_tail of captured real npm output.
+reset; echo deployfail > "$FAKE/land-mode"
+( eval "$(sed -n '/^deploy_tail() {/,/^}/p' "$HERE/../land")"; deploy_tail "$HERE/fixtures/npm/ci-mismatch.out" ) > "$FAKE/why"
+la 28 --task deployjob; lockgone
+check "a failed deploy: line 1 keeps npm's cause, past the old 220-character cut" eval 'line1 "$T/deployjob.md" | grep -q "^STATUS: FAIL t/fixture#28 .*npm error code EUSAGE .*Missing: left-pad@1.3.0 from lock file"'
+check "…and still says the PR is merged, with no colour codes" eval 'line1 "$T/deployjob.md" | grep -q "#28 IS MERGED and main is green" && ! line1 "$T/deployjob.md" | grep -qF "$(printf "\033")"'
 reset; echo nomerge > "$FAKE/land-mode"
 la 14 --task nomerge; lockgone
 check "FAIL LAND_MERGED_NOTHING, not PASS" eval 'line1 "$T/nomerge.md" | grep -q "^STATUS: FAIL .*LAND_MERGED_NOTHING" && [ ! -e "$T/done/nomerge.md" ]'

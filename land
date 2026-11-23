@@ -282,7 +282,7 @@ case "$NAME" in
   # 2 Oct 2026: e2e is dispatch-only; `land <pr>` ships a small change on the fast check and runs
   # the suite after a large one — and then WAITS for deploy.yml (PROMOTE_WF) instead of racing it
   # with a second `d1 migrations apply` from the laptop.
-  boss-os)              DEPLOY="npm run -s vault:run -- npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
+  boss-os)              DEPLOY="npm run --loglevel=error vault:run -- npm run deploy:production" ; SELF="" ; E2E_WF="e2e" ; PROMOTE_WF="deploy.yml" ;;
   # 6 Oct 2026: Workers Builds is upload-only for west-peek-live. Production ships ONLY through
   # .github/workflows/deploy-cloudflare-worker.yml ("Deploy Cloudflare Worker"): workflow_run on a
   # green "Repository validation" of a push to main, D1 migrations, deploy, postdeploy smoke. Before
@@ -414,7 +414,7 @@ case "$NAME" in
   # Added 8 Oct 2026 when land refused aplayer-mode #47.
   # 8 Nov 2026: wrangler has no local login, so both scripts run inside the Boss OS vault (its
   # CLOUDFLARE_API_TOKEN), as boss-os does (#75); without it #64 stopped on "set CLOUDFLARE_API_TOKEN".
-  aplayer-mode)         DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")' ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
+  aplayer-mode)         DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && scripts/deploy-api-production.sh && scripts/deploy-web-production.sh")' ; SELF="" ; SMOKE="https://api.aplayermode.com/v1/health" ;;
   # Time2Read (seq23/dailystory, time-2-read.com): Supabase edge functions ship through the repo's
   # own deploy-functions.yml ("Deploy Edge Functions") on every push to main, with its post-deploy
   # boot smoke; land waits for that run on the merge commit. The front end is a Lovable project and
@@ -603,28 +603,145 @@ record_production() { # $1 sha  $2 note -> one GitHub deployment (environment pr
 # main's checks read — not a branch checkout, not a working tree with edits. node_modules is
 # shared from this checkout when the lockfile at that sha is identical (the repo convention for
 # worktrees); otherwise `npm ci` in the worktree.
-deploy_at() { # $1 sha  $2 command
-  local sha="$1" cmd="$2" wt rc
-  wt="$(mktemp -d -t land-deploy.XXXXXX)" || return 1
-  git worktree add -q --detach "$wt" "$sha" || { rm -rf "$wt"; echo "     could not check out $sha into a worktree"; return 1; }
+# THE REAL ERROR IN THE STOPPED LINE, ONE DEPLOY AT A TIME, NEVER ON A FULL DISK (22 Nov 2026: boss-os
+# and aplayer-mode#103 landed at the same time, each ran a full `npm ci` into its own temp copy, the
+# disk filled, and both stopped with "read the error, it explains itself" over no error at all: the
+# install ran --silent and the deploy under `npm run -s`, which silences every npm beneath it).
+#  - DEPLOY_WHY is set on every failure, and every caller puts it in its STOPPED line: the step, its
+#    exit code and its own last lines, or "it printed nothing". A 2-line tail of land carries it.
+#  - one local deploy at a time on this Mac: an flock on LAND_DEPLOY_LOCK, released when the deploy
+#    ends or its land dies (no stale lock to clear); a second waits up to LAND_DEPLOY_WAIT seconds,
+#    then stops, named. The lock is taken BEFORE free space is read, so the space read is the space it gets.
+#  - free space is read before any install (a linked node_modules is no install, so it is not read then):
+#    under LAND_MIN_FREE_GB stops, named; an unreadable read
+#    stops too, never "enough". 4 GB: one install here is ~0.7 GB of node_modules plus npm's cache
+#    and the build, and macOS swap (22 GB at peak) grows on the same volume.
+# --- deploy_at begin (tests/test-land-local-ship.sh evals this block verbatim) ---
+LAND_MIN_FREE_GB="${LAND_MIN_FREE_GB:-4}"
+LAND_DEPLOY_WAIT="${LAND_DEPLOY_WAIT:-1800}"
+LAND_DEPLOY_LOCK="${LAND_DEPLOY_LOCK:-${XDG_CACHE_HOME:-$HOME/.cache}/land/deploy.lock}"
+DEPLOY_WHY=""; DEPLOY_OUT=""
+# deploy_tail: why a step failed, on one line. The tool's own last lines (a TypeScript or wrangler
+# error), then npm's error block from its top, where npm names the cause ("code EUSAGE", "Missing:
+# left-pad@1.3.0 from lock file", "ENOSPC: no space left on device"). npm's filler is dropped: bare
+# "npm error" lines, its usage/options block and the one-line summary before it, "Run "npm help",
+# "A complete log", "command failed", the path/location/errno/syscall fields, where a package sits
+# (`node_modules/x`, `x@"1" from the root project`), "For a full report see:" and its file path, and
+# `> ` script headers (22 Nov 2026 review: a tail of the last 3 lines kept only the filler and lost
+# the cause). npm's lines are kept in order until the 400-character budget runs out, never a fixed
+# count of them (recheck: ERESOLVE names the conflict in its 6th line, "peer react@... from react-dom@...").
+deploy_tail() { # $1 file -> that line, each part at most 120 characters and 400 in all, or "it printed nothing"
+  local t
+  t="$(perl -CSD -Mutf8 -e '
+    my (@tool, @npm, $usage);
+    while (<>) {
+      s/\e\[[0-9;?]*[A-Za-z]//g; s/\r//g; s/^\s+|\s+$//g;
+      next if !length || /^> /;
+      if (s/^npm (?:error|ERR!)(?:\s+|$)//) {
+        next if $usage;
+        if ($_ eq "Usage:") { $usage = 1; pop @npm; next }
+        next if !length || /^A complete log of this run/ || /^Run "npm help / || $_ eq "command failed"
+          || /^(?:path|location|errno|syscall) / || m{^node_modules/} || / from the root project$/
+          || $_ eq "For a full report see:" || m{^/\S+$};
+        push @npm, $_;
+      } else { $usage = 0; push @tool, $_ }
+    }
+    my $cap = sub { length($_[0]) > 120 ? substr($_[0], 0, 119) . "…" : $_[0] };
+    @tool = @tool[-(@npm ? 2 : 3)..-1] if @tool > (@npm ? 2 : 3);
+    my $o = join(" | ", map { $cap->($_) } @tool);
+    my $pre = "npm error ";
+    for my $l (map { $cap->($_) } @npm) {
+      my $head = ($o eq "" ? "" : " | ") . $pre;
+      if (length($o) + length($head) + length($l) > 400) {
+        my $room = 400 - length($o) - length($head) - 1;
+        $o .= $head . substr($l, 0, $room) . "…" if $room >= 20;
+        last;
+      }
+      $o .= $head . $l; $pre = "";
+    }
+    print $o;
+  ' "$1" 2>/dev/null)"
+  [ -n "$t" ] || { echo "it printed nothing"; return; }
+  printf '%s\n' "$t"
+}
+deploy_step() { # $1 step name  $2 dir  $3 command -> its exit code; output to $DEPLOY_OUT, then the terminal
+  local rc
+  # Into a file, never a pipe: a pipe makes land wait for every process holding its write end, so a
+  # daemon the deploy left behind (`wrangler dev &`) would hang land for ever, holding the deploy lock
+  # (22 Nov 2026 recheck). Bash waits for the command alone; its leftovers can write to the file all
+  # they like. The output is printed when the step ends.
+  (cd "$2" && eval "$3") 9>&- > "$DEPLOY_OUT" 2>&1; rc=$?
+  cat "$DEPLOY_OUT"
+  [ "$rc" -eq 0 ] || DEPLOY_WHY="$1 exited $rc: $(deploy_tail "$DEPLOY_OUT")"
+  return "$rc"
+}
+deploy_lock() { # -> 0 holding the one local-deploy lock on fd 9 | 1 with DEPLOY_WHY set
+  local waited=0 r
+  mkdir -p "$(dirname "$LAND_DEPLOY_LOCK")" 2>/dev/null && exec 9>>"$LAND_DEPLOY_LOCK" \
+    || { DEPLOY_WHY="NAMED STOP [DEPLOY_LOCK_UNAVAILABLE] the one-deploy-at-a-time lock $LAND_DEPLOY_LOCK could not be opened, so nothing was deployed"; return 1; }
+  while :; do
+    perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 2; flock($fh, LOCK_EX|LOCK_NB) and exit 0; exit($!{EWOULDBLOCK} ? 1 : 2)'; r=$?
+    case "$r" in
+      0) printf '%s %s %s\n' "$$" "${NAME:-?}" "$(date '+%H:%M')" > "$LAND_DEPLOY_LOCK.owner" 2>/dev/null; return 0 ;;
+      1) : ;;
+      *) exec 9>&-; DEPLOY_WHY="NAMED STOP [DEPLOY_LOCK_UNAVAILABLE] the one-deploy-at-a-time lock $LAND_DEPLOY_LOCK could not be taken (perl flock failed), so nothing was deployed"; return 1 ;;
+    esac
+    [ "$waited" -eq 0 ] && echo "     waiting: another local deploy is running on this Mac (pid, repo, start: $(cat "$LAND_DEPLOY_LOCK.owner" 2>/dev/null || echo "unknown")); one at a time, up to $(((LAND_DEPLOY_WAIT + 59) / 60)) min"
+    if [ "$waited" -ge "$LAND_DEPLOY_WAIT" ]; then
+      exec 9>&-
+      DEPLOY_WHY="NAMED STOP [DEPLOY_SLOT_BUSY] another local deploy held this Mac's deploy lock for $(((LAND_DEPLOY_WAIT + 59) / 60)) min (pid, repo, start: $(cat "$LAND_DEPLOY_LOCK.owner" 2>/dev/null || echo "unknown")), so nothing was deployed; land again when it finishes"
+      return 1
+    fi
+    sleep "${LAND_DEPLOY_POLL:-10}"; waited=$((waited + ${LAND_DEPLOY_POLL:-10}))
+  done
+}
+deploy_space() { # -> 0 when the temp volume has LAND_MIN_FREE_GB free | 1 with DEPLOY_WHY set (low or unreadable)
+  local tmp="${TMPDIR:-/tmp}" kb
+  kb="$(df -Pk "$tmp" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  case "$kb" in ''|*[!0-9]*)
+    DEPLOY_WHY="NAMED STOP [DISK_UNREADABLE] free space on $tmp could not be read (df said '${kb:-nothing}'), so nothing was installed or deployed"; return 1 ;;
+  esac
+  [ "$kb" -ge $((LAND_MIN_FREE_GB * 1024 * 1024)) ] && return 0
+  DEPLOY_WHY="NAMED STOP [DISK_LOW] only $((kb / 1024 / 1024)) GB free on $tmp; a local deploy needs $LAND_MIN_FREE_GB GB (a full npm install into a temp copy), so nothing was installed or deployed. Free space, then land again"
+  return 1
+}
+deploy_at() { # $1 sha  $2 command -> its exit code; on failure DEPLOY_WHY says why, for the caller's STOPPED line
+  local sha="$1" cmd="$2" wt rc inst
+  DEPLOY_WHY=""
+  deploy_lock || return 1
+  wt="$(mktemp -d -t land-deploy.XXXXXX)" || { exec 9>&-; DEPLOY_WHY="could not make a temp folder for the deploy worktree"; return 1; }
+  DEPLOY_OUT="$wt.out"
+  if ! git worktree add -q --detach "$wt" "$sha" 9>&- >"$DEPLOY_OUT" 2>&1; then
+    DEPLOY_WHY="could not check out ${sha:0:7} into a worktree: $(deploy_tail "$DEPLOY_OUT")"
+    rm -rf "$wt" "$DEPLOY_OUT"; exec 9>&-; return 1
+  fi
+  rc=0; inst=""
   if [ -f "$wt/package-lock.json" ]; then
     if [ -d "$REPO_DIR/node_modules" ] && cmp -s "$wt/package-lock.json" "$REPO_DIR/package-lock.json"; then
       ln -s "$(cd "$REPO_DIR/node_modules" && pwd -P)" "$wt/node_modules"
-    else
-      (cd "$wt" && npm ci --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; return 1; }
-    fi
-  elif [ -f "$wt/package.json" ]; then
+    else inst=ci; fi
+  elif [ -f "$wt/package.json" ]; then inst=install; fi
+  # Free space is read only before an install: a linked node_modules writes next to nothing.
+  if [ -n "$inst" ] && ! deploy_space; then rc=1
+  elif [ "$inst" = ci ]; then
+    deploy_step "npm ci in the deploy worktree at ${sha:0:7}" "$wt" 'npm ci --no-audit --no-fund --loglevel=error'; rc=$?
+  elif [ "$inst" = install ]; then
     # No lockfile at the sha (aplayer-mode keeps it untracked): `npm ci` cannot run, and a worktree
     # with no node_modules builds nothing (8 Oct 2026: wrangler "Could not resolve @apm/ai", 22
     # errors). Install in the worktree, seeded with this checkout's lockfile when there is one, so
     # workspace packages resolve to the sha's own packages/, not this checkout's working tree.
     [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$wt/package-lock.json"
-    (cd "$wt" && npm install --no-audit --no-fund --silent) || { git worktree remove --force "$wt" >/dev/null 2>&1; echo "     npm install failed in the worktree at ${sha:0:7}"; return 1; }
+    deploy_step "npm install in the deploy worktree at ${sha:0:7}" "$wt" 'npm install --no-audit --no-fund --loglevel=error'; rc=$?
   fi
-  (cd "$wt" && echo "     in $wt @ ${sha:0:7}: $cmd" && eval "$cmd"); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "     in $wt @ ${sha:0:7}: $cmd"
+    deploy_step "the deploy command" "$wt" "$cmd"; rc=$?
+  fi
   git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-  return $rc
+  rm -f "$DEPLOY_OUT"; exec 9>&-
+  return "$rc"
 }
+# --- deploy_at end ---
 smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to serve the new version
   local body="" i
   for i in 1 2 3 4 5 6 7 8; do
@@ -644,6 +761,7 @@ smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to s
 # take 10-58 min, so a minute late is nothing). Empty = still running, or not read (the callers' own
 # deadlines turn a run that is never read into a named stop, never a pass).
 POLL_SECS="${LAND_POLL_SECS:-60}"
+MAIN_WAIT_SECS="${LAND_MAIN_WAIT_SECS:-2700}" # how long main's check run (or a deploy's gate run) is waited for
 run_conclusion() { # $1 run id -> its conclusion, empty while it runs or when unreadable
   gh api "repos/{owner}/{repo}/actions/runs/$1" --jq '.conclusion // ""' 2>/dev/null
 }
@@ -751,7 +869,7 @@ pr_large_reason() { large_reason "$PR_ADD" "$PR_DEL" "$PR_FILES" <<<"$PR_PATHS";
 # said "No migrations to apply". So the D1 calls use the caller's CLOUDFLARE_API_TOKEN when set, else
 # run inside the Boss OS vault (its CLOUDFLARE_API_TOKEN), as the aplayer-mode deploy does. The token
 # is injected, never printed. An unreadable list still fails closed (d1_none_pending).
-vault_run() { (cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- "$@"); }
+vault_run() { (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- "$@"); }
 cf_token_run() { # run "$@" in $PWD with a Cloudflare token: the caller's, else the vault's
   if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then "$@"; return; fi
   vault_run sh -c 'cd "$1" && shift && exec "$@"' sh "$PWD" "$@"
@@ -760,10 +878,14 @@ D1_APPLY='cf_token_run env CI=true npx wrangler d1 migrations apply "$D1_PREMERG
 D1_LIST='cf_token_run npx wrangler d1 migrations list "$D1_PREMERGE" --remote'
 touches_migrations() { grep -qE '(^|/)migrations/'; } # PR paths on stdin -> 0 when any is a migration
 d1_none_pending() { # $1 sha -> 0 only when wrangler, from that sha's wrangler.toml, says nothing is pending
+  # Not in a $( ) subshell, so DEPLOY_WHY reaches the caller's STOPPED line; the output goes to a file.
   local out
-  out="$(deploy_at "$1" "$D1_LIST" 2>&1)" || { printf '%s\n' "$out" | tail -5; return 1; }
-  printf '%s\n' "$out" | tail -3
-  grep -q 'No migrations to apply' <<<"$out"
+  out="$(mktemp -t land-d1-list.XXXXXX)" || { DEPLOY_WHY="could not make a temp file for the D1 list"; return 1; }
+  deploy_at "$1" "$D1_LIST" > "$out" 2>&1 || { tail -5 "$out"; rm -f "$out"; return 1; }
+  tail -3 "$out"
+  grep -q 'No migrations to apply' "$out"; local r=$?
+  [ "$r" -eq 0 ] || DEPLOY_WHY="wrangler did not say 'No migrations to apply': $(deploy_tail "$out")"
+  rm -f "$out"; return "$r"
 }
 d1_apply_at() { # $1 sha -> 0 applied and nothing left pending | 1 (named by the caller)
   deploy_at "$1" "$D1_APPLY" || return 1
@@ -895,7 +1017,7 @@ if [ "$MODE" = promote ]; then
     if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed; read the $PROMOTE_VIA run."; fi
     [ "$(production_sha)" = "$CAND" ] || die "$PROMOTE_VIA ran green for ${CAND:0:7} but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
   else
-  deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed — read the error, it explains itself. Production's record is unchanged (still ${PROD:-unrecorded})."
+  deploy_at "$CAND" "$DEPLOY" || die "production deploy from ${CAND:0:7} failed: $DEPLOY_WHY. Production's record is unchanged (still ${PROD:-unrecorded})."
   say "4/4  smoke + record"
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "production deployed from ${CAND:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   record_production "$CAND" "land --promote from ${CAND:0:7}"
@@ -1444,7 +1566,7 @@ case "$GATE_RC" in
 esac
 if [ -n "$D1_PREMERGE" ]; then
   pr_size "$PR"
-  d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] PR #$PR was NOT merged: applying its migrations to D1 $D1_PREMERGE from ${HEAD:0:7} failed (output above), and $NAME deploys itself the moment it merges. Fix the migration, then land $PR again."
+  d1_premerge "$HEAD" || die "NAMED STOP [D1_MIGRATION_FAILED] D1 migrations from ${HEAD:0:7} failed: ${DEPLOY_WHY:-see the output above}. PR #$PR was NOT merged (they go to D1 $D1_PREMERGE first, because $NAME deploys itself the moment it merges). Fix the migration, then land $PR again."
 fi
 
 RECENT="$(recent_lands "$PR")"
@@ -1549,11 +1671,32 @@ case "$PR_WF" in *\"*|*\\*) PR_WF="" ;; esac   # never splice a quote or backsla
 #   - the PR's workflow is also deploy.yml's gate (or there is no gate),
 #   - that workflow has nothing that differs between a PR and a push (no github.event / github.ref).
 # Any doubt or unreadable answer → main is watched exactly as before.
+# --- deploy_gates begin (tests/test-land-gate-wait.sh; same_tree and pick_run tests eval it too) ---
+# deploy_gates < a deploy workflow's text -> the workflow names its `workflow_run: workflows:` waits for,
+# one per line; nothing when it is not triggered by workflow_run. Reads all three shapes in her repos:
+# `[CI]`, `["Repository validation"]` (spaces kept: the old sed squeezed them out, so westpeek-live's gate
+# never matched a run name), and a `- name` list on the lines below.
+deploy_gates() {
+  awk '
+    function emit(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/^["\047]|["\047]$/, "", s); if (s != "") print s }
+    function flush(b,   n, i, a) { gsub(/[][]/, "", b); n = split(b, a, ","); for (i = 1; i <= n; i++) emit(a[i]) }
+    /^[ \t]*#/ || /^[ \t]*$/ { next }
+    { ind = match($0, /[^ \t]/) }
+    st == 0 && /^[ \t]*workflow_run:/ { st = 1; wind = ind; next }
+    st == 1 && ind <= wind { exit }
+    st == 1 && /^[ \t]*workflows:/ { r = $0; sub(/^[ \t]*workflows:[ \t]*/, "", r); sub(/[ \t]+#.*$/, "", r)
+      if (r == "") { st = 2; next } buf = r; if (buf ~ /\]/) { flush(buf); exit } st = 3; next }
+    st == 2 { if ($0 ~ /^[ \t]*-[ \t]/) { s = $0; sub(/^[ \t]*-[ \t]*/, "", s); sub(/[ \t]+#.*$/, "", s); emit(s); next }
+              if ($0 ~ /^[ \t]*\[/) { buf = $0; if (buf ~ /\]/) { flush(buf); exit } st = 3; next } exit }
+    st == 3 { buf = buf $0; if (buf ~ /\]/) { flush(buf); exit } }
+  '
+}
+# --- deploy_gates end ---
 # --- same_tree begin (tests/test-land-same-tree.sh) ---
 SAME_TREE=""
 [ -n "${MERGESHA:-}" ] || MERGESHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null || true)"
 if [ -n "${RUNID:-}" ] && [ -n "${HEAD:-}" ] && [ -n "$MERGESHA" ] && [ -n "$PR_WF" ] && [ "${LAND_SAME_TREE:-1}" = 1 ]; then
-  ST_GATE="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
+  ST_GATE="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | deploy_gates | head -1)"
   ST_WFPATH="$(gh api "repos/{owner}/{repo}/actions/workflows?per_page=100" --jq ".workflows[] | select(.name == \"$PR_WF\") | .path" 2>/dev/null | head -1)"
   ST_TM="$(gh api "repos/{owner}/{repo}/commits/$MERGESHA" --jq '.commit.tree.sha' 2>/dev/null || true)"
   ST_TH="$(gh api "repos/{owner}/{repo}/commits/$HEAD" --jq '.commit.tree.sha' 2>/dev/null || true)"
@@ -1568,10 +1711,12 @@ fi
 if [ -n "$SAME_TREE" ]; then
   echo "     same tree as the tested head ${HEAD:0:7} (tree ${ST_TM:0:7}): the PR's green \"$PR_WF\" run $RUNID checked exactly this code — shipping on it, main's run of the same files is not waited for"
   CONC=success
+  GREEN="the merged code passed on the PR's run (main's own run not watched)"
 else
+GREEN="main is green"
 # --- pick_run begin (tests/test-land-pick-run.sh evals this block verbatim) ---
 # Read from origin/main, not the working tree: the local checkout may be on any branch (step 3).
-GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | sed -n 's/^ *workflows: *\[ *\([^],]*\).*/\1/p' | head -1 | tr -d '"'"'"' ')"
+GATE_WF="$(git show origin/main:.github/workflows/deploy.yml 2>/dev/null | deploy_gates | head -1)"
 pick_run() {
   # $1: a jq boolean over one run. Newest matching run of the gate workflow (deploy.yml's); else
   # of the workflow that ran the PR's own checks (PR_WF); else the newest match.
@@ -1650,7 +1795,7 @@ fi
 # (One read per poll, a minute apart: run_conclusion, above. The `gh run watch` that came first polled
 # every 3 s and was dropped, 22 Nov 2026.)
 CONC=""
-DEADLINE=$(( $(date +%s) + 2700 ))   # 45 min: CI here runs ~14 min, twice over is ample
+DEADLINE=$(( $(date +%s) + MAIN_WAIT_SECS ))   # 45 min: CI here runs ~14 min, twice over is ample
 while :; do
   CONC="$(run_conclusion "$RID")"
   [ -n "$CONC" ] && break
@@ -1678,7 +1823,7 @@ case "$CONC" in
       say "     cancelled with NO later commit on main — nothing superseded it. Re-running $RID."
       gh run rerun "$RID" >/dev/null 2>&1 || die "could not re-run $RID. #$PR IS MERGED and NOT deployed; main has no green run for $MSHA. Re-run it by hand: gh run rerun $RID"
       sleep 15
-      CONC=""; DEADLINE=$(( $(date +%s) + 2700 ))
+      CONC=""; DEADLINE=$(( $(date +%s) + MAIN_WAIT_SECS ))
       while :; do
         CONC="$(run_conclusion "$RID")"
         [ -n "$CONC" ] && [ "$CONC" != "cancelled" ] && break
@@ -1770,6 +1915,7 @@ pages_cf_sources() { # -> one JSON array [{name,inc,exc}] of the Pages projects 
   # vault's Cloudflare token reads the same Pages list; it is held in a variable, never printed.
   n=""; [ -z "$tok" ] || n="$(curl -sS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$tok") "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects?page=1" 2>/dev/null)"
   if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$n"; then
+    # -s stays here alone: this reads a VALUE, and npm's banner would land in it. Empty = unreadable.
     tok="$( (cd "$HOME/GitHub/boss-os" 2>/dev/null && npm run -s vault:run -- sh -c 'printf %s "$CLOUDFLARE_API_TOKEN"') 2>/dev/null)"
     [ -n "$tok" ] || return 1
   fi
@@ -1882,16 +2028,16 @@ if [ -z "$DEPLOY" ] && { [ "$NAME" = bin ] || [ "$NAME" = seq-bin ]; }; then
   LIVE_DIR="$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')"
   say "5/5  $NAME $SELF"
   if [ "$(git -C "$LIVE_DIR" rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
-    say "LANDED — #$PR is merged, main is green, and $LIVE_DIR is already at $(git -C "$LIVE_DIR" log --oneline -1)."
+    say "LANDED — #$PR is merged, $GREEN, and $LIVE_DIR is already at $(git -C "$LIVE_DIR" log --oneline -1)."
     exit 0
   fi
   LIVE_CUR="$(git -C "$LIVE_DIR" symbolic-ref -q --short HEAD)"
-  [ "$LIVE_CUR" = main ] || die "#$PR IS MERGED and main is green, but $LIVE_DIR is on ${LIVE_CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $LIVE_DIR checkout main && git -C $LIVE_DIR merge --ff-only origin/main"
+  [ "$LIVE_CUR" = main ] || die "#$PR IS MERGED and $GREEN, but $LIVE_DIR is on ${LIVE_CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $LIVE_DIR checkout main && git -C $LIVE_DIR merge --ff-only origin/main"
   LIVE_DIRTY="$(git -C "$LIVE_DIR" status --porcelain --untracked-files=no)"
   OVERLAP="$(comm -12 <(cut -c4- <<<"$LIVE_DIRTY" | sed '/^$/d' | sort -u) <(git -C "$LIVE_DIR" diff --name-only HEAD origin/main | sort -u))"
-  [ -z "$OVERLAP" ] || die "#$PR IS MERGED and main is green, but the merge changes file(s) with uncommitted local edits in $LIVE_DIR ($(echo "$OVERLAP" | paste -sd, -)), so it was NOT fast-forwarded and launchd still runs the old scripts. Nothing of hers was touched."
-  git -C "$LIVE_DIR" merge -q --ff-only origin/main || die "#$PR IS MERGED and main is green, but $LIVE_DIR could not fast-forward to origin/main (local commits?), so launchd still runs the old scripts."
-  say "LANDED — #$PR is merged, main is green, and $LIVE_DIR is at $(git -C "$LIVE_DIR" log --oneline -1) (her $(grep -c . <<<"$LIVE_DIRTY") uncommitted change(s) untouched)."
+  [ -z "$OVERLAP" ] || die "#$PR IS MERGED and $GREEN, but the merge changes file(s) with uncommitted local edits in $LIVE_DIR ($(echo "$OVERLAP" | paste -sd, -)), so it was NOT fast-forwarded and launchd still runs the old scripts. Nothing of hers was touched."
+  git -C "$LIVE_DIR" merge -q --ff-only origin/main || die "#$PR IS MERGED and $GREEN, but $LIVE_DIR could not fast-forward to origin/main (local commits?), so launchd still runs the old scripts."
+  say "LANDED — #$PR is merged, $GREEN, and $LIVE_DIR is at $(git -C "$LIVE_DIR" log --oneline -1) (her $(grep -c . <<<"$LIVE_DIRTY") uncommitted change(s) untouched)."
   exit 0
 fi
 # --- launchd end ---
@@ -1899,8 +2045,8 @@ fi
 if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
-  [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
-  d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] #$PR IS MERGED and $NAME is deploying it, but D1 $D1_PREMERGE still has migrations pending (or could not be read) on ${MSHA_PAGES:0:7} — the live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
+  [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
+  d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] D1 migrations unconfirmed on ${MSHA_PAGES:0:7}: ${DEPLOY_WHY:-see the output above}. #$PR IS MERGED and $NAME is deploying it against D1 $D1_PREMERGE. The live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
   [ -z "${DROPPED_PUSH:-}" ] || pages_kick || say "     the Pages build could not be triggered (above); pages_watch will report it unconfirmed"
   PW_OUT="$(pages_watch "$MSHA_PAGES" "$PAGES_PROJECTS")"; PW=$?
   [ -z "$PW_OUT" ] || printf '%s\n' "$PW_OUT"
@@ -1911,20 +2057,20 @@ if [ -z "$DEPLOY" ]; then
   case "$PW" in
     0) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded"
        elif [ -n "$DEPLOY_WF" ]; then echo "     all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded (upload only — production moves through $DEPLOY_WF)"
-       else say "LANDED — #$PR is merged, main is green, and all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded (each listed above)."; fi ;;
+       else say "LANDED — #$PR is merged, $GREEN, and all $PW_N Cloudflare builds on ${MSHA_PAGES:0:7} succeeded (each listed above)."; fi ;;
     2) if [ -n "$PROMOTE_VIA" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; staging is published by the repo's own workflow on push"
        elif [ -n "$DEPLOY_WF" ]; then echo "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; production moves through $DEPLOY_WF"
        else say "     no Cloudflare check-run on ${MSHA_PAGES:0:7}; $NAME $SELF — nothing to run"; fi ;;
     3) if [ -n "$PROMOTE_VIA" ]; then echo "     staging: no deploy needed — no file changed in ${MSHA_PAGES:0:7} is in any Cloudflare project's build watch paths"
        elif [ -n "$DEPLOY_WF" ]; then echo "     no Cloudflare build needed on ${MSHA_PAGES:0:7} (build watch paths); production moves through $DEPLOY_WF"
-       else say "LANDED — #$PR is merged, main is green; no deploy needed: no file changed in ${MSHA_PAGES:0:7} is in any Cloudflare project's build watch paths (listed above)."; fi ;;
-    *) die "#$PR IS MERGED and main's workflows are green, but not every Cloudflare build on ${MSHA_PAGES:0:7} succeeded — the project(s) listed above were NOT confirmed updated: $(echo "$PW_OUT" | grep -E 'FAILED|TIMED OUT|not yet reported' | sed 's/^ *//' | paste -sd';' -). Fix main now." ;;
+       else say "LANDED — #$PR is merged, $GREEN; no deploy needed: no file changed in ${MSHA_PAGES:0:7} is in any Cloudflare project's build watch paths (listed above)."; fi ;;
+    *) die "#$PR IS MERGED and $GREEN, but not every Cloudflare build on ${MSHA_PAGES:0:7} succeeded — the project(s) listed above were NOT confirmed updated: $(echo "$PW_OUT" | grep -E 'FAILED|TIMED OUT|not yet reported' | sed 's/^ *//' | paste -sd';' -). Fix main now." ;;
   esac
   # A DEPLOY_WF route is not deployed by that build either: production moves only when the repo's
   # own deploy workflow finishes on the merge commit, so it falls through to the wait below.
   { [ -n "$PROMOTE_VIA" ] && [ -n "$E2E_WF" ]; } || [ -n "$DEPLOY_WF" ] || exit 0
   if [ -n "$DEPLOY_WF" ] && ! git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null; then
-    die "NAMED STOP [DEPLOY_WF_MISSING] #$PR IS MERGED and main is green, but $NAME's route ships production through .github/workflows/$DEPLOY_WF and origin/main carries no such file, so production was NOT confirmed. Fix the route in ~/bin/land (or restore the workflow)."
+    die "NAMED STOP [DEPLOY_WF_MISSING] #$PR IS MERGED and $GREEN, but $NAME's route ships production through .github/workflows/$DEPLOY_WF and origin/main carries no such file, so production was NOT confirmed. Fix the route in ~/bin/land (or restore the workflow)."
   fi
 fi
 
@@ -1964,12 +2110,63 @@ deploy_wf_pick() {
   return 0
 }
 # --- deploy_wf end ---
+# --- gate_wait begin (tests/test-land-gate-wait.sh evals this block verbatim) ---
+# A DEPLOY THAT FIRES ON CI IS NOT LOOKED FOR UNTIL CI HAS FINISHED (22 Nov 2026, west-peek-os #584):
+# the same-tree path shipped on the PR's run without waiting for main's, so land printed "#584 IS
+# MERGED and main is green" and, 5 min later, NAMED STOP [DEPLOY_RUN_NOT_FOUND] — while CI on 4d69588
+# was still queued on runners, and deploy.yml runs only on CI's workflow_run. Where the deploy workflow
+# fires on workflow_run (and not on push), land first waits, as long as main's own check wait
+# (MAIN_WAIT_SECS), for the gate's run that carries the merge, and only then starts the deploy run's
+# appear window. Every outcome is distinct: success goes on (and only now is main called green); a red
+# or cancelled run refuses; an unread list is "could not verify" (exit 75); a run still going at the
+# bound is a NAMED STOP with exit 75 and is never cancelled.
+deploy_fires_on_push() { grep -qE '^on:[[:space:]]*(push|\[[^]]*push)|^[[:space:]]{1,4}push:' ; } # deploy workflow text on stdin
+gate_wait() { # $1 merge sha  $2 gate workflow names, one per line -> 0 once a run carrying $1 finished success
+  local sha="$1" gj rows pick rid st conc said="" seen deadline=$(( $(date +%s) + MAIN_WAIT_SECS ))
+  gj="$(printf '%s\n' "$2" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+  while :; do
+    rows="$(UNREADABLE_STOP=MAIN_CI_UNREADABLE UNREADABLE_WHY="whether main's CI passed on ${sha:0:7} is unknown, so $DEPLOY_WF's run was not looked for" \
+            queue_gh run list --branch main --limit 30 --json databaseId,headSha,status,conclusion,name \
+            -q ".[] | select(.name as \$n | $gj | any(.[]; . == \$n)) | \"\(.databaseId)\t\(.headSha)\t\(.status)\t\(.conclusion // \"\")\"")" || {
+      printf '\n\033[31mSTOPPED: could not verify — main'"'"'s CI on %s could not be read. #%s IS MERGED; main is NOT confirmed green and production is NOT confirmed. Land again when GitHub answers: land %s\033[0m\n' "${sha:0:7}" "$PR" "$PR"
+      exit "$LAND_RC_UNVERIFIED"; }
+    pick="$(deploy_wf_pick "$sha" <<<"$rows")"
+    if [ -n "$pick" ]; then
+      IFS=$'\t' read -r rid st conc <<<"$pick"
+      if [ "$st" = completed ]; then
+        [ "$conc" = success ] || die "#$PR IS MERGED, but main's CI run $rid on ${sha:0:7} finished $conc, so $DEPLOY_WF will not ship it. Main is NOT green; production NOT updated. Read that run: gh run view $rid --log-failed"
+        echo "     main's CI run $rid carrying ${sha:0:7}: completed success"
+        return 0
+      fi
+      [ -n "$said" ] || echo "     main's CI run $rid on ${sha:0:7} is $st — $DEPLOY_WF fires only when it finishes, so waiting for it first (up to $((MAIN_WAIT_SECS / 60)) min)"
+      said=1
+    else
+      seen="$(awk -F'\t' -v s="$sha" '$2 == s && $3 == "completed" {print $1 " " $4}' <<<"$rows" | head -1)"
+      if [ -n "$seen" ] && [ "$(git rev-parse origin/main 2>/dev/null)" = "$sha" ]; then
+        die "NAMED STOP [MAIN_CI_CANCELLED] #$PR IS MERGED, but main's CI run ${seen% *} on ${sha:0:7} ended ${seen#* } with no later commit to carry it, so $DEPLOY_WF will not fire. Main is NOT confirmed green; production NOT updated. Re-run it: gh run rerun ${seen% *}"
+      fi
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      if [ -n "$said" ]; then
+        printf '\n\033[31mSTOPPED: could not verify — NAMED STOP [MAIN_CI_UNFINISHED] #%s IS MERGED, but main'"'"'s CI run %s on %s was still %s after %s min (left running, not cancelled), so %s has not fired. Main is NOT confirmed green; production NOT confirmed. Land again once it finishes: land %s\033[0m\n' "$PR" "$rid" "${sha:0:7}" "$st" "$((MAIN_WAIT_SECS / 60))" "$DEPLOY_WF" "$PR"
+        exit "$LAND_RC_UNVERIFIED"
+      fi
+      die "NAMED STOP [MAIN_CI_NOT_FOUND] #$PR IS MERGED, but no run of $(printf '%s' "$2" | paste -sd/ -) carrying ${sha:0:7} appeared on main in $((MAIN_WAIT_SECS / 60)) min, so $DEPLOY_WF has nothing to fire on. Main is NOT confirmed green; production NOT confirmed: gh run list --branch main"
+    fi
+    sleep "$POLL_SECS"; git fetch -q origin main 2>/dev/null || true
+  done
+}
+# --- gate_wait end ---
 DEPLOY_WF="${DEPLOY_WF:-deploy.yml}"
+# --- deploy_wait begin (tests/test-land-gate-wait.sh evals this block verbatim) ---
 if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -z "$E2E_WF" ]; then
-  say "5/5  $NAME deploys itself on green main through $DEPLOY_WF — waiting for its run on the merge commit rather than racing it"
+  say "5/5  $NAME deploys itself through $DEPLOY_WF — waiting for its run on the merge commit rather than racing it"
   DMSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
-  [ -n "$DMSHA" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so the $DEPLOY_WF run was not found. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
+  [ -n "$DMSHA" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so the $DEPLOY_WF run was not found. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
   git fetch -q origin main 2>/dev/null || true
+  DTEXT="$(git show "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null)"
+  DGATES="$(deploy_gates <<<"$DTEXT")"
+  if [ -n "$DGATES" ] && ! deploy_fires_on_push <<<"$DTEXT"; then gate_wait "$DMSHA" "$DGATES"; GREEN="main is green"; fi
   DCEIL=$(( $(last_duration "$DEPLOY_WF") * 3 / 2 )); [ "$DCEIL" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || DCEIL=${LAND_WAIT_FLOOR_SECS:-360}
   DAPPEAR=$((SECONDS + ${LAND_DEPLOY_APPEAR_SECS:-300})); DSEEN=""
   while :; do
@@ -1978,7 +2175,7 @@ if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -
     DPICK="$(deploy_wf_pick "$DMSHA" <<<"$DROWS")"
     if [ -z "$DPICK" ]; then
       DSEEN="$(awk -F'\t' -v s="$DMSHA" '$2 == s {print $1 " " $4}' <<<"$DROWS" | paste -sd, -)"
-      [ "$SECONDS" -lt "$DAPPEAR" ] || die "NAMED STOP [DEPLOY_RUN_NOT_FOUND] #$PR IS MERGED and main is green, but no $DEPLOY_WF run that ships ${DMSHA:0:7} appeared in $(( ${LAND_DEPLOY_APPEAR_SECS:-300} / 60 )) min${DSEEN:+ (only skipped/cancelled: $DSEEN)}. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
+      [ "$SECONDS" -lt "$DAPPEAR" ] || die "NAMED STOP [DEPLOY_RUN_NOT_FOUND] #$PR IS MERGED and $GREEN, but no $DEPLOY_WF run that ships ${DMSHA:0:7} appeared in $(( ${LAND_DEPLOY_APPEAR_SECS:-300} / 60 )) min${DSEEN:+ (only skipped/cancelled: $DSEEN)}. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
       sleep 15; git fetch -q origin main 2>/dev/null || true; continue
     fi
     IFS=$'\t' read -r DRID DST DCONC <<<"$DPICK"
@@ -1993,11 +2190,12 @@ if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -
   done
   case "$DCONC" in
     success) if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR IS MERGED and $DEPLOY_WF run $DRID finished green, but the production smoke check failed. Read that run: gh run view $DRID"; fi
-             say "LANDED — #$PR is merged, main is green, and $DEPLOY_WF run $DRID shipped ${DMSHA:0:7} to production."; exit 0 ;;
-    ""|unreadable) die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
-    *)       die "#$PR IS MERGED and main is green, but $DEPLOY_WF run $DRID finished $DCONC. Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
+             say "LANDED — #$PR is merged, $GREEN, and $DEPLOY_WF run $DRID shipped ${DMSHA:0:7} to production."; exit 0 ;;
+    ""|unreadable) die "#$PR IS MERGED and $GREEN, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
+    *)       die "#$PR IS MERGED and $GREEN, but $DEPLOY_WF run $DRID finished $DCONC. Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
   esac
 fi
+# --- deploy_wait end ---
 
 if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   say "5/5  deploying"
@@ -2008,15 +2206,15 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   # deploy runs through deploy_at: a throwaway detached worktree of the commit main just went green
   # on, removed afterwards.
   DSHA="$(git rev-parse origin/main 2>/dev/null)"
-  [ -n "$DSHA" ] || die "#$PR IS MERGED and main is green, but origin/main could not be read here, so nothing was deployed. Re-run 'land $PR'."
-  deploy_at "$DSHA" "$DEPLOY" || die "deploy failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)"
-  say "LANDED — #$PR is merged, main is green, and it is in production."
+  [ -n "$DSHA" ] || die "#$PR IS MERGED and $GREEN, but origin/main could not be read here, so nothing was deployed. Re-run 'land $PR'."
+  deploy_at "$DSHA" "$DEPLOY" || die "the deploy from ${DSHA:0:7} failed: $DEPLOY_WHY. #$PR IS MERGED and $GREEN (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions)."
+  say "LANDED — #$PR is merged, $GREEN, and it is in production."
   exit 0
 fi
 
 # STAGING NOW; PRODUCTION AS THE PLAN DECIDES (routes with STAGING / E2E_WF / PROMOTE_VIA; header).
 MSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
-[ -n "$MSHA" ] || die "#$PR IS MERGED and main is green, but its merge commit could not be read, so nothing was deployed. Re-run 'land $PR'."
+[ -n "$MSHA" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so nothing was deployed. Re-run 'land $PR'."
 E2E_CONC=""; REASON=""; LAST=""; PROD_STATE=""; SMALL_NOTE=""
 if [ -n "$E2E_WF" ]; then
   E2E_CONC="$(e2e_verdict "$MSHA")"
@@ -2026,7 +2224,7 @@ if [ -n "$E2E_WF" ]; then
   # sha it already runs a second time.
   case "$PROD_STATE" in unrecorded|unreadable) : ;; *)
     if [ "$PROD_STATE" = "$MSHA" ] || git merge-base --is-ancestor "$MSHA" "$PROD_STATE" 2>/dev/null; then
-      say "5/5  LANDED — #$PR is merged, main is green, and production already runs ${PROD_STATE:0:7}$([ "$PROD_STATE" = "$MSHA" ] || echo ", which contains ${MSHA:0:7}") (GitHub Deployment record). Nothing to deploy."
+      say "5/5  LANDED — #$PR is merged, $GREEN, and production already runs ${PROD_STATE:0:7}$([ "$PROD_STATE" = "$MSHA" ] || echo ", which contains ${MSHA:0:7}") (GitHub Deployment record). Nothing to deploy."
       exit 0
     fi ;;
   esac
@@ -2049,22 +2247,22 @@ say "5/5  ${MSHA:0:7}: $PLAN${E2E_WF:+ ($E2E_WF on this sha: ${E2E_CONC:-no comp
 ship_production() { # $1 sha  $2 deployment note
   say "     production <- ${1:0:7}"
   if [ -n "$PROMOTE_VIA" ]; then
-    promote_dispatch "$1" "$2" || die "#$PR IS MERGED and main is green, but $NAME's own $PROMOTE_VIA did not ship ${1:0:7} — production untouched. Read that run: gh run list --workflow $PROMOTE_VIA"
+    promote_dispatch "$1" "$2" || die "#$PR IS MERGED and $GREEN, but $NAME's own $PROMOTE_VIA did not ship ${1:0:7} — production untouched. Read that run: gh run list --workflow $PROMOTE_VIA"
     if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed; read the $PROMOTE_VIA run."; fi
     [ "$(production_sha)" = "$1" ] || die "#$PR IS MERGED and $PROMOTE_VIA ran green for ${1:0:7}, but production's GitHub Deployment record does not name it. Read that run before assuming production moved."
     echo "     recorded by $PROMOTE_VIA: production = ${1:0:7}"
   else
-  deploy_at "$1" "$DEPLOY" || die "#$PR IS MERGED and main is green, but the production deploy from ${1:0:7} failed — read the error, it explains itself (a missing CLOUDFLARE_ACCOUNT_ID surfaces as a 7403 that reads like permissions and is not)."
+  deploy_at "$1" "$DEPLOY" || die "the production deploy from ${1:0:7} failed: $DEPLOY_WHY. #$PR IS MERGED and $GREEN (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions)."
   if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR deployed to production from ${1:0:7} but the smoke check failed. Not recorded; read the deploy output."; fi
   [ -z "$E2E_WF" ] || record_production "$1" "$2"
   fi
-  say "LANDED — #$PR is merged, main is green, ${STAGING:+staging and }production run ${1:0:7}."
+  say "LANDED — #$PR is merged, $GREEN, ${STAGING:+staging and }production run ${1:0:7}."
 }
 for step in $PLAN; do
   case "$step" in
     staging)
       say "     staging <- ${MSHA:0:7}"
-      deploy_at "$MSHA" "$STAGING" || die "#$PR IS MERGED and main is green, but the STAGING deploy from ${MSHA:0:7} failed — read the error, it explains itself. Production untouched."
+      deploy_at "$MSHA" "$STAGING" || die "the STAGING deploy from ${MSHA:0:7} failed: $DEPLOY_WHY. #$PR IS MERGED and $GREEN; production untouched."
       ;;
     production)
       if [ -z "$SMALL_NOTE" ]; then
@@ -2075,7 +2273,7 @@ for step in $PLAN; do
         # green e2e someone dispatched) is waited for first, never deployed on top of.
         say "     SMALL CHANGE — $SMALL_NOTE (last $E2E_WF verdict on main: ${LAST%%$'\t'*}). To prove it with the suite instead: land $PR --run-e2e"
         promote_wait_inflight
-        if [ "$(production_sha)" = "$MSHA" ]; then say "LANDED — #$PR is merged, main is green, and the repo's own $PROMOTE_WF already shipped ${MSHA:0:7} to production."
+        if [ "$(production_sha)" = "$MSHA" ]; then say "LANDED — #$PR is merged, $GREEN, and the repo's own $PROMOTE_WF already shipped ${MSHA:0:7} to production."
         else ship_production "$MSHA" "land #$PR, $SMALL_NOTE"; fi
       fi
       ;;

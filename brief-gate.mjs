@@ -24,6 +24,12 @@ let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
   if(t==='builder'){
     const need=['THE REVIEW YOU WILL FACE','HOW IT BREAKS','SELF-PROOF','HER WORDS'].filter(k=>!p.includes(k));
     if(!/REVIEW CLASS:\s*(NONE|MONEY|CHILDREN|PRIVATE-DATA|STORE|DELETE|LAUNCH)\s*(—|–|--|-|:)\s*\S/.test(p))need.push('REVIEW CLASS: none|money|children|private-data|store|delete|launch — <why> (the builder copies it into the PR body as Review class: ...; land refuses a PR without it)');
+    // 4. Built from HER words, not mine (her words 24 Nov 2026: "I TOLD U THE FUCKING BRIEFS WERE WRONG TO BEGIN WITH IVE
+    //    COMPLAINED ABOUT BRIEFS COUNTLESS TIMES"; Noelle was built wrong twice, and extras nobody asked for burned her week).
+    if(!/ASKED FOR:\s*["“][^"”]{8,}["”]/.test(p))need.push('ASKED FOR: "<her own words, verbatim, in quotes>" (what she asked for, never my summary)');
+    if(!/NOT ASKED FOR:\s*\S/.test(p))need.push('NOT ASKED FOR: <every item I added on my own, or "none">');
+    if(!/HER YES:\s*["“][^"”]{1,}["”]/.test(p))need.push('HER YES: "<her reply, verbatim>" to the 5-line "what this builds" preview I sent her in chat before launch');
+    if(!/CLAUDE BECAUSE:\s*\S/.test(p))need.push('CLAUDE BECAUSE: <why this build cannot run on Codex via `ai-run --role worker`> (her ruling 3 Nov 2026: hands-on work runs on Codex; Claude builders spend her Claude week)');
     if(need.length){console.error('BRIEF_INCOMPLETE: builder brief is missing: '+need.join(', ')+'. Write it from the agent-brief skill (reviewer checks first, promise audit, same value everywhere, outage test per external read).');process.exit(2);}
   }
   if(t==='reviewer'&&!p.includes('RECHECK OF:')){

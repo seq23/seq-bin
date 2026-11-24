@@ -6,10 +6,32 @@
 //     into the PR body as `Review class: ...`: land refuses a PR without it (eng check of #155, 23 Nov 2026).
 //  3. A review of a PR whose task sheet says FAIL is a re-check: the brief must carry "RECHECK OF:" (the failed items
 //     only, her ruling 21 Nov 2026), never a fresh full review (42% of the weekend went on reviews and redos).
+//  4. CLAIMS PROVEN (her order 24 Nov 2026, "do this now", after both builder fails that day were PR-body claims nobody
+//     had run: "writes are refused" when they ran, "runner on @main" with the old pin still in the file): a reviewer is
+//     not launched on a PR whose `## Self-review` has an unproven line. Every bullet or table row there must carry the
+//     command that proves it in backticks and what it printed after a `→` (or `->`), or be `n/a — <why, 4+ words>`.
+//     Structure only: whether the proof is honest is the reviewer's call (it re-runs the commands). A PR body that
+//     cannot be read refuses the launch (Rule 0: never a pass on nothing read).
 // No limit on how many agents run (her words 22 Nov 2026: "i dont want to cap the agents. i just want to make them work efficiently").
 import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+// The PR body: from BRIEF_GATE_PR_BODIES/<owner>_<repo>_<n>.md in tests, else `gh pr view`; null when unreadable.
+const prBody=(ref)=>{const[r,n]=ref.split('#');const d=process.env.BRIEF_GATE_PR_BODIES;
+  try{if(d)return readFileSync(join(d,r.replace('/','_')+'_'+n+'.md'),'utf8');
+    return execFileSync('gh',['pr','view',n,'--repo',r,'--json','body','-q','.body'],{encoding:'utf8',timeout:7000,stdio:['ignore','pipe','ignore']});}
+  catch{return null}};
+// Each line of `## Self-review` that is not proven -> [lines]; null when the section is missing or holds no rows.
+export const unproven=(body)=>{const L=String(body).split('\n');const i=L.findIndex(l=>/^#{1,4}\s*self-review\b/i.test(l.trim()));
+  if(i<0)return null;const bad=[];let rows=0,table=false;
+  for(const raw of L.slice(i+1)){const l=raw.trim();if(/^#{1,4}\s/.test(l))break;
+    if(/^\|/.test(l)){if(/^\|[\s|:-]+\|?$/.test(l))continue;if(!table){table=true;continue}}else table=false; // a table's first row is its header
+    if(!/^(\||[-*+]\s|\d+[.)]\s)/.test(l))continue;rows++;
+    const na=/\bn\/a\b\s*(—|–|--|-|:)\s*(\S+\s+){3}\S/i.test(l);
+    const proof=/`[^`]{3,}`[^`]*?(→|->)\s*\S/.test(l);
+    if(!na&&!proof)bad.push(l.slice(0,90));}
+  return rows?bad:null};
 let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
   let j;try{j=JSON.parse(s)}catch{process.exit(0)}
   if(j.tool_name!=='Agent')process.exit(0);
@@ -32,8 +54,17 @@ let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
     if(!/CLAUDE BECAUSE:\s*\S/.test(p))need.push('CLAUDE BECAUSE: <why this build cannot run on Codex via `ai-run --role worker`> (her ruling 3 Nov 2026: hands-on work runs on Codex; Claude builders spend her Claude week)');
     if(need.length){console.error('BRIEF_INCOMPLETE: builder brief is missing: '+need.join(', ')+'. Write it from the agent-brief skill (reviewer checks first, promise audit, same value everywhere, outage test per external read).');process.exit(2);}
   }
+  const prs=new Set([...(i.prompt||'').matchAll(/([\w.-]+\/[\w.-]+)#(\d+)/g)].map(m=>(m[1]+'#'+m[2]).toLowerCase()));
+  if(t==='reviewer'){
+    const out=[];
+    for(const ref of prs){const b=prBody(ref);
+      if(b===null){out.push(`${ref}: its PR body could not be read (retry; never a review on nothing read)`);continue}
+      const u=unproven(b);
+      if(u===null)out.push(`${ref}: no \`## Self-review\` section with rows`);
+      else if(u.length)out.push(`${ref}: ${u.length} unproven line(s), first: "${u[0]}"`);}
+    if(out.length){console.error(`CLAIMS_UNPROVEN: ${out.join('; ')}. Each line under ## Self-review must carry the command run, in backticks, and what it printed after → (e.g. - runner pinned to main: \`grep -n runner_ref .github/workflows/*.yml\` → no match), or be "n/a — <why, 4+ words>". Send the PR back to its builder to prove or delete each claim (builder.md check 5, her order 24 Nov 2026); never review it as is.`);process.exit(2);}
+  }
   if(t==='reviewer'&&!p.includes('RECHECK OF:')){
-    const prs=new Set([...(i.prompt||'').matchAll(/([\w.-]+\/[\w.-]+)#(\d+)/g)].map(m=>(m[1]+'#'+m[2]).toLowerCase()));
     let failed=[];
     try{
       const dir=process.env.TASK_SHEETS_DIR||join(homedir(),'Work','tasks');

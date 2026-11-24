@@ -4,6 +4,8 @@
 # two idle rounds are STUCK (exit 3); a Codex limit is exit 75 with the round's work pushed;
 # a reviewer's fail sends Codex back and READY needs a result newer than the review.
 set -uo pipefail
+# HOME is moved to a temp dir and CI runners have no git identity: give the commits one.
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 HERE="$(cd "$(dirname "$0")/.." && pwd)"; BP="$HERE/build-phases"
 fail=0; ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fail=1; }
 

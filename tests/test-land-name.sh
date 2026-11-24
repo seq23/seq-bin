@@ -3,6 +3,8 @@
 # ~/.boss-os/runtime, so a worktree off it was named "runtime" and land stopped with "no deploy
 # route"). A path remote (local or test repos) leaves the folder name in charge.
 set -euo pipefail
+# CI runners have no git identity: give the test commits one.
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BLOCK="$(sed -n '/^# --- name begin/,/^# --- name end/p' "$HERE/../land")"
 [ -n "$BLOCK" ] || { echo "FAIL: land no longer carries the name block"; exit 1; }

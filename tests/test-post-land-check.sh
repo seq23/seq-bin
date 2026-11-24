@@ -228,7 +228,7 @@ check "--now <form key> never runs an outcome check" eval '[ "$(orun --now o/sit
 if [ -x /usr/bin/sandbox-exec ]; then
   reset; osheet; probe="$HOME/.plc-sandbox-probe-$$"
   handoff "$(oline "awk 'BEGIN{print 1 > \"$probe\"}' && $FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
-  check "the check runs in a no-write sandbox: a write is refused, COULDNT, exit 1" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 1 ] && [ ! -e "$probe" ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+  check "the check runs in a file-write sandbox: a FILE write that passes the read-only gate (awk print > file) is refused, COULDNT, exit 1" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 1 ] && [ ! -e "$probe" ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
   [ ! -e "$probe" ] || unlink "$probe"
   reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
   check "…and a read-only check under the sandbox still counts (PASS)" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'

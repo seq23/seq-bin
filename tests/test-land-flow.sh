@@ -943,6 +943,7 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
 cp "$HERE/../open-loops.mjs" "$W/"   # the poster beside land: LAND_DIR is $W when land re-runs from its temp copy
+cp "$HERE/../post-land-check" "$W/"   # its read-only gate, which land asks about every Outcome check (same LAND_DIR)
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
@@ -1104,6 +1105,14 @@ check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line 
 check "…and prints the Not built section word for word between its markers" eval 'sed -n "/^--- NOT BUILT (PR #7, word for word) ---$/,/^--- END NOT BUILT ---$/p" <<<"$OUT" | sed "1d;\$d" | diff - <(printf "%s\n" "- the job-target lever (G1)" "- G19, the sales reader") >/dev/null'
 run_land approvalprep
 check "…a re-run on the merged PR adds no second OUTCOME-CHECK line" eval '[ "$(outcome_lines)" -eq 1 ]'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: echo ok && curl -s -d x=1 https://e.x/api | wc -l — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: a check that could write (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "curl -d sends data" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: gh issue create -t x -b y — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "…under her bypass: never blocked, says the check was refused, and writes no DUE line carrying that command" eval '[ "$RC" -eq 0 ] && merge_called && has "outcome check refused, never run" && has "Outcome: UNDECLARED (owner bypass)" && ! today_region | grep -q "gh issue create"'
 handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome" "$FAKE/no-notbuilt"
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'

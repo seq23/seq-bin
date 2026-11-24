@@ -117,7 +117,8 @@ jobs:
       # 23 Nov 2026: a touched form needs a marked TEST submission on preview before land.
       - name: land's forms gate refuses an undeclared or unproved form
         run: ./tests/test-land-forms.sh
-      # post-land-check RUNS each due outcome check itself (no-write sandbox on the Mac), refuses a PASS below the
+      # post-land-check RUNS each due outcome check itself, only after its read-only gate passes it (a check that could
+      # write is never run) and in a file-write sandbox on the Mac; it refuses a PASS below the
       # floor, and an outage, no comment or ai-run down stays DUE, NOT CHECKED, exit non-zero. ENG-CHECK and FORM-PROOF too.
       - name: post-land-check never calls an unchecked outcome working
         run: ./tests/test-post-land-check.sh

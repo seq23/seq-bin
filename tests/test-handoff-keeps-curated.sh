@@ -63,6 +63,23 @@ run sess-10 "## In flight
 - NOTE-SESS-10"
 grep -q 'Carried over from 2000-01-01' "$H" && bad "the carried block survived a second day"
 grep -q 'PINNED-LINE-STAYS' "$H" || bad "PINNED text was touched"
+# DUE lines (24 Nov 2026 review A): every unmarked OUTCOME-CHECK / ENG-CHECK / FORM-PROOF DUE line survives
+# any number of day rollovers, once each, until post-land-check marks it; a marked (DONE) line is not carried.
+OD='- OUTCOME-CHECK DUE o/r#7 abc1234 — task:job by:2000-01-04 expect:>=3 — outcome: x — check: echo 3'
+ED='- ENG-CHECK DUE o/r#8 def5678 — landed under her bypass; a fresh reviewer checks'
+FD='- FORM-PROOF DUE o/r#9 0a0b0c0 — forms: contact'
+python3 - "$H" "$OD" "$ED" "$FD" <<'PYT'
+import sys; p, *ls = sys.argv[1:]; d = open(p).read()
+d = d.replace("<!-- JOBS:END -->\n", "<!-- JOBS:END -->\n" + "\n".join(ls) + "\n- ENG-CHECK DONE o/r#6 1111111 — x → https://x\n", 1)
+open(p, "w").write(d)
+PYT
+for day in 2000-01-03 2000-01-04 2000-01-05; do
+  sed -i.bak -E "s/<!-- day:[0-9-]+ -->/<!-- day:$day -->/" "$H"
+  run "sess-due-$day" "## In flight
+- NOTE-$day"
+  for l in "$OD" "$ED" "$FD"; do [ "$(grep -cxF -- "$l" "$H")" = 1 ] || bad "DUE carry: after the rollover from $day, '${l:0:30}…' is not there exactly once"; done
+done
+grep -q 'ENG-CHECK DONE o/r#6' "$H" && bad "DUE carry: a marked DONE line was carried past its day"
 # Jobs (22 Nov 2026): Today carries ONE Jobs list from `land-after --status` (open sheets only, line 1 +
 # path, never a sheet's body), replaced on every write.
 grep -q 'none open' "$H" || bad "jobs: no open sheets did not say 'none open'"

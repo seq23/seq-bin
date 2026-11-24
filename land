@@ -21,6 +21,18 @@
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
+# DONE MEANS CHECKED (her order 24 Nov 2026, after Noelle landed green and acted on 0 of 11 decisions: "u said
+# nothing yesterday"). Every PR states `Outcome:` and `## Not built`, or land stops by name:
+#   Outcome: none — <why nothing scheduled or produced changes, 3+ words>     (refused on a PR touching a job file)
+#   Outcome: <real output> — check: <read-only cmd> — expect: >= N — by: <day>  (default by: next day)
+#   ## Not built  <each item from the plan or brief not built, or "Nothing cut.">
+# Missing → NAMED STOP [OUTCOME_UNDECLARED] / [NOT_BUILT_UNDECLARED] with the lines to add; a check that is not
+# read-only (post-land-check --read-only-gate says why) → NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]. land prints Not built
+# word for word, and on a green land with a real Outcome writes `OUTCOME-CHECK DUE <repo>#<pr> <sha> — task:<slug>
+# by:<day> …` into ~/HANDOFF.md Today; post-land-check runs that check after its by-day and only its PASS makes the
+# work "working" (land-after's sheet says LANDED-UNCHECKED until then, DONE after). Her bypass is never blocked: it
+# records `Outcome: UNDECLARED (owner bypass)` and writes a DUE line whose check the fresh Claude infers.
+#
 # MERGE QUEUE (15 Nov 2026): before merging, a post-merge e2e or deploy run still going on main is
 # waited for (bounded), never merged over and cancelled; another PR landed on the repo in the last 30
 # minutes prints "batch fixes into one round".
@@ -175,6 +187,7 @@ land_exit() { # $1 exit code. A land that ended green with no fresh reviewer's P
   local rc="$1"
   if [ "$rc" -eq 0 ] && [ -n "${LAND_ENG_DUE:-}" ]; then note_eng_check "$LAND_ENG_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   if [ "$rc" -eq 0 ] && [ -n "${FORMS_DUE:-}" ]; then note_form_proof "$FORMS_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
+  if [ "$rc" -eq 0 ] && [ -n "${OUTCOME_DUE:-}" ]; then note_outcome_check "$OUTCOME_DUE" || rc="$LAND_RC_ENG_CHECK_NOT_NOTED"; fi
   if [ "$rc" -eq 0 ] && [ -n "${LIVE_ADD:-}" ]; then live_add "$LIVE_ADD" "$PR" || rc="$LAND_RC_LIVE_NOT_ADDED"; fi
   rm -f "$GH_ERR_FILE" "$RATE_UNTIL_FILE"
   # A TERM, HUP or Ctrl-C mid-deploy leaves no temp worktree or step file (deploy_cleanup, in deploy_at).
@@ -1563,6 +1576,125 @@ gate_forms() { # $1 PR  $2 PR body + owner comments -> rc 0 (stdout: the forms t
   echo "PR #$1 says nothing about forms: add to its body 'Forms: none — <why no form page or server path is touched, 3+ words>', or 'Forms: <which form> — preview: <the marked TEST submission on the preview and what received it>' (her rule: a form is never left broken by a fix; production is proven right after the deploy)."
   return 1
 }
+# NOTHING IS "DONE" UNTIL ITS REAL OUTPUT WAS SEEN LIVE, AND NOTHING CUT IS HIDDEN (her order 24 Nov 2026, after
+# boss-os #557/#561 landed on green CI and reviewer PASSes, her first Noelle run acted on 0 of 11 decisions, and the
+# "levers: the follow-up PR" cut was never told to her: "i do not fucking undersrtand how we can do all that work we
+# did yesterday and this shit still be fucked up and u said nothing yesterday"). Two SAFETY gates, read under her
+# bypass too (her bypass is never blocked by them: it records UNDECLARED and the check is still owed). Structure
+# only here; whether the words are honest is the reviewer's and the engineering check's call (a model reads meaning).
+# Every PR body (or an owner-account comment) carries ONE Outcome line:
+#   Outcome: none — <why nothing scheduled or produced changes, 3+ words>
+#   Outcome: <the real output> — check: <a read-only shell command> — expect: >= <N> — by: <YYYY-MM-DD | next day | N days>
+# (`by:` may be left off: the next day, Central). The count is the bare number a check prints on its last line,
+# else its number of non-empty lines. A PR that touches a job (job_files) may not say none. On a green land the
+# exit trap writes `- OUTCOME-CHECK DUE <repo>#<pr> <sha> — task:<slug> by:<day> expect:>=<N> — outcome: … — check: …`
+# into HANDOFF Today, and post-land-check runs the command itself once the day has come (only if its read-only gate
+# passes it again that night; land asks the same gate first, below).
+# And a `## Not built` section: what from the plan or brief was not built, or `Nothing cut.`; land prints it word
+# for word (between NOT BUILT markers) and land-after copies it onto the task sheet under line 1.
+JOB_PATH_RE='(^|/)launchd/[^/]+\.plist$|(^|/)LaunchAgents/[^/]+\.plist$|(^|/)com\.[^/]+\.plist$|^src/shared/boss/schedule/manifest\.json$|^src/worker/boss/outreach/|^scripts/ops/|^src/(.+/)?growth/'
+job_files() { # $1 head sha  $2 base sha; stdin: the changed paths -> stdout each one that touches a scheduled job, pipeline or agent
+  local f re
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -qE "$JOB_PATH_RE" <<<"$f"; then echo "$f"; continue; fi
+    case "$f" in
+      .github/workflows/*.yml|.github/workflows/*.yaml|wrangler.toml|wrangler.json|wrangler.jsonc|*/wrangler.toml|*/wrangler.json|*/wrangler.jsonc)
+        case "$f" in .github/*) re='^[[:space:]]*schedule:' ;; *) re='(^|[^A-Za-z_])crons' ;; esac
+        local a b; a="$(git show "$1:$f" 2>/dev/null)"; b="$(git show "$2:$f" 2>/dev/null)"
+        # Unreadable at both ends is a job until proven otherwise (fail closed).
+        if [ -z "$a$b" ]; then echo "$f (unread)"; elif grep -qE "$re" <<<"$a
+$b"; then echo "$f"; fi
+        continue ;;
+    esac
+    # A script one of this repo's launchd plists runs (seq-bin: ~/bin/<name>) is an agent or job script.
+    case "$f" in */*) ;; *)
+      re="/bin/$(sed 's/[.[\*^$]/\\&/g' <<<"$f")([^A-Za-z0-9._-]|\$)"
+      git grep -qE "$re" "$1" -- 'launchd/*.plist' 2>/dev/null && echo "$f" ;;
+    esac
+  done
+  return 0
+}
+# The check must only READ (the re-review's F1, 24 Nov 2026): it runs every night with her gh and wrangler logins.
+# outcome_parse asks post-land-check's one read-only gate (`post-land-check --read-only-gate`, beside this land:
+# LAND_DIR), never a copy of it; a refused check is rc 3, NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming the part
+# refused and why. A gate that cannot be run refuses too (nothing proves the check only reads).
+outcome_parse() { # $1 PR  $2 PR body + owner comments  $3 job files  $4 today (YYYY-MM-DD) -> rc 0 stdout "none" | "<by>\t<N>\t<outcome>\t<check>"; rc 1 one plain line; rc 3 the check is not read-only
+  python3 - "$1" "$2" "$3" "$4" "${LAND_DIR:-$HOME/bin}/post-land-check" <<'PY'
+import re, sys, datetime, subprocess
+pr, text, jobs, today = sys.argv[1], sys.argv[2], [j for j in sys.argv[3].splitlines() if j.strip()], sys.argv[4]
+gate = sys.argv[5]
+# Only <placeholder>-shaped text (<pr>, <the real output>, <N>) marks a template line; a real "<" in a check (a jq
+# "select(.n < 3)", an HTML "<title>" inside quotes) does not.
+PH = re.compile(r"<[A-Za-z](?:[^<>\n]{0,60}[^\s<>])?>")
+def placeholder(l):
+    head, _, tail = re.split(r"(?i)(check:)", l, maxsplit=1) if re.search(r"(?i)check:", l) else (l, "", "")
+    return bool(PH.search(head + re.sub(r"'[^']*'|\"[^\"]*\"", "", tail)))   # quoted text in the check is data
+add = ("add to its body ONE line, 'Outcome: none — <why nothing scheduled or produced changes, 3+ words>' or "
+       "'Outcome: <the real output> — check: <a read-only shell command> — expect: >= <N> — by: <YYYY-MM-DD | next day>' "
+       "(her order 24 Nov 2026: nothing is called working until its real output is checked live the next day)")
+lines = []
+for l in text.replace("\r", "").splitlines():
+    m = re.match(r"^[\s>]*(?:[-*]\s+)?(?:\*\*)?Outcome:(?:\*\*)?\s*(.*)$", l, re.I)
+    if m and not placeholder(m.group(1)): lines.append(m.group(1).strip())
+SEP = r"\s+(?:—|–|--)\s*"
+full = re.compile(r"^(?P<out>.+?)" + SEP + r"check:\s*(?P<cmd>.+?)" + SEP + r"expect:\s*(?:>=|≥)\s*(?P<n>\d+)(?:" + SEP + r"by:\s*(?P<by>.+?))?\s*$", re.I)
+none = re.compile(r"^(?:none|no)\s*(?:—|–|--|-|:)\s*\S+(?:\s+\S+){2,}", re.I)
+found = [(l, full.match(l)) for l in lines if not none.match(l)]
+good = [(l, m) for l, m in found if m]
+if len({m.group("out").strip() for _, m in good}) > 1:
+    print(f"PR #{pr} has {len(good)} Outcome lines: keep ONE, the real output that proves it works ({add})."); sys.exit(1)
+if good:
+    l, m = good[0]
+    by, d0 = (m.group("by") or "next day").strip().rstrip("."), datetime.date.fromisoformat(today)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", by):
+        try: d = datetime.date.fromisoformat(by)
+        except ValueError: d = None
+    elif re.fullmatch(r"(?i)(next day|tomorrow|the next day|day after landing)", by): d = d0 + datetime.timedelta(days=1)
+    elif re.fullmatch(r"(?i)(?:in\s+|\+)?(\d{1,2})\s+days?(?:\s+after landing)?", by): d = d0 + datetime.timedelta(days=int(re.search(r"\d+", by).group()))
+    else: d = None
+    if d is None or d < d0 or d > d0 + datetime.timedelta(days=14):
+        print(f"PR #{pr}'s Outcome says 'by: {by}': give a day from today to 14 days out, as YYYY-MM-DD, 'next day' or 'N days'."); sys.exit(1)
+    if int(m.group("n")) < 1:
+        print(f"PR #{pr}'s Outcome says 'expect: >= {m.group('n')}', which any empty output passes: the floor is at least 1 ({add})."); sys.exit(1)
+    try:
+        r = subprocess.run([gate, "--read-only-gate", m.group("cmd").strip()], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        grc, why = r.returncode, " ".join((r.stdout or r.stderr).split())[:300]
+    except Exception as e:
+        grc, why = 2, f"the read-only gate at {gate} could not be run ({type(e).__name__}), so nothing proves the check only reads"
+    if grc != 0:
+        print(f"PR #{pr}'s Outcome check is not read-only, so post-land-check would never run it: {why or 'the gate refused it'}. "
+              "A check may only read: curl GET or HEAD; gh api GET or a graphql query (no mutation); gh list, view, status, search, "
+              "diff or checks; wrangler d1 execute with one SELECT or WITH, kv key get or list, r2 object get; text tools (grep, jq, "
+              "wc, head, sort …); every pipe, ; && || and $(...) part is checked. Fix the check: command."); sys.exit(3)
+    print("\t".join([d.isoformat(), m.group("n"), m.group("out").strip(), m.group("cmd").strip()])); sys.exit(0)
+for l, _ in found:
+    if re.fullmatch(r"(?i)(none|no)\b.*", l) and not re.search(r"(?i)check:", l):
+        print(f"PR #{pr}'s 'Outcome: none' gives no reason: say why nothing scheduled or produced changes, in 3+ words ({add})."); sys.exit(1)
+    if re.search(r"(?i)check:", l) and not re.search(r"(?i)check:\s*(?!(?:—|–|--)(?:\s|$))\S", l):
+        print(f"PR #{pr}'s Outcome names no check command: {add}."); sys.exit(1)
+    if not re.search(r"(?i)check:", l):
+        print(f"PR #{pr}'s Outcome has no 'check: <a read-only shell command>': {add}."); sys.exit(1)
+    if not re.search(r"(?i)expect:\s*(>=|≥)\s*\d", l):
+        print(f"PR #{pr}'s Outcome has no 'expect: >= <N>' (the least the check must count for a PASS): {add}."); sys.exit(1)
+    print(f"PR #{pr}'s Outcome line does not read as '<output> — check: <cmd> — expect: >= <N>': {add}."); sys.exit(1)
+if any(none.match(l) for l in lines):
+    if jobs:
+        print(f"PR #{pr} says 'Outcome: none' but changes a scheduled job, pipeline or agent ({', '.join(jobs[:6])}): "
+              "name the real output it produces and the check that proves it tomorrow, as 'Outcome: <the real output> — check: <cmd> — expect: >= <N>'."); sys.exit(1)
+    print("none"); sys.exit(0)
+print(f"PR #{pr} says nothing about its outcome: {add}."); sys.exit(1)
+PY
+}
+not_built_section() { # stdin: PR body + owner comments -> the first '## Not built' section's lines, word for word
+  awk 'BEGIN{IGNORECASE=1} /^#{1,6}[[:space:]]/ { if (on) exit; h=tolower($0); sub(/^#+[[:space:]]*/, "", h); sub(/[[:space:]:]*$/, "", h); if (h == "not built") { on=1; next } } on' | tr -d '\r'
+}
+gate_not_built() { # $1 PR  $2 PR body + owner comments -> rc 0 stdout the section, word for word | rc 1 one plain line
+  local sec; sec="$(not_built_section <<<"$2" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' | sed '/./,$!d')"
+  if grep -vE '^[[:space:]]*([-*][[:space:]]*)?(<[^>]*>[[:space:]]*)*$' <<<"$sec" | grep -qE '[[:alnum:]]+[^[:alnum:]]+[[:alnum:]]+'; then printf '%s\n' "$sec"; return 0; fi
+  echo "PR #$1 has no '## Not built' section saying what was cut: add one listing each item from the plan or brief that is not built (or 'Nothing cut.'); land prints it word for word and the coordinator quotes it to her."
+  return 1
+}
 # --- gates end ---
 # HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
@@ -1632,6 +1764,19 @@ note_form_proof() { # $1 the forms touched (from gate_forms), or "undeclared (�
   else
     echo "     post-land-check is not installed at $runner: the nightly run proves the form"
   fi
+}
+# THE OUTCOME IS CHECKED LIVE THE NEXT DAY (outcome_parse). Same writer as the engineering check, kind OUTCOME-CHECK,
+# carrying the task slug (land-after passes LAND_TASK), the day, the floor, the outcome and the check. post-land-check
+# runs the check command itself once that day has come; its verdict goes on her morning Notices line.
+note_outcome_check() { # $1 "<by>\t<N|infer>\t<outcome>\t<check|infer>" (outcome_parse)
+  local slug sha line by n out cmd
+  IFS=$'\t' read -r by n out cmd <<<"$1"
+  slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
+  sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
+  case "$n" in infer) n=infer ;; *) n=">=$n" ;; esac
+  line="OUTCOME-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — task:${LAND_TASK:--} by:$by expect:$n — outcome: $(printf %s "$out" | tr '\n' ' ') — check: $(printf %s "$cmd" | tr '\n' ' ')"
+  LAND_ENG_LINE="$line" note_eng_check line || return 1
+  echo "     OUTCOME: check due $by — $out"
 }
 # --- live_add begin (tests/test-land-gates.sh evals this block) ---
 # THE LAUNCH PATH WRITES live-repos.json, NOTHING ELSE DOES (23 Nov 2026). Once a PR with a fresh reviewer's
@@ -1769,6 +1914,29 @@ elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override;
 else
   die "NAMED STOP [FORMS_UNDECLARED] $FORM_MSG"
 fi
+# Outcome and Not built (outcome_parse, gate_not_built, above): safety checks, read under her bypass too, which is
+# never blocked by them: it records UNDECLARED, and a job PR still gets its next-day check (the checker infers it).
+OUTCOME_DUE=""; OUT_TEXT="$(owner_text <<<"$PRMETA")"
+JOBS="$(jq -r '.files[]?.path' <<<"$PRMETA" | job_files "$HEAD" "$(git merge-base origin/main "$HEAD" 2>/dev/null || echo origin/main)")"
+[ "$(jq -r '(.files | length) < (.changedFiles // 0)' <<<"$PRMETA")" = true ] && JOBS="${JOBS:+$JOBS
+}(GitHub cut the file list short: unread files count as a job)"
+LTODAY="${LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
+OUT_MSG="$(outcome_parse "$PR" "$OUT_TEXT" "$JOBS" "$LTODAY")"; OUT_RC=$?
+NB_MSG="$(gate_not_built "$PR" "$OUT_TEXT")"; NB_RC=$?
+BYPASS=""; { [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; } && BYPASS=1
+if [ "$OUT_RC" -eq 0 ] && [ "$OUT_MSG" != none ]; then OUTCOME_DUE="$OUT_MSG"; say "    outcome: $(cut -f3 <<<"$OUT_MSG") — checked live by post-land-check from $(cut -f1 <<<"$OUT_MSG") (expect >= $(cut -f2 <<<"$OUT_MSG"))"
+elif [ "$OUT_RC" -eq 0 ]; then say "    outcome: none (no job, pipeline or agent changed)"
+elif [ -n "$BYPASS" ]; then
+  [ "$OUT_RC" -eq 3 ] && say "    outcome check refused, never run: $OUT_MSG"
+  say "    Outcome: UNDECLARED (owner bypass)"
+  OUTCOME_DUE="$(python3 -c 'import datetime,sys; print(datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=1))' "$LTODAY")	infer	UNDECLARED (owner bypass)	infer"
+elif [ "$OUT_RC" -eq 3 ]; then die "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY] $OUT_MSG"
+elif [ "$NB_RC" -ne 0 ]; then die "NAMED STOP [OUTCOME_UNDECLARED] $OUT_MSG Also NOT_BUILT_UNDECLARED: $NB_MSG"
+else die "NAMED STOP [OUTCOME_UNDECLARED] $OUT_MSG"; fi
+if [ "$NB_RC" -eq 0 ]; then NOT_BUILT="$NB_MSG"
+elif [ -n "$BYPASS" ]; then NOT_BUILT="UNDECLARED (owner bypass)"
+else die "NAMED STOP [NOT_BUILT_UNDECLARED] $NB_MSG"; fi
+printf '\n--- NOT BUILT (PR #%s, word for word) ---\n%s\n--- END NOT BUILT ---\n' "$PR" "$NOT_BUILT"
 # A LANDED LAUNCH LISTS ITS REPO (new until launched, 23 Nov 2026). A PR carrying a fresh reviewer's Launch-ready
 # PASS for this head (launch_pass, the launch gate's own check) in a repo not yet on live-repos.json is added to
 # the list by the exit trap once the land ends green (live_add). Never under her bypass: no review stood.

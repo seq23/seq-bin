@@ -107,7 +107,9 @@ case "$a" in
   "pr view "*"files,body,comments"*) { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
       | if [ -f "$FAKE_DIR/no-url" ]; then cat; else jq -c '.url //= "https://github.com/o/r/pull/7"'; fi \
       | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi \
-      | if [ -f "$FAKE_DIR/no-forms" ]; then cat; else jq -c '.body = ((.body // "") + "\nForms: none — a fixture change touching no form")'; fi; exit 0 ;;
+      | if [ -f "$FAKE_DIR/no-forms" ]; then cat; else jq -c '.body = ((.body // "") + "\nForms: none — a fixture change touching no form")'; fi \
+      | if [ -f "$FAKE_DIR/no-outcome" ]; then cat; else jq -c '.body = ((.body // "") + "\nOutcome: none — a fixture change that runs nothing")'; fi \
+      | if [ -f "$FAKE_DIR/no-notbuilt" ]; then cat; else jq -c '.body = ((.body // "") + "\n\n## Not built\nNothing cut.")'; fi; exit 0 ;;
   # label-events = every label ever added (gh's --jq answer over the PR's issue events); default none; tls = down.
   "api --paginate repos/"*"/issues/7/events "*) answer label-events '[]' ;;
   # live_add: seq-bin's list through the contents API (live-get = its answer), the PUT logged to live-put.
@@ -235,7 +237,7 @@ run_promote() { # name [flags...] -> sets OUT, RC   (LAND_WAIT_FLOOR_SECS from t
 fails=0; passes=0
 check() { # label, command...
   local label="$1"; shift
-  if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); fi
+  if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${LAND_TEST_DEBUG:-}" ] || { printf "%s\n" "$OUT" | tail -25 | sed "s/^/    | /"; grep -n "DUE" "$LAND_HANDOFF" | sed "s/^/    H /"; }; fi
 }
 has() { grep -qF -- "$1" <<<"$OUT"; }
 merge_called() { grep -q '^pr merge' "$FAKE/calls"; }
@@ -941,6 +943,7 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
 cp "$HERE/../open-loops.mjs" "$W/"   # the poster beside land: LAND_DIR is $W when land re-runs from its temp copy
+cp "$HERE/../post-land-check" "$W/"   # its read-only gate, which land asks about every Outcome check (same LAND_DIR)
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
@@ -1064,6 +1067,57 @@ run_land approvalprep
 sleep 1
 check "Forms: none lands with no FORM-PROOF line and starts nothing" eval '[ "$RC" -eq 0 ] && [ "$(form_lines)" -eq 0 ] && [ ! -f "$W/plc-calls" ]'
 rm -f "$FAKE/no-forms"; unset LAND_POST_CHECK
+# Outcome and Not built (her order 24 Nov 2026, after Noelle landed green and acted on 0 of 11 decisions): no Outcome,
+# no Not built, an Outcome with no check or no expect, and "Outcome: none" on a plist are each refused by name and
+# not merged; a real Outcome lands and writes ONE OUTCOME-CHECK DUE line carrying the task slug; her bypass is never
+# blocked by them and still writes a check the checker infers. The Not built section is printed word for word.
+outcome_lines() { grep -c '^- OUTCOME-CHECK DUE ' "$LAND_HANDOFF"; }
+OMP='\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the plist schedule fix | tests/test-launchd-central.sh goes red |'
+export LAND_TODAY=2026-11-24 LAND_TASK=noelle-levers
+handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome"
+echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: no Outcome line is refused rc 1 by NAMED STOP [OUTCOME_UNDECLARED] saying what to add, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "Outcome: none — " && has "expect: >= <N>" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+handoff_fixture; fixture approvalprep; rm -f "$FAKE/no-outcome"; touch "$FAKE/no-notbuilt"
+echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "not built: no '## Not built' section is refused rc 1 by NAMED STOP [NOT_BUILT_UNDECLARED], not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [NOT_BUILT_UNDECLARED]" && has "Nothing cut." && ! merge_called'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"labels":[],"body":"Fixes it.\n\n## Not built\n\n## Mutation proof\nnone","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "not built: an EMPTY '## Not built' section is refused the same way" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [NOT_BUILT_UNDECLARED]" && ! merge_called'
+handoff_fixture; fixture approvalprep; rm -f "$FAKE/no-notbuilt"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Moves the run to 23:15.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: 'Outcome: none' on a PR that changes a launchd plist is refused by name, naming the plist, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "launchd/com.seq.noelle.plist" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: an Outcome with a check but no 'expect: >= N' is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'expect: >= <N>'"'"'" && ! merge_called'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions every night'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: an Outcome with no 'check:' command is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'check: <a read-only shell command>'"'"'" && ! merge_called'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log — expect: >= 3\n\n## Not built\n- the job-target lever (G1)\n- G19, the sales reader'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line with the task slug, day, floor, outcome and check" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(outcome_lines)" -eq 1 ] && today_region | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:>=3 — outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log"'
+check "…and prints the Not built section word for word between its markers" eval 'sed -n "/^--- NOT BUILT (PR #7, word for word) ---$/,/^--- END NOT BUILT ---$/p" <<<"$OUT" | sed "1d;\$d" | diff - <(printf "%s\n" "- the job-target lever (G1)" "- G19, the sales reader") >/dev/null'
+run_land approvalprep
+check "…a re-run on the merged PR adds no second OUTCOME-CHECK line" eval '[ "$(outcome_lines)" -eq 1 ]'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: echo ok && curl -s -d x=1 https://e.x/api | wc -l — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "outcome: a check that could write (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "curl -d sends data" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: gh issue create -t x -b y — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "…under her bypass: never blocked, says the check was refused, and writes no DUE line carrying that command" eval '[ "$RC" -eq 0 ] && merge_called && has "outcome check refused, never run" && has "Outcome: UNDECLARED (owner bypass)" && ! today_region | grep -q "gh issue create"'
+handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome" "$FAKE/no-notbuilt"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "outcome under her bypass: never blocked; records UNDECLARED and writes a check the checker infers" eval '[ "$RC" -eq 0 ] && merge_called && has "Outcome: UNDECLARED (owner bypass)" && today_region | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:infer — outcome: UNDECLARED (owner bypass) — check: infer" && sed -n "/^--- NOT BUILT/,/^--- END/p" <<<"$OUT" | grep -qx "UNDECLARED (owner bypass)"'
+rm -f "$FAKE/no-outcome" "$FAKE/no-notbuilt"; unset LAND_TODAY LAND_TASK
 unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
 export LAND_HANDOFF="$W/HANDOFF.md"
 

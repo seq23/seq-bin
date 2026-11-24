@@ -111,7 +111,8 @@ fi
 # rest named as dropped); a hand-written status above the first note is kept all day; a failed summary
 # never replaces that session's good note; writes are locked so two sessions cannot lose each other's
 # note; a new day drops yesterday's notes but CARRIES the newest one (or yesterday's hand-written
-# status) once, so work in flight over midnight survives. Everything outside the markers is never touched. No markers
+# status) once, so work in flight over midnight survives; every unmarked "- <KIND> DUE" line post-land-check still owes is
+# carried every day until it is marked (24 Nov 2026). Everything outside the markers is never touched. No markers
 # yet → the section is appended at the END of the file, never at the top.
 JOBS="$jobs" FAILED="$FAILED" STAMP_LOCAL="$STAMP_LOCAL" BLOCK="$block" HANDOFF="$HANDOFF" TODAY="$(date '+%Y-%m-%d')" TODAY_LONG="$(date '+%A %-d %B %Y')" python3 - <<'PY'
 import os, re, fcntl
@@ -156,9 +157,19 @@ if m and m.group(1) == today:
 else:
     # A new day: yesterday's notes go, but the newest thing written yesterday is CARRIED once, so work
     # still in flight over midnight is not lost. It is dropped on the following day.
+    # Every unmarked DUE line (OUTCOME-CHECK, ENG-CHECK, FORM-PROOF: a check post-land-check still owes) is
+    # carried EVERY day until post-land-check marks it DONE or FAIL, never dropped with the old notes
+    # (24 Nov 2026 hostile review A). It goes at the top, where land writes it; out of the once-carried text.
+    DUE = re.compile(r"(?m)^- (?:OUTCOME-CHECK|ENG-CHECK|FORM-PROOF) DUE .*\n?")
+    dues = []
+    for src in [pre] + carried + notes:
+        for l in DUE.findall(src):
+            if l.rstrip() not in dues: dues.append(l.rstrip())
+    pre = DUE.sub("", pre).strip()
     old_day = m.group(1) if m else "an earlier day"
-    newest = pre or (notes[0].split("\n", 1)[1] if notes else "")
-    lead = (CARRY + old_day + " (check before trusting)\n" + newest.strip() + "\n\n") if newest.strip() else ""
+    newest = pre or (DUE.sub("", notes[0].split("\n", 1)[1]) if notes else "")
+    lead = ("\n".join(dues) + "\n\n") if dues else ""
+    lead += (CARRY + old_day + " (check before trusting)\n" + newest.strip() + "\n\n") if newest.strip() else ""
     out_notes = [block]
 out = head + S + "\n<!-- day:" + today + " -->\n_" + today_long + "_\n\n" + jobs + lead + "\n".join(out_notes) + E + tail
 tmp = path + ".tmp"

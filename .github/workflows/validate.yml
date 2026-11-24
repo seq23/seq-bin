@@ -109,6 +109,28 @@ jobs:
       # and one that patches a function fixed in the last 30 days without "Patch or rebuild:".
       - name: land's gates refuse what they should (ship-ready, launch-ready, baseline, patch history)
         run: ./tests/test-land-gates.sh
+      # 24 Nov 2026 (her words: "u said nothing yesterday"; Noelle, boss-os #557/#561, landed green and acted on 0 of
+      # 11 decisions): land refuses a PR with no honest Outcome (none on a job file, no check, no floor, a write) or no
+      # "## Not built"; the real #557 and #561 bodies are refused.
+      - name: land refuses a PR that hides its outcome or what it cut (Outcome, Not built)
+        run: ./tests/test-land-outcome.sh
+      # 23 Nov 2026: a touched form needs a marked TEST submission on preview before land.
+      - name: land's forms gate refuses an undeclared or unproved form
+        run: ./tests/test-land-forms.sh
+      # post-land-check RUNS each due outcome check itself, only after its read-only gate passes it (a check that could
+      # write is never run) and in a file-write sandbox on the Mac; it refuses a PASS below the
+      # floor, and an outage, no comment or ai-run down stays DUE, NOT CHECKED, exit non-zero. ENG-CHECK and FORM-PROOF too.
+      - name: post-land-check never calls an unchecked outcome working
+        run: ./tests/test-post-land-check.sh
+      # Tests found with no CI step on 24 Nov 2026 (they guarded nothing): now each has one.
+      - name: land names the repo from its GitHub remote
+        run: ./tests/test-land-name.sh
+      - name: land's queue lands one PR at a time
+        run: ./tests/test-land-queue.sh
+      - name: build-phases sends a reviewer's fail back and is never READY while incomplete
+        run: ./tests/test-build-phases.sh
+      - name: the GitHub rate probe reads high, low and blind correctly
+        run: ./tests/test-probe-rate-floor.sh
       # 22 Nov 2026: agents polling GitHub one by one spent the account's 5,000 REST calls an hour twice in a
       # morning. ~/bin/gh shares one cache and one allowance; writes are never held and drop the cache.
       - name: gh shares one GitHub allowance (cache, floor wait, writes never held, watchers back off)

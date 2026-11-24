@@ -44,6 +44,7 @@ chmod +x "$WORK/bin/gh"
 printf '#!/bin/bash\nexit 0\n' > "$WORK/bin/wrangler"
 cat > "$WORK/bin/curl" <<'SH'
 #!/bin/bash
+case "$*" in */deployments\?*) [ -f "$FX/cfdeploy.json" ] || exit 7; cat "$FX/cfdeploy.json"; exit 0 ;; esac
 [ -f "$FX/cf.json" ] || exit 7
 cat "$FX/cf.json"
 SH
@@ -153,6 +154,24 @@ check "no wrangler login, vault token reads the watch paths: no deploy needed" 3
 rm "$WORK/bin/npm"
 watchfx .github/workflows/search-loop.yml; rm "$FX/home/.wrangler/config/default.toml"
 check "no wrangler login: fail closed, still waits" 1 "not yet reported (queued) — TIMED OUT" ""
+
+# STUCK CHECK ROW (23 Nov 2026, keepmyproof #75): GitHub kept "Cloudflare Pages: keepmyproof"
+# in_progress past the deadline while Cloudflare had the merge commit live in production. At the
+# deadline Cloudflare itself is asked; only this exact commit, deployed with success, counts.
+stuckfx() { # $1 commit hash Cloudflare reports, $2 its deploy stage status
+  newfx; runs "$(cr 'Cloudflare Pages: kmp' in_progress null)" > "$FX/runs-deadbeef.json"
+  mkdir -p "$FX/home/.wrangler/config"; echo 'oauth_token = "t"' > "$FX/home/.wrangler/config/default.toml"
+  echo '{"success":true,"result_info":{"total_pages":1},"result":[]}' > "$FX/cf.json"
+  printf '{"success":true,"result":[{"deployment_trigger":{"metadata":{"commit_hash":"%s"}},"latest_stage":{"name":"deploy","status":"%s"}}]}' "$1" "$2" > "$FX/cfdeploy.json"
+}
+stuckfx deadbeef success
+check "check row stuck, Cloudflare shows this commit live: success" 0 "kmp — success (Cloudflare shows this commit live" ""
+stuckfx otherone success
+check "check row stuck, Cloudflare live on another commit: still TIMED OUT" 1 "kmp — in_progress — TIMED OUT" ""
+stuckfx deadbeef failure
+check "check row stuck, Cloudflare deploy failed: still TIMED OUT" 1 "kmp — in_progress — TIMED OUT" ""
+stuckfx deadbeef success; rm "$FX/cfdeploy.json"
+check "check row stuck, Cloudflare unreadable: still TIMED OUT" 1 "kmp — in_progress — TIMED OUT" ""
 
 # The route that broke must declare all six, so discovery can never come back empty for it.
 # Exact pin: adding or removing a project is a deliberate edit here as well as in land.

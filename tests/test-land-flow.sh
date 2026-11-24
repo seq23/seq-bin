@@ -421,7 +421,7 @@ fixture approvalprep
 run_land approvalprep
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -5
 check "local main == origin/main" [ "$(git -C "$W/approvalprep" rev-parse HEAD)" = "$ORIGIN_MAIN" ]
-check "a self-deploying repo with no PROMOTE_VIA is done at its build: nothing dispatched, no size read" eval '! grep -q "^workflow run" "$FAKE/calls" && ! grep -q additions "$FAKE/calls"'
+check "a self-deploying repo with no PROMOTE_VIA is done at its build: nothing dispatched, no size read" eval '! grep -q "^workflow run" "$FAKE/calls" && ! grep -q "json additions,deletions,changedFiles" "$FAKE/calls"'
 
 echo "=== 4. a scripted deploy runs from a worktree of origin/main, not her dirty tree ==="
 fixture creator-network
@@ -722,7 +722,7 @@ echo success > "$FAKE/e2e-on-sha"; mkdir "$W/build-first-fixture/node_modules"  
 run_land build-first-fixture
 check "rc 0" [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
 check "production deployed" eval 'npm_log | grep -qx "run deploy:production head=$ORIGIN_MAIN"'
-check "no size read, no verdict read" eval '! grep -q additions "$FAKE/calls" && ! grep -q "conclusion,headSha,databaseId,status" "$FAKE/calls"'
+check "no size read, no verdict read" eval '! grep -q "json additions,deletions,changedFiles" "$FAKE/calls" && ! grep -q "conclusion,headSha,databaseId,status" "$FAKE/calls"'
 check "not called a small change" eval '! has "SMALL CHANGE"'
 
 echo "=== 17. a large PR whose suite goes RED: NAMED STOP, staging deployed, production untouched ==="
@@ -1007,6 +1007,20 @@ handoff_fixture; fixture approvalprep
 run_land approvalprep
 check "a Fast PR on green CI with no reviewer's PASS: rc 0, ONE ENG-CHECK DUE line saying so, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed on green CI with no reviewer.s PASS (Fast PRs) " && no_posts'
 check "…every other line of HANDOFF exactly as it was" eval 'diff <(grep -v "^- ENG-CHECK DUE " "$LAND_HANDOFF") <(grep -v "^- ENG-CHECK DUE " "$W/hh/before") >/dev/null'
+# Her ruling 24 Nov 2026: a small PR (under 200 changed lines) gets no engineering line, even with no
+# reviewer or under her bypass; a size that cannot be read counts as big (the cases above have none).
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"Small fix.\nReview class: none — a small internal fix only","labels":[],"comments":[],"additions":120,"deletions":79}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "a 199-line Fast PR with no reviewer: rc 0, merged, NO engineering line, says the live check still runs" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(due_lines)" -eq 0 ] && has "engineering check: not needed (199 changed lines"'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"Small fix.\nReview class: none — a small internal fix only","labels":[],"comments":[],"additions":120,"deletions":80}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "a 200-line Fast PR with no reviewer: ONE engineering line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ]'
+handoff_fixture; fixture approvalprep
+echo '{"files":[{"path":"README.md"}],"body":"Small fix.\nReview class: none — a small internal fix only","labels":[],"comments":[],"additions":5,"deletions":5}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=ship it now please'
+check "a 10-line PR under her bypass: rc 0, NO engineering line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"Review class: none — wording of a log line only\nShip-ready: PASS — hostile-review session_01REVIEW looked at the diff at @HEAD@; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep

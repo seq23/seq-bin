@@ -1717,7 +1717,7 @@ note_eng_check() { # $1 why no reviewer saw it: bypass | unreviewed
   esac
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
-  line="${LAND_ENG_LINE:-ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); a fresh reviewer checks the merged diff against every automatic fail in engineering.md today}"
+  line="${LAND_ENG_LINE:-ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); the nightly post-land-check checks the merged diff against every automatic fail in engineering.md today}"
   # One writer at a time with the PreCompact hook (handoff-on-compact.sh takes the same lock), then an
   # atomic replace. The line goes after the Jobs list, where the hook keeps hand-written lines all day.
   if out="$(python3 -c '
@@ -1878,7 +1878,7 @@ if [ -n "$OWNER_WORDS" ]; then
   fi
   say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
-PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles)" \
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles,additions,deletions)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
 PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
 jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
@@ -2008,7 +2008,13 @@ fi
 # own check). Either way the exit trap notes its same-day engineering check once the land ends green
 # (note_eng_check; Fast PRs item 1: "ONE batched engineering check of the day's merged diffs"). A PASS that
 # cannot be read (75) counts as no PASS: one check too many, never one too few.
-if [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; then LAND_ENG_DUE=bypass
+# Her ruling 24 Nov 2026 ("ok then do that": the engineering check only on bigger PRs, the next-day live
+# check on every land): a PR under LAND_ENG_MIN_LINES changed lines (additions + deletions) gets no
+# engineering line. A size that cannot be read counts as big: one check too many, never one too few.
+LAND_ENG_MIN_LINES="${LAND_ENG_MIN_LINES:-200}"
+eng_small() { jq -e --argjson m "$LAND_ENG_MIN_LINES" '(.additions | type == "number") and (.deletions | type == "number") and (.additions + .deletions < $m)' <<<"${PRMETA:-"{}"}" >/dev/null 2>&1; }
+if eng_small; then say "    engineering check: not needed ($(jq '.additions + .deletions' <<<"$PRMETA") changed lines, under $LAND_ENG_MIN_LINES); the next-day live check still runs"
+elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; then LAND_ENG_DUE=bypass
 elif ! ship_pass "$PR" "${PRMETA:-"{}"}" "${HEAD:-}" "landed" "the diff" >/dev/null 2>&1; then LAND_ENG_DUE=unreviewed; fi
 say "3/5  syncing main"
 # THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`

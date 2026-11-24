@@ -12,7 +12,7 @@ fail=0; bad(){ echo "FAIL: $1"; fail=1; }
 # The one mover, from boss-os (a local checkout, else main on GitHub; boss-os is public).
 # The mover reads the Schedule manifest beside it (each Mac job's macWindow), so both come together.
 BOSS="$T/boss"; mkdir -p "$BOSS/scripts/ops" "$BOSS/src/shared/boss/schedule"
-for rel in scripts/ops/plist-central.mjs src/shared/boss/schedule/manifest.json; do
+for rel in scripts/ops/plist-central.mjs src/shared/boss/schedule/clock.mjs src/shared/boss/schedule/manifest.json; do
   src="${BOSS_OS_REPO:-$HOME/GitHub/boss-os}/$rel"
   if [ -f "$src" ]; then cp "$src" "$BOSS/$rel"
   else curl -fsSL "https://raw.githubusercontent.com/seq23/boss-os/main/$rel" -o "$BOSS/$rel" \

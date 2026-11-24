@@ -15,6 +15,11 @@ case "$1 $2" in
   "api user") echo "${FAKE_ME:-me}";;
   "api --paginate") f="$S/$(echo "$3" | tr '/' '_').json"; [ -f "$f" ] && cat "$f" || echo '[]';;
   "issue create") echo "$*" >> "$S/issues";;
+  "pr comment") # pr comment <n> --repo <r> --body-file <f>: appended to that PR's comments, as this account
+    f="$S/$(echo "repos/$5/issues/$3/comments" | tr '/' '_').json"; [ -f "$f" ] || echo '[]' > "$f"
+    jq --rawfile b "$7" --arg u "${FAKE_ME:-me}" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg url "https://github.com/$5/pull/$3#code" \
+      '. + [{body: $b, user: {login: $u}, created_at: $t, html_url: $url}]' "$f" > "$f.t" && mv "$f.t" "$f"
+    echo "https://github.com/$5/pull/$3#code";;
   *) echo "fake gh: $*" >&2; exit 1;;
 esac
 GH
@@ -27,7 +32,7 @@ prompt="${@: -1}"
 timeout 5 cat >/dev/null 2>&1 || true
 for key in $(grep -oE '[a-z0-9-]+/[a-z0-9-]+#[0-9]+' <<<"$prompt" | sort -u); do
   repo="${key%#*}"; pr="${key##*#}"; f="$S/$(echo "repos/$repo/issues/$pr/comments" | tr '/' '_').json"
-  v="$(eval echo "\${VERDICT_${pr}:-}")"; [ -n "$v" ] || continue
+  vn="VERDICT_${pr}"; v="${!vn:-}"; [ -n "$v" ] || continue
   who="${COMMENT_USER:-me}"; when="${COMMENT_AT:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
   jq -n --arg b "$v
 details" --arg u "$who" --arg t "$when" --arg url "https://github.com/$repo/pull/$pr#c" \
@@ -39,8 +44,8 @@ export PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run"
   POST_LAND_HANDOFF="$W/HANDOFF.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify"
 printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; chmod +x "$W/bin/notify"
 fails=0; passes=0
-check() { local label="$1"; shift; if "$@"; then passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); fi; }
-reset() { rm -rf "$W/store" "$W/locks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 COMMENT_USER COMMENT_AT; }
+check() { local label="$1"; shift; if "$@"; then passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${PLC_DEBUG:-}" ] || sed "s/^/    | /" "$W/out" 2>/dev/null | tail -8; fi; }
+reset() { rm -rf "$W/store" "$W/locks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 VERDICT_5 COMMENT_USER COMMENT_AT; }
 handoff() { printf '# H\n<!-- TODAY:START -->\n<!-- JOBS:END -->\n%s\n<!-- TODAY:END -->\n' "$1" > "$W/HANDOFF.md"; }
 F1='- FORM-PROOF DUE o/site#1 abc123 — forms: contact form; deployed 23 Nov 2026 10:00 CT; a marked TEST submission on production proves each one'
 E2='- ENG-CHECK DUE o/app#2 def456 — landed on green CI with no reviewer'"'"'s PASS (Fast PRs) 23 Nov 2026 10:00 CT; a fresh reviewer checks'
@@ -98,6 +103,103 @@ check "a held lock leaves the line DUE" grep -q '^- FORM-PROOF DUE o/site#1 ' "$
 reset; handoff "$F1"; export VERDICT_1="Form proof (production): PASS — ok"
 "$PLC" --dry-run </dev/null >/dev/null 2>&1
 check "--dry-run runs no model" [ ! -f "$W/store/ai-calls" ]
+
+echo "=== OUTCOME-CHECK (24 Nov 2026): code runs the check, a fresh model judges its meaning, the Notices line says it ==="
+export POST_LAND_SANDBOX=off POST_LAND_NOTICE="$W/bin/notice" POST_LAND_TODAY=2026-11-25
+printf '#!/bin/bash\n[ -z "${NOTICE_FAIL:-}" ] || exit 1\nprintf "%%s\\t%%s\\n" "$1" "$2" >> "%s/store/notices"\n' "$W" > "$W/bin/notice"; chmod +x "$W/bin/notice"
+cat > "$W/bin/ai-run-down" <<'AI'
+#!/bin/bash
+echo x >> "$PLC_STORE/ai-calls"; echo "Claude usage limit reached" >&2; exit 1
+AI
+chmod +x "$W/bin/ai-run-down"
+oline() { printf -- '- OUTCOME-CHECK DUE o/app#5 aaa111 — task:job5 by:%s expect:%s — outcome: Noelle acts on her decisions — check: %s' "${3:-2026-11-25}" "${2:->=3}" "$1"; }
+# a fresh task-sheet folder per case (inside $W, which the EXIT trap removes)
+osheet() { export POST_LAND_TASKS; POST_LAND_TASKS="$(mktemp -d "$W/tasks.XXXXXX")"; printf '%s\n## Not built (PR #5, from land)\nNothing cut.\n## End Not built\nGoal: g\n' "${1:-STATUS: LANDED-UNCHECKED o/app#5 aaa111 2026-11-24 — landed, not yet proven: outcome check due 2026-11-25}" > "$POST_LAND_TASKS/job5.md"; }
+FOUR='printf "acted 1\nacted 2\nacted 3\nacted 4\n"'
+CJ="$W/store/repos_o_app_issues_5_comments.json"
+comments() { jq length "$CJ" 2>/dev/null || echo 0; }
+notices() { if [ -f "$W/store/notices" ]; then wc -l < "$W/store/notices" | tr -d ' '; else echo 0; fi; }
+# shellcheck disable=SC2120  # a case may pass flags
+orun() { "$PLC" "$@" </dev/null >"$W/out" 2>&1; echo $?; }
+calls() { if [ -f "$W/store/ai-calls" ]; then wc -l < "$W/store/ai-calls" | tr -d ' '; else echo 0; fi; }
+
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on. all from today"
+check "outcome PASS: exit 0" [ "$(orun)" = 0 ]
+check "…ONE model run judged it" [ "$(calls)" = 1 ]
+check "…the HANDOFF line is DONE with the comment's link" grep -q '^- OUTCOME-CHECK DONE o/app#5 aaa111 — task:job5 .* → https://github.com/o/app/pull/5#c$' "$W/HANDOFF.md"
+check "…the task sheet's line 1 is DONE and it moved to done/" eval 'head -1 "$POST_LAND_TASKS/done/job5.md" | grep -q "^STATUS: DONE o/app#5 aaa111 2026-11-25 — outcome checked live: saw 4 of 4" && [ ! -e "$POST_LAND_TASKS/job5.md" ]'
+check "…the Notices line: '<repo> #<pr> <outcome>: working — <seen>', one sentence" \
+  grep -qx $'outcome:o/app#5:working\tapp #5 Noelle acts on her decisions: working — saw 4 of 4 decisions acted on; all from today' "$W/store/notices"
+check "…no banner on a PASS" [ ! -f "$W/store/banners" ]
+check "…the check's raw output went to the local log only" grep -q '^acted 4$' "$W/log"
+check "replay: a second run tonight posts no second comment and no second Notices line" eval '[ "$(orun)" = 0 ] && [ "$(calls)" = 1 ] && [ "$(notices)" = 1 ]'
+
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): FAIL — saw 0 of 11 decisions acted on; the 4 lines are log headers"
+check "outcome model FAIL (count met, meaning wrong): a result, exit 0" [ "$(orun)" = 0 ]
+check "…the line is FAIL" grep -q '^- OUTCOME-CHECK FAIL o/app#5 ' "$W/HANDOFF.md"
+check "…the sheet's line 1 is FAIL and it stays open" eval 'head -1 "$POST_LAND_TASKS/job5.md" | grep -q "^STATUS: FAIL o/app#5 aaa111 2026-11-25 — outcome NOT WORKING: saw 0 of 11"'
+check "…the banner says NOT WORKING" grep -q '^NOT WORKING: app #5 Noelle acts on her decisions — saw 0 of 11' "$W/store/banners"
+check "…the Notices line says NOT WORKING" grep -qx $'outcome:o/app#5:not-working\tapp #5 Noelle acts on her decisions: NOT WORKING — saw 0 of 11 decisions acted on; the 4 lines are log headers' "$W/store/notices"
+
+reset; osheet; handoff "$(oline 'echo 1')"; export VERDICT_5="Outcome check (live): PASS — fine"
+check "below the floor (1 < 3): FAIL by code, exit 0" [ "$(orun)" = 0 ]
+check "…no model ran, so no model PASS could count" [ "$(calls)" = 0 ]
+check "…code posted the FAIL comment itself, naming the count" eval 'jq -r ".[-1].body" "$CJ" | head -1 | grep -qx "Outcome check (live): FAIL — saw 1, needed at least 3"'
+check "…the line is FAIL and the Notices line says NOT WORKING" eval 'grep -q "^- OUTCOME-CHECK FAIL o/app#5 " "$W/HANDOFF.md" && grep -q "NOT WORKING — saw 1, needed at least 3" "$W/store/notices"'
+
+for o in "D1 5xx:echo 'D1_ERROR: 503 Service Unavailable' >&2; exit 1" "gh rate limit:echo 'HTTP 403: API rate limit exceeded' >&2; exit 1" "site down:echo 'curl: (7) Failed to connect' >&2; exit 7" "empty output:true"; do
+  reset; osheet; handoff "$(oline "${o#*:}")"; export VERDICT_5="Outcome check (live): PASS — fine"
+  check "outage (${o%%:*}): exit 1, never PASS" [ "$(orun)" = 1 ]
+  check "…(${o%%:*}) the line stays DUE, no model ran, the sheet's line 1 unchanged" eval 'grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/HANDOFF.md" && [ "$(calls)" = 0 ] && head -1 "$POST_LAND_TASKS/job5.md" | grep -q "^STATUS: LANDED-UNCHECKED"'
+  check "…(${o%%:*}) the comment says COULDNT-CHECK and the Notices line NOT CHECKED" eval 'jq -r ".[-1].body" "$CJ" | head -1 | grep -q "^Outcome check (live): COULDNT-CHECK — " && grep -q "^outcome:o/app#5:not-checked:2026-11-25	app #5 Noelle acts on her decisions: NOT CHECKED — " "$W/store/notices"'
+done
+check "replay of a COULDNT night: a second run posts no second comment or Notices line, and still exits 1" eval '[ "$(orun)" = 1 ] && [ "$(comments)" = 1 ] && [ "$(notices)" = 1 ]'
+export POST_LAND_TODAY=2026-11-27
+check "the next night it is tried again (a new day): exit 1, a new NOT CHECKED line for that day" eval '[ "$(orun)" = 1 ] && grep -q "^outcome:o/app#5:not-checked:2026-11-27" "$W/store/notices"'
+check "…2 days past the by-day, NOT CHECKED also raises a banner" grep -q '^NOT CHECKED for 2 days: app #5' "$W/store/banners"
+export POST_LAND_TODAY=2026-11-25
+
+reset; osheet; handoff "$(oline "$FOUR")"; unset VERDICT_5
+check "Rule 0, no comment after the model ran: exit 1" [ "$(orun)" = 1 ]
+check "…the line stays DUE and the Notices line says NOT CHECKED" eval 'grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/HANDOFF.md" && grep -q "NOT CHECKED — the checker posted no verdict" "$W/store/notices"'
+reset; osheet; handoff "$(oline "$FOUR")"
+check "Rule 0, ai-run down or a usage limit: exit 1, line DUE, NOT CHECKED" eval '[ "$(POST_LAND_AI_RUN="$W/bin/ai-run-down" orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/HANDOFF.md" && grep -q "NOT CHECKED — the checker posted no verdict (ai-run exit 1" "$W/store/notices"'
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): COULDNT-CHECK — the D1 query timed out"
+check "the model says COULDNT-CHECK: exit 1, line DUE, NOT CHECKED with its words" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md" && grep -q "NOT CHECKED — the D1 query timed out" "$W/store/notices"'
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4" COMMENT_USER=someone-else
+check "another account's PASS comment never counts: exit 1, DUE" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4" POST_LAND_TODAY=2026-11-24
+check "before its by-day: exit 0, nothing run, nothing written" eval '[ "$(orun)" = 0 ] && [ "$(calls)" = 0 ] && [ "$(notices)" = 0 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+export POST_LAND_TODAY=2026-11-25
+
+reset; osheet; handoff "$(oline infer infer)"; export VERDICT_5="Outcome check (live): PASS — saw 12 rows written today"
+check "owner bypass (infer) with no 'Ran:' line: COULDNT, exit 1, never PASS" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md" && grep -q "NOT CHECKED — the checker named no .Ran:. command" "$W/store/notices"'
+reset; osheet; handoff "$(oline infer infer)"; export VERDICT_5="Outcome check (live): PASS — saw 12 rows written today
+Ran: wrangler d1 execute boss --remote --command 'select count(*) from x'"
+check "owner bypass (infer) naming the command it ran: PASS, DONE" eval '[ "$(orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
+
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 replies, one from someone@example.com"
+check "a Notices write that fails: NAMED STOP, exit 1; the HANDOFF verdict stands" eval '[ "$(NOTICE_FAIL=1 orun)" = 1 ] && grep -q "NOTICE_UNWRITTEN" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 replies, one from someone@example.com"
+check "private data: an address the model wrote is masked in the Notices line and sheet" eval '[ "$(orun)" = 0 ] && grep -q "one from \[email\]" "$W/store/notices" && ! grep -q "@example.com" "$W/store/notices" "$POST_LAND_TASKS/done/job5.md"'
+reset; osheet; handoff "$(oline 'echo 0; echo ops@example.com >/dev/null')"
+check "a check that counts 0 (the Noelle case: 0 of 11 acted on) is NOT WORKING by code, never 'could not check'" eval '[ "$(orun)" = 0 ] && grep -q "^- OUTCOME-CHECK FAIL " "$W/HANDOFF.md" && grep -q "NOT WORKING — saw 0, needed at least 3" "$W/store/notices"'
+check "private data: code's own comment masks an address in the check" eval '! grep -q "ops@example.com" "$CJ" && grep -q "\[email\]" "$CJ"'
+reset; osheet "STATUS: building o/app#9 x 2026-11-24"; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+check "a sheet whose line 1 names another PR is never changed" eval '[ "$(orun)" = 0 ] && head -1 "$POST_LAND_TASKS/job5.md" | grep -qx "STATUS: building o/app#9 x 2026-11-24"'
+reset; osheet; handoff "$(oline "$FOUR")
+$F1"; export VERDICT_5="Outcome check (live): PASS — saw 4" VERDICT_1="Form proof (production): PASS — ok"
+check "--now <form key> never runs an outcome check" eval '[ "$(orun --now o/site#1)" = 0 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md" && [ "$(calls)" = 1 ]'
+if [ -x /usr/bin/sandbox-exec ]; then
+  reset; osheet; probe="$HOME/.plc-sandbox-probe-$$"
+  handoff "$(oline "touch $probe && $FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+  check "the check runs in a no-write sandbox: a write is refused, COULDNT, exit 1" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 1 ] && [ ! -e "$probe" ] && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+  [ ! -e "$probe" ] || unlink "$probe"
+  reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+  check "…and a read-only check under the sandbox still counts (PASS)" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
+fi
+unset POST_LAND_TASKS POST_LAND_SANDBOX POST_LAND_NOTICE POST_LAND_TODAY
 
 echo "post-land-check: $passes ok, $fails failed"
 [ "$fails" -eq 0 ]

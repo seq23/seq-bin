@@ -8,8 +8,13 @@
 #   - FORM-PROOF DUE <owner/repo>#<pr> <sha> — …  a land that touched a form (land's gate_forms). Her words
 #                                                  23 Nov 2026: "after theee fixes u need to test them"; the
 #                                                  live form gets a marked TEST submission right after deploy.
+#   - OUTCOME-CHECK DUE <owner/repo>#<pr> <sha> — task:<slug> by:<day> expect:>=N — outcome: … — check: <cmd>
+#                                                  a green land whose PR declared a real Outcome (land's Outcome
+#                                                  gate, her order 24 Nov 2026: nothing is "working" until its real
+#                                                  output is checked live the next day). expect:infer = her bypass.
 #
-#   post-land-check                 every DUE line: each FORM-PROOF on its own, then all ENG-CHECKs in ONE batch
+#   post-land-check                 every DUE line: each FORM-PROOF on its own, then all ENG-CHECKs in ONE batch,
+#                                   then each OUTCOME-CHECK whose by-day has come
 #   post-land-check --now <key>     only the FORM-PROOF line for <owner/repo>#<pr> (land starts this, detached)
 #   post-land-check --dry-run       print what would run, run nothing
 #
@@ -21,10 +26,26 @@
 # raises a macOS banner; a form FAIL also files a GitHub issue on that repo (GitHub emails her: a broken live
 # form is a break a real person hits). Never an Open Loops row (her ruling 22 Nov 2026).
 #
+# An OUTCOME-CHECK is decided in three steps, and nothing skips the first two. (1) CODE runs the PR's own check
+# command itself (macOS sandbox-exec: no file writes outside temp; 5-min timeout) and reads the count it printed
+# (an integer on its last line, else its non-empty line count). A non-zero exit or no output is COULDNT-CHECK
+# (an outage: D1 5xx, a gh rate limit, a site down); a count under the floor is FAIL (NOT WORKING), posted by code
+# with no model run. (2) Only a count that meets the floor goes to ONE fresh `ai-run --role brain`, which judges
+# whether that output is the promised outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it
+# saw, with counts>`; code overrules a PASS below the floor, and the model's FAIL stands. No comment, ai-run down
+# or a usage limit is COULDNT-CHECK. (3) PASS → the line DONE, the task sheet's line 1 DONE (moved to done/), a
+# Notices line "<repo> #<pr> <outcome>: working — <seen>". FAIL → FAIL, line 1 FAIL, a banner, "… NOT WORKING —
+# <seen>". COULDNT-CHECK → the line stays DUE, exit 1, a "… NOT CHECKED — <seen>" Notices line each day, and a
+# banner once it is 2+ days past its by-day. One try per line per night (a replay posts nothing twice). Public
+# comments and Notices carry counts only (emails masked); the check's raw output stays in the local log.
+#
 # Scheduled nightly by launchd/com.seq.post-land-check.plist (23:15 Central, inside the Mac's 22:00–07:00
 # window; an ai-run job, so it stays on the Mac: her ruling 22 Nov 2026). Exit: 0 every line got a verdict
 # (FAILs included: they are results, and they are raised) · 1 a line got no verdict · 2 HANDOFF unreadable.
-# Env (tests): POST_LAND_HANDOFF, POST_LAND_AI_RUN, POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text).
+# Env (tests): POST_LAND_HANDOFF, POST_LAND_AI_RUN, POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text),
+#   POST_LAND_TASKS (task sheets dir), POST_LAND_TODAY (YYYY-MM-DD), POST_LAND_SANDBOX=off (Linux CI and tests),
+#   POST_LAND_NOTICE (a command given key and text; default: boss-os scripts/ops/outcome-notice.mjs via the vault),
+#   POST_LAND_LOCKS.
 set -uo pipefail
 
 HANDOFF="${POST_LAND_HANDOFF:-$HOME/HANDOFF.md}"
@@ -35,7 +56,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --now) NOW_KEY="${2:-}"; shift ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "post-land-check: unknown argument $1" >&2; exit 64 ;;
   esac
   shift
@@ -87,6 +108,11 @@ engineering check her Fast PRs ruling promises (23 Nov 2026). Load the ship-read
 For EACH merged PR below: read its merged diff (gh pr diff <n> --repo <owner/repo>) and the code around it, and judge it
 against fails 1-6 plus the one question "built from scratch today with our tools, would it look like this?". Also check its
 "Forms:" line is honest: if it touches a form page or server path and says none, that is a FAIL.
+Judge its "Outcome:" line and "## Not built" section by MEANING, against its brief and task sheet (~/Work/tasks/<slug>.md and
+<slug>-brief.md, named on its OUTCOME-CHECK line or in the PR; read them when they exist), never by keywords: an Outcome that
+is not the real output a person or job would see (a test run, a merged PR or "CI green" called the outcome), a check that would
+count something other than that output, or "none" on a PR that changes what a job produces, is a FAIL. So is a brief item, or a
+promise in the PR body, that is not built and is not listed under "## Not built" word for word.
 Then post ONE comment on that PR (gh pr comment <n> --repo <owner/repo> --body-file <file>) whose FIRST line is exactly
   Engineering check: PASS — <what you read, one line>
 or
@@ -137,7 +163,7 @@ trap 'for d in "${HELD[@]:-}"; do [ -n "$d" ] && rmdir "$d" 2>/dev/null; done' E
 fails=0; unproved=0; ran=0
 LINES="$(due_lines)"
 [ -n "$NOW_KEY" ] && LINES="$(awk -F'\t' -v k="$NOW_KEY" '$1 == "FORM-PROOF" && $2 == k' <<<"$LINES")"
-if [ -z "$LINES" ]; then say "nothing due${NOW_KEY:+ for $NOW_KEY} in $HANDOFF"; exit 0; fi
+if [ -z "$LINES" ] && { [ -n "$NOW_KEY" ] || ! grep -q '^- OUTCOME-CHECK DUE ' "$HANDOFF"; }; then say "nothing due${NOW_KEY:+ for $NOW_KEY} in $HANDOFF"; exit 0; fi
 
 # 1. Each form on its own, first: a broken live form is the urgent one.
 while IFS=$'\t' read -r kind key sha rest; do
@@ -185,6 +211,179 @@ $list"
     done <<<"$ENG"
   fi
 fi
+
+# 3. OUTCOME-CHECK lines (her order 24 Nov 2026: "nothing is called working until its real output is seen live").
+#    land writes: - OUTCOME-CHECK DUE <key> <sha> — task:<slug> by:<YYYY-MM-DD> expect:>=<N>|infer — outcome: <o> — check: <cmd>
+#    On or after its by-day (Central): CODE runs the check (read-only sandbox, 5 min), counts its output, and alone
+#    decides COULDNT-CHECK (the command failed or printed nothing) and FAIL (count below the floor); a PASS is then
+#    impossible. Only a count at or over the floor goes to ONE fresh `ai-run --role brain`, which judges whether that
+#    output really is the outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it saw, with counts>`.
+#    Its FAIL stands; its PASS counts only with the floor met. No comment, a model outage or a usage limit is
+#    COULDNT-CHECK: the line stays DUE, the Notices line says NOT CHECKED, the exit is 1.
+TASKS="${POST_LAND_TASKS:-$HOME/Work/tasks}"
+TODAY="${POST_LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
+outcome_lines() { # key <TAB> sha <TAB> task <TAB> by <TAB> expect <TAB> outcome <TAB> check
+  sed -nE 's/^- OUTCOME-CHECK DUE ([^ ]+#[0-9]+) ([^ ]+) — task:([^ ]*) by:([0-9]{4}-[0-9]{2}-[0-9]{2}) expect:(>=[0-9]+|infer) — outcome: (.*) — check: (.*)$/\1\t\2\t\3\t\4\t\5\t\6\t\7/p' "$HANDOFF" \
+    | sed -E 's/[[:space:]]+$//'
+}
+days_since() { python3 -c 'import sys,datetime as d; print((d.date.fromisoformat(sys.argv[2])-d.date.fromisoformat(sys.argv[1])).days)' "$1" "$2"; }
+mask() { sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[email]/g'; }   # public comments: counts, never an address
+one_line() { tr '\n\t' '  ' | sed -E 's/\. +/; /g; s/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c1-220; }
+# The sandbox the check runs in: reads and network allowed, writes only to temp and tool caches. No sandbox, no run.
+SANDBOX_PROFILE="(version 1)(allow default)(deny file-write*)(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (subpath \"$HOME/Library/Caches\") (subpath \"$HOME/.cache\") (subpath \"$HOME/.npm\") (subpath \"$HOME/.wrangler\") (subpath \"$HOME/Library/Preferences/.wrangler\") (subpath \"$HOME/.config/gh\") (subpath \"$HOME/.config/.wrangler\"))"
+run_check() { # $1 command -> stdout its output; rc its exit (124 timed out, 126 no sandbox)
+  if [ "${POST_LAND_SANDBOX:-on}" = off ]; then (cd "$HOME" && timeout 300 bash -c "$1" </dev/null 2>&1); return; fi
+  [ -x /usr/bin/sandbox-exec ] || { echo "no sandbox-exec on this machine: the check is not run unsandboxed"; return 126; }
+  (cd "$HOME" && timeout 300 /usr/bin/sandbox-exec -p "$SANDBOX_PROFILE" bash -c "$1" </dev/null 2>&1)
+}
+count_of() { # stdin output -> the bare integer on its last non-empty line, else its number of non-empty lines
+  awk 'NF { n++; last=$0 } END { gsub(/^[ \t]+|[ \t]+$/, "", last); if (last ~ /^[0-9]+$/) print last+0; else print n+0 }'
+}
+outcome_comment() { # $1 key  $2 ISO start -> "PASS|FAIL|COULDNT<TAB>url<TAB>what it saw<TAB>Ran: line"; rc 1 none
+  local repo="${1%#*}" pr="${1##*#}" me
+  me="$(gh api user --jq .login 2>/dev/null)" || return 1
+  gh api --paginate "repos/$repo/issues/$pr/comments" 2>/dev/null \
+    | jq -rs --arg me "$me" --arg since "$2" '
+        add // [] | map(select(.user.login == $me and .created_at >= $since))
+        | map(. + {first: ((.body // "") | split("\n")[0] | gsub("^[#*> ]+"; "") | gsub("[*]+$"; ""))})
+        | map(select(.first | ascii_downcase | startswith("outcome check (live)")))
+        | last // empty
+        | (.first | ltrimstr(.[0:20]) | gsub("^[ :]+"; "")) as $r
+        | ($r | ascii_upcase) as $u
+        | (if ($u | startswith("PASS")) then "PASS" elif ($u | startswith("FAIL")) then "FAIL"
+           elif ($u | test("^COULDN.?T")) then "COULDNT" else "?" end) as $v
+        | ($r | sub("^[A-Za-z'"'"'’-]+[ ]*(—|–|-)*[ ]*"; "")) as $seen
+        | ([(.body // "") | split("\n")[] | select(test("^[ *>-]*Ran:"; "i"))][0] // "") as $ran
+        | $v + "\t" + .html_url + "\t" + ($seen | gsub("\t"; " ")) + "\t" + ($ran | gsub("\t"; " "))' \
+    | grep -E '^(PASS|FAIL|COULDNT)	' | tail -1 | grep . || return 1
+}
+post_comment() { # $1 key  $2 body -> stdout the comment's url (rc 1 not posted)
+  local f; f="$(mktemp)"; printf '%s\n' "$2" > "$f"
+  gh pr comment "${1##*#}" --repo "${1%#*}" --body-file "$f" </dev/null 2>/dev/null | grep -oE 'https://[^ ]+' | tail -1 | grep .; local rc=$?
+  rm -f "$f"; return "$rc"
+}
+outcome_mark() { # $1 key  $2 DONE|FAIL  $3 link: the OUTCOME-CHECK line, same lock as land and the compaction hook
+  mark OUTCOME-CHECK "$1" "$2" "$3"
+}
+sheet_set() { # $1 slug  $2 key  $3 status line  $4 to-done(1|"") — only a sheet whose line 1 names this PR
+  local f="$TASKS/$1.md" tmp
+  [ -n "$1" ] && [ "$1" != - ] && [ -f "$f" ] || { say "  (task sheet $1 not open: line 1 not changed)"; return 0; }
+  head -1 "$f" | grep -qF " $2 " || { say "  (task sheet $1 names another PR on line 1: not changed)"; return 0; }
+  tmp="$(mktemp "$TASKS/.$1.XXXXXX")" && { printf '%s\n' "$3"; tail -n +2 "$f"; } > "$tmp" && mv -f "$tmp" "$f"
+  if [ -n "${4:-}" ]; then mkdir -p "$TASKS/done"; local d="$TASKS/done/$1.md"; [ -e "$d" ] && d="$TASKS/done/$1.$(date '+%Y%m%d-%H%M%S').md"; mv "$f" "$d"; fi
+}
+# The Notices line on her next morning email (boss-os morning "notices" section). One write per key: a key already
+# written (marker in $LOCKS) is never written twice; NOT CHECKED carries the day, so it shows again each morning.
+NOTICE_CMD="${POST_LAND_NOTICE:-}"
+notice() { # $1 key  $2 text -> rc 0 written (or already written)
+  local m="$LOCKS/notice-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+  [ -e "$m" ] && { say "  (Notices line $1 already written)"; return 0; }
+  [ -n "$DRY" ] && { say "[dry-run] would write Notices: $2"; return 0; }
+  if [ -n "$NOTICE_CMD" ]; then "$NOTICE_CMD" "$1" "$2" </dev/null
+  else (cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$2" </dev/null)
+  fi >>"$LOG" 2>&1 || { say "  NAMED STOP [NOTICE_UNWRITTEN] the Notices line for $1 could not be written (see $LOG); the HANDOFF line and PR comment stand"; return 1; }
+  : > "$m"
+}
+outcome_prompt() { # $1 key $2 sha $3 outcome $4 check $5 expect $6 count $7 output(path) $8 task
+  if [ "$5" = infer ]; then cat <<EOF
+You are a FRESH, independent checker (~/.claude/agents/reviewer.md). You did not build PR $1 (merge $2). It landed under her
+bypass with no Outcome declared. Her order (24 Nov 2026): nothing is called working until its real output is seen live.
+1. Read the PR (gh pr view ${1##*#} --repo ${1%#*}; gh pr diff ${1##*#} --repo ${1%#*}) and its task sheet ~/Work/tasks/$8.md
+   if one exists. Decide what real output it should have produced by now (rows, emails, posts, pages, log lines).
+2. Run ONE read-only command that counts that output on the live system (never write, send, post, deploy or delete).
+3. Post ONE comment (gh pr comment ${1##*#} --repo ${1%#*} --body-file <file>) whose FIRST line is exactly
+     Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what you saw, with counts, one sentence>
+   and whose SECOND line is
+     Ran: <the exact command you ran>
+   COULDNT-CHECK when you could not read the live system. Never PASS on a guess.
+Every repo is public: counts only, never names, LP names, deal terms, children's names, owner emails or secrets.
+EOF
+  else cat <<EOF
+You are a FRESH, independent checker (~/.claude/agents/reviewer.md). You did not build PR $1 (merge $2).
+Her order (24 Nov 2026): nothing is called working until its real output is seen live. The PR promised:
+  Outcome: $3
+  check: $4   (must count >= ${5#>=})
+post-land-check ran that check itself just now (read-only sandbox). It counted $6. Its output (the first 80 lines):
+----
+$(head -80 "$7")
+----
+Judge the MEANING: does this output show the promised outcome really happening (not a header row, an error message, a
+test fixture or the old behaviour counted as the new)? Read the PR (gh pr view ${1##*#} --repo ${1%#*}) and its task sheet
+~/Work/tasks/$8.md if one exists; you may run your own read-only commands. Never write, send, post, deploy or delete.
+Post ONE comment (gh pr comment ${1##*#} --repo ${1%#*} --body-file <file>) whose FIRST line is exactly
+  Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what you saw, with counts, one sentence>
+then the evidence. Every repo is public: counts only, never names, LP names, deal terms, children's names, owner emails or
+secrets in the comment.
+EOF
+  fi
+}
+
+oruns=0; ofails=0; ounproved=0
+OUTL=""; [ -z "$NOW_KEY" ] && OUTL="$(outcome_lines)"
+while IFS=$'\t' read -r key sha task by expect outc cmd; do
+  [ -n "$key" ] || continue
+  late="$(days_since "$by" "$TODAY" 2>/dev/null)" || { say "outcome: $key has an unreadable by-day '$by'; NOT CHECKED"; late=99; }
+  [ "$late" -ge 0 ] || { say "outcome: $key is due $by, not yet"; continue; }
+  slugp="$(printf '%s' "$key" | sed -E 's#^[^/]+/##; s/#/ #/')"   # "boss-os #557"
+  shortout="$(printf '%s' "$outc" | one_line | cut -c1-90)"
+  take "outcome-$key" || { say "outcome: $key is being checked by another run"; continue; }
+  tried="$LOCKS/tried-$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')-$TODAY"
+  oruns=$((oruns + 1))
+  if [ -e "$tried" ]; then   # replay: tonight's run already said NOT CHECKED, with its comment and Notices line
+    ounproved=$((ounproved + 1)); say "outcome: $key already tried today and still NOT CHECKED; no second comment"; continue
+  fi
+  say "outcome: $key ($outc; check: $cmd; expect $expect; by $by)"
+  verdict=""; seen=""; url=""; outf="$(mktemp)"
+  if [ "$expect" = infer ]; then n=""
+  else
+    run_check "$cmd" > "$outf"; crc=$?
+    printf '=== outcome check %s: %s (exit %s)\n' "$key" "$cmd" "$crc" >> "$LOG"; head -200 "$outf" >> "$LOG"   # raw output: the local log only
+    n="$(count_of < "$outf")"; lines_out="$(grep -c . "$outf")"
+    if [ -n "$DRY" ]; then say "[dry-run] the check printed $n (exit $crc)"; rm -f "$outf"; continue; fi
+    if [ "$crc" -ne 0 ] || [ "$lines_out" -eq 0 ]; then   # failed or silent: unknown. A printed 0 is a reading (below).
+      verdict=COULDNT; seen="the check could not read it (exit $crc, $lines_out line(s) of output)"
+      [ "$crc" -eq 124 ] && seen="the check timed out after 5 min"; [ "$crc" -eq 126 ] && seen="no read-only sandbox to run the check in"
+      [ "$crc" -eq 0 ] && seen="the check printed nothing"
+    elif [ "$n" -lt "${expect#>=}" ]; then
+      verdict=FAIL; seen="saw $n, needed at least ${expect#>=}"
+    fi
+    if [ -n "$verdict" ]; then   # code's own verdict: no model run, no PASS possible
+      url="$(post_comment "$key" "Outcome check (live): $([ "$verdict" = COULDNT ] && echo COULDNT-CHECK || echo FAIL) — $seen
+Outcome: $(printf '%s' "$outc" | mask)
+Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), run by post-land-check on $TODAY; decided by code, no model.")" || url="(comment not posted)"
+    fi
+  fi
+  if [ -z "$verdict" ]; then
+    start="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    run_ai "outcome $key" "$(outcome_prompt "$key" "$sha" "$outc" "$cmd" "$expect" "${n:-?}" "$outf" "$task")"; arc=$?
+    if v="$(outcome_comment "$key" "$start")"; then
+      IFS=$'\t' read -r verdict url seen ranline <<<"$v"
+      if [ "$expect" = infer ] && [ -z "$ranline" ]; then verdict=COULDNT; seen="the checker named no 'Ran:' command, so nothing it saw is proven"; fi
+      if [ "$verdict" = PASS ] && [ -n "$n" ] && [ "$n" -lt "${expect#>=}" ]; then verdict=FAIL; seen="saw $n, needed at least ${expect#>=} (the model's PASS is overruled)"; fi
+    else
+      verdict=COULDNT; seen="the checker posted no verdict (ai-run exit $arc: down, a usage limit or no comment)"; url="(no comment)"
+    fi
+  fi
+  rm -f "$outf"
+  seen="$(printf '%s' "$seen" | mask | one_line)"
+  case "$verdict" in
+    PASS)
+      outcome_mark "$key" DONE "$url"; say "  PASS $key $url — $seen"
+      sheet_set "$task" "$key" "STATUS: DONE $key $sha $TODAY — outcome checked live: $seen ($url)" 1
+      notice "outcome:$key:working" "$slugp $shortout: working — $seen" || ounproved=$((ounproved + 1)) ;;
+    FAIL)
+      outcome_mark "$key" FAIL "$url"; ofails=$((ofails + 1)); say "  FAIL $key $url — $seen"
+      sheet_set "$task" "$key" "STATUS: FAIL $key $sha $TODAY — outcome NOT WORKING: $seen ($url)"
+      notify "NOT WORKING: $slugp $shortout — $seen"
+      notice "outcome:$key:not-working" "$slugp $shortout: NOT WORKING — $seen" || ounproved=$((ounproved + 1)) ;;
+    *)
+      ounproved=$((ounproved + 1)); : > "$tried"
+      say "  COULDNT-CHECK $key — $seen; the line stays DUE"
+      [ "$late" -ge 2 ] && notify "NOT CHECKED for $late days: $slugp $shortout — $seen"
+      notice "outcome:$key:not-checked:$TODAY" "$slugp $shortout: NOT CHECKED — $seen" || true ;;
+  esac
+done <<<"$OUTL"
+ran=$((ran + oruns)); fails=$((fails + ofails)); unproved=$((unproved + ounproved))
 
 [ "$ran" -gt 0 ] || { say "nothing due${NOW_KEY:+ for $NOW_KEY}"; exit 0; }
 [ "$fails" -eq 0 ] || notify "Post-land check: $fails FAIL(s); each is marked FAIL in HANDOFF.md with its PR comment"

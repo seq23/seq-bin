@@ -94,6 +94,9 @@ F="$FAKE_DIR"; : > "$F/land-ran"; echo "land $* pwd=$PWD" >> "$F/land-log"
 case "$(cat "$F/land-mode" 2>/dev/null || echo ok)" in
   ok) sleep "${FAKE_LAND_SECS:-0}"; echo "1/5  verifying PR #$1 myself"; : > "$F/merged"; echo "LANDED"; exit 0 ;;
   nomerge) echo "1/5  verifying"; exit 0 ;;
+  outcome) echo "task=${LAND_TASK:-}" > "$F/land-task"; printf '\n--- NOT BUILT (PR #%s, word for word) ---\n- the job-target lever (G1)\n- G19, the sales reader\n--- END NOT BUILT ---\n' "$1"
+           echo "     OUTCOME-CHECK DUE t/fixture#$1 bbb — task:${LAND_TASK:-} by:2026-11-25 expect:>=3 — outcome: x — check: y"; echo "     OUTCOME: check due 2026-11-25 — Noelle acts on her decisions"; : > "$F/merged"; exit 0 ;;
+  nonecut) printf '\n--- NOT BUILT (PR #%s, word for word) ---\nNothing cut.\n--- END NOT BUILT ---\n' "$1"; : > "$F/merged"; exit 0 ;;
   red) echo "4/5  e2e"; printf '\033[31mSTOPPED: NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] e2e run 9 ended failure\033[0m\n'; exit 1 ;;
   unverified) printf '\033[31mSTOPPED: could not verify (network) — TLS handshake timeout. Nothing was merged by this step\033[0m\n'; exit 75 ;;
   ratelimited) printf '\033[31mSTOPPED: could not verify (rate limit) — HTTP 403: API rate limit exceeded. Nothing was merged by this step\033[0m\n'; exit 75 ;;
@@ -439,6 +442,34 @@ echo x > "$T/logs/evidence-9.log"; old 20 "$T/logs/evidence-9.log"; echo x > "$T
 "$LA" --status > "$W/out" 2>&1
 check "the named log kept, an unnamed one of the same age deleted" eval '[ -e "$T/logs/evidence-9.log" ] && [ ! -e "$T/logs/orphan.log" ]'
 rm -f "$T/evidence.md"
+
+echo "=== outcome gates (24 Nov 2026): landed is not done until the live check passes ==="
+reset; printf 'STATUS: review t/fixture#40 x 2026-11-24\nGoal: g\nDone:\n- built (abc123)\n' > "$T/outjob.md"; echo outcome > "$FAKE/land-mode"
+la 40 --task outjob; lockgone
+check "an Outcome with a live check: line 1 LANDED-UNCHECKED with the due day, the sheet stays open (not in done/)" \
+  eval 'line1 "$T/outjob.md" | grep -q "^STATUS: LANDED-UNCHECKED t/fixture#40 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb .* outcome check due 2026-11-25" && [ ! -e "$T/done/outjob.md" ]'
+check "…land ran with the sheet's slug in LAND_TASK (the DUE line carries it)" grep -qx 'task=outjob' "$FAKE/land-task"
+check "…the PR's Not built is copied under line 1, word for word, the rest of the sheet kept" \
+  eval '[ "$(sed -n 2,5p "$T/outjob.md")" = "$(printf "## Not built (PR #40, from land)\n- the job-target lever (G1)\n- G19, the sales reader\n## End Not built")" ] && grep -q "^- built (abc123)$" "$T/outjob.md"'
+sed -i.bak '1s/.*/STATUS: review t\/fixture#40 x 2026-11-24/' "$T/outjob.md"; rm -f "$T/outjob.md.bak"; : > "$W/api/posts.jsonl"
+la 40 --task outjob; lockgone
+check "…a second land of the same sheet keeps ONE Not built block" eval '[ "$(grep -c "^## Not built (PR #40" "$T/outjob.md")" -eq 1 ]'
+LAND_AFTER_TODAY=2026-11-26 "$LA" --status > "$W/out" 2>&1
+check "--status, a day after the due day: 'landed, not yet proven', never running or FAIL" \
+  eval 'grep "^outjob " "$W/out" | grep -q "\[landed, not yet proven: outcome check due 2026-11-25\]" && ! grep "^outjob " "$W/out" | grep -qiE "running|\[stale: landing|FAIL"'
+LAND_AFTER_TODAY=2026-11-27 "$LA" --status > "$W/out" 2>&1
+check "--status, 2 days past the due day: NOT CHECKED, never dropped" grep -q '^outjob .*\[NOT CHECKED: outcome check 2026-11-25 is 2+ days late' "$W/out"
+sed -i.bak '1s/.*/STATUS: LANDED-UNCHECKED t\/fixture#40 b 2026-11-24 — landed, not yet proven: outcome check due/' "$T/outjob.md"; rm -f "$T/outjob.md.bak"
+LAND_AFTER_TODAY=2026-11-26 "$LA" --status > "$W/out" 2>&1
+check "--status, a LANDED-UNCHECKED line whose due day cannot be read: NOT CHECKED (fails closed, never 'fine')" grep -q '^outjob .*\[NOT CHECKED: outcome check date unreadable' "$W/out"
+printf 'STATUS: DONE t/fixture#41 b 2026-11-25 — outcome PASS\n' > "$T/donejob.md"
+"$LA" --status > "$W/out" 2>&1
+check "--status: an open DONE sheet reads done, never running or failed" eval 'grep "^donejob " "$W/out" | grep -q "\[done: live outcome checked\]" && ! grep "^donejob " "$W/out" | grep -qiE "running|FAIL"'
+rm -f "$T/outjob.md" "$T/donejob.md"
+reset; printf 'STATUS: review\nGoal: g\n' > "$T/nonejob.md"; echo nonecut > "$FAKE/land-mode"
+la 42 --task nonejob; lockgone
+check "Outcome none: PASS, to done/, with 'Nothing cut.' under line 1" \
+  eval 'line1 "$T/done/nonejob.md" | grep -q "^STATUS: PASS t/fixture#42 " && sed -n 3p "$T/done/nonejob.md" | grep -qx "Nothing cut."'
 
 echo
 echo "land-after: $pass passed, $failn failed"

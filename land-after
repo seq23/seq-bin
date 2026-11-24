@@ -15,11 +15,18 @@
 #                               PASS → moved to ~/Work/tasks/done/; FAIL stays open for the coordinator, who
 #                               reads line 1 and fixes it that session. Never a row on her Open Loops list (her
 #                               ruling 22 Nov 2026: "they should have been done today and 0 out").
+#                               DONE MEANS CHECKED (her order 24 Nov 2026): a land whose PR declared a real Outcome
+#                               is `STATUS: LANDED-UNCHECKED … — landed, not yet proven: outcome check due <day>`
+#                               and stays open; post-land-check turns it DONE (moved to done/) only on the live
+#                               outcome PASS, or FAIL ("outcome NOT WORKING"). The PR's `## Not built` is copied
+#                               word for word under line 1 on every land, so nothing cut is hidden.
 #   ~/Work/tasks/logs/<slug>-<pr>.log   everything land printed, secrets masked.
 #
 #   land-after --status      one line per open sheet (its line 1 and path), for HANDOFF's Jobs list; a
 #                            `landing` sheet with no live worker, or older than 90 min, is "stale"; any open
-#                            sheet untouched 7+ days is "stale".
+#                            sheet untouched 7+ days is "stale". LANDED-UNCHECKED shows "[landed, not yet proven:
+#                            outcome check due <day>]", or "[NOT CHECKED …]" once 2+ days past it (an unreadable
+#                            day counts as late); DONE shows "[done: live outcome checked]". Neither is running.
 #   land-after --self-test   runs tests/test-land-after.sh.
 #   land-after --holds <owner/repo> <pr>   rc 0 (pid on stdout) while a live land holds that PR; 1 when none does.
 #   land-after <pr> ... --dry-run          every check, then "would land": nothing written, locked or started.
@@ -126,6 +133,20 @@ set_status() { # $1 slug  $2 full status line. A missing sheet is recreated, nev
   else new_sheet "$tmp" "$2"; fi
   mv -f "$tmp" "$f"
 }
+add_not_built() { # $1 slug $2 pr $3 the PR's "## Not built" text from land. Under line 1; a re-run replaces its own block.
+  [ -n "$3" ] || return 0
+  local f="$TASKS/$1.md" tmp
+  [ -f "$f" ] || return 0
+  tmp="$(mktemp "$TASKS/.$1.XXXXXX")" || return 1
+  if NB="$3" PRN="$2" python3 -c '
+import os, re, sys
+lines = open(sys.argv[1]).read().split("\n")
+head, rest = lines[:1], "\n".join(lines[1:])
+rest = re.sub(r"(?s)^## Not built \(PR #\d+, from land\)\n.*?\n## End Not built\n", "", rest)
+block = "## Not built (PR #%s, from land)\n%s\n## End Not built\n" % (os.environ["PRN"], os.environ["NB"].rstrip("\n"))
+sys.stdout.write("\n".join(head) + "\n" + block + rest)
+' "$f" > "$tmp"; then mv -f "$tmp" "$f"; else rm -f "$tmp"; return 1; fi
+}
 add_note() { printf -- '- %s land-after: %s\n' "$(now)" "$2" >> "$TASKS/$1.md"; }
 move_done() { # $1 slug -> done/<slug>.md (an older done copy of the same slug is kept, the new one is dated)
   local dest="$DONE/$1.md"
@@ -168,6 +189,13 @@ status() {
         if ! alive "$pid"; then flags="  [stale: landing, no land running]"
         elif [ "$age" -ge "$STALE_LANDING_MIN" ]; then flags="  [stale: landing ${age}m, pid $pid past 90 min]"
         else flags="  [running: pid $pid, ${age}m]"; fi ;;
+      "STATUS: LANDED-UNCHECKED"*) # landed, its live outcome not yet checked: never running, never failed
+        local due late
+        due="$(grep -oE 'outcome check due [0-9]{4}-[0-9]{2}-[0-9]{2}' <<<"$line" | grep -oE '[0-9-]{10}$')"
+        late="$(python3 -c 'import sys,datetime as d; t=d.date.fromisoformat(sys.argv[2]); print(1 if d.date.fromisoformat(sys.argv[1])+d.timedelta(days=2)<=t else 0)' "$due" "${LAND_AFTER_TODAY:-$(TZ=America/Chicago date +%F)}" 2>/dev/null || echo 1)"
+        if [ "$late" = 1 ]; then flags="  [NOT CHECKED: outcome check ${due:-date unreadable} is 2+ days late; post-land-check has not judged it]"
+        else flags="  [landed, not yet proven: outcome check due $due]"; fi ;;
+      "STATUS: DONE"*) flags="  [done: live outcome checked]" ;;
     esac
     [ "$age" -ge "$STALE_OPEN_MIN" ] && flags="$flags  [stale: untouched $((age / 1440))d]"
     printf '%s  %s%s  %s\n' "$slug" "$line" "$flags" "$f"
@@ -251,7 +279,7 @@ worker() {
 
   # 2. land — the ONE lander. Its words go to the log (masked) and to a scratch copy for the failing step.
   echo "=== land $PR ($(now))"
-  (cd "$DIR" && "$LAND_BIN" "$PR" </dev/null) 2>&1 | redact | tee "$LANDOUT"
+  (cd "$DIR" && LAND_TASK="$SLUG" "$LAND_BIN" "$PR" </dev/null) 2>&1 | redact | tee "$LANDOUT"   # LAND_TASK: the slug goes on land's OUTCOME-CHECK DUE line
   local rc="${PIPESTATUS[0]}" step
   echo "=== land exited $rc ($(now))"
   if [ "$rc" -ne 0 ]; then
@@ -280,10 +308,22 @@ worker() {
     [ "$rc" -eq 0 ] || fail "then failed (exit $rc): $cmd"
   done
 
-  # 5. PASS: line 1, the sheet moved to done/.
+  # 5. Landed. land's "## Not built" goes on the sheet under line 1, word for word (her order 24 Nov 2026:
+  # nothing cut is hidden). A PR whose Outcome is a live check is LANDED-UNCHECKED and stays open: only
+  # post-land-check's live PASS makes it DONE (and moves it to done/). An Outcome of "none" is PASS, to done/.
   FINISHED=1
+  local nb due dest
+  nb="$(awk '/^--- END NOT BUILT ---$/{f=0} f; /^--- NOT BUILT \(PR #[0-9]+, word for word\) ---$/{f=1}' "$LANDOUT")"
+  due="$(grep -oE '^ *OUTCOME: check due [0-9]{4}-[0-9]{2}-[0-9]{2}' "$LANDOUT" | tail -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}$')"
+  if [ -n "$due" ]; then
+    set_status "$SLUG" "STATUS: LANDED-UNCHECKED $REPO#$PR $MERGE_SHA $(now) — landed, not yet proven: outcome check due $due (post-land-check 23:15)"
+    add_not_built "$SLUG" "$PR" "$nb"
+    echo "OUTPUT land-after $REPO#$PR LANDED-UNCHECKED $MERGE_SHA — outcome check due $due; sheet $SHEET"
+    exit 0
+  fi
   set_status "$SLUG" "STATUS: PASS $REPO#$PR $MERGE_SHA $(now)"
-  local dest; dest="$(move_done "$SLUG")" || dest="$SHEET (could not be moved to done/)"
+  add_not_built "$SLUG" "$PR" "$nb"
+  dest="$(move_done "$SLUG")" || dest="$SHEET (could not be moved to done/)"
   echo "OUTPUT land-after $REPO#$PR PASS $MERGE_SHA — sheet $dest"
   exit 0
 }

@@ -83,7 +83,8 @@ check "eng PASS is DONE" grep -q '^- ENG-CHECK DONE o/app#2 ' "$W/HANDOFF.md"
 check "eng FAIL is FAIL" grep -q '^- ENG-CHECK FAIL o/app#3 ' "$W/HANDOFF.md"
 check "the second form line, after an ai-run that reads stdin, was still checked" grep -q '^- FORM-PROOF DONE o/site#4 ' "$W/HANDOFF.md"
 check "an eng FAIL files no issue" [ ! -f "$W/store/issues" ]
-check "an eng FAIL writes its fix sheet: STATUS TODO with the verdict link" grep -q '^STATUS: TODO .*o/app#3.*https://github.com/o/app/pull/3#c$' "$W/tasks/engfix-app-3.md"
+check "an eng FAIL writes its fix sheet: STATUS TODO with the verdict link" grep -q '^STATUS: TODO .*app PR 3.*https://github.com/o/app/pull/3#c$' "$W/tasks/engfix-app-3.md"
+check "line 1 names no owner/repo#n, so land-after takes the FIX PR on this sheet" bash -c '! head -1 "$1" | grep -qE "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+"' _ "$W/tasks/engfix-app-3.md"
 check "the fix sheet names the land that closes it" grep -q 'land-after <fix pr> --task engfix-app-3 --repo o/app' "$W/tasks/engfix-app-3.md"
 check "an eng PASS writes no fix sheet" [ ! -e "$W/tasks/engfix-app-2.md" ]
 check "the FAIL banner points at the fix sheet" grep -q 'fix sheet' "$W/store/banners"

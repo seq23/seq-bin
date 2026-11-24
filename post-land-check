@@ -56,14 +56,15 @@ notify() {
 
 [ -r "$HANDOFF" ] || { say "NAMED STOP [HANDOFF_UNREADABLE] $HANDOFF cannot be read: no DUE line could be checked"; notify "Post-land check could not read HANDOFF.md"; exit 2; }
 
-# An engineering FAIL's fix sheet. One per PR: an existing open or done sheet is never overwritten.
+# An engineering FAIL's fix sheet. One per PR: an existing open or done sheet is never overwritten. Line 1
+# never names <owner/repo>#<n>: land-after reads that as the sheet's own PR and would refuse the FIX PR's land.
 fix_sheet() { # $1 owner/repo#pr  $2 verdict url
   local repo="${1%#*}" pr="${1##*#}" slug sheet
   slug="engfix-${repo##*/}-$pr"; sheet="$TASKS/$slug.md"
   { [ -e "$sheet" ] || [ -e "$TASKS/done/$slug.md" ]; } && return 0
   mkdir -p "$TASKS" 2>/dev/null
   if printf '%s\n' \
-      "STATUS: TODO engineering-check FAIL on $1, fix it today — $2" \
+      "STATUS: TODO engineering-check FAIL on ${repo##*/} PR $pr, fix it today — $2" \
       "# Fix the engineering-check FAIL on $1" "" \
       "Written by post-land-check $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'). The verdict: $2" "" \
       "1. Read the verdict comment. Fix every CONFIRMED finding (and each SUSPECTED one that proves real) in ONE PR" \

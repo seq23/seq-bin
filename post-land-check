@@ -26,6 +26,11 @@
 # and the exit non-zero (rule 0: a run that proved nothing never ends 0). A FAIL, or a run that proved nothing,
 # raises a macOS banner; a form FAIL also files a GitHub issue on that repo (GitHub emails her: a broken live
 # form is a break a real person hits). Never an Open Loops row (her ruling 22 Nov 2026).
+# An engineering FAIL is never only a mark (her yes 24 Nov 2026: "a FAIL would then always lead to a fix"): it
+# writes the fix's task sheet ~/Work/tasks/engfix-<repo>-<pr>.md (STATUS: TODO, the verdict link, how to land),
+# which the coordinator picks up like any open sheet. The fix lands with `land-after <pr> --task <that slug>`,
+# which moves the sheet to done/. Every run, due work or not, banners each fix sheet still open, so a FAIL
+# cannot be forgotten: the banner repeats nightly until the fix has landed.
 #
 # An OUTCOME-CHECK is decided in three steps, and nothing skips the first two. (1) CODE runs the PR's own check
 # command itself, but only once the read-only gate (readonly_gate, below) has passed it: a check that could send,
@@ -456,6 +461,7 @@ except Exception as e:   # the gate itself failed: nothing proves the check only
 sys.exit(0)
 PY
 }
+TASKS="${POST_LAND_TASKS:-$HOME/Work/tasks}"
 NOW_KEY=""; DRY=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -476,6 +482,26 @@ notify() {
 }
 
 [ -r "$HANDOFF" ] || { say "NAMED STOP [HANDOFF_UNREADABLE] $HANDOFF cannot be read: no DUE line could be checked"; notify "Post-land check could not read HANDOFF.md"; exit 2; }
+
+# An engineering FAIL's fix sheet. One per PR: an existing open or done sheet is never overwritten. Line 1
+# never names <owner/repo>#<n>: land-after reads that as the sheet's own PR and would refuse the FIX PR's land.
+fix_sheet() { # $1 owner/repo#pr  $2 verdict url
+  local repo="${1%#*}" pr="${1##*#}" slug sheet
+  slug="engfix-${repo##*/}-$pr"; sheet="$TASKS/$slug.md"
+  { [ -e "$sheet" ] || [ -e "$TASKS/done/$slug.md" ]; } && return 0
+  mkdir -p "$TASKS" 2>/dev/null
+  if printf '%s\n' \
+      "STATUS: TODO engineering-check FAIL on ${repo##*/} PR $pr, fix it today — $2" \
+      "# Fix the engineering-check FAIL on $1" "" \
+      "Written by post-land-check $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'). The verdict: $2" "" \
+      "1. Read the verdict comment. Fix every CONFIRMED finding (and each SUSPECTED one that proves real) in ONE PR" \
+      "   on $repo, briefed with agent-brief like any fix; a refactor the verdict names is built, never logged as debt." \
+      "2. Land it: land-after <fix pr> --task $slug --repo $repo. Its PASS moves this sheet to done/, which ends the" \
+      "   nightly banner." > "$sheet" 2>/dev/null
+  then say "  fix sheet: $sheet"; else say "  (the fix sheet $sheet could not be written; the FAIL line and banner stand)"; fi
+}
+# Every fix sheet still open (not yet moved to done/ by its land): the nightly reminder.
+open_fixes() { local f; for f in "$TASKS"/engfix-*.md; do [ -f "$f" ] && basename "$f" .md; done; return 0; }
 
 # The DUE lines: kind <TAB> key <TAB> sha <TAB> the rest.
 due_lines() {
@@ -567,6 +593,15 @@ take() { # $1 key -> rc 1 when another run holds it
 }
 trap 'for d in "${HELD[@]:-}"; do [ -n "$d" ] && rmdir "$d" 2>/dev/null; done' EXIT
 
+# The fixes earlier FAILs still owe, before any new check (and on nights with nothing due).
+if [ -z "$NOW_KEY" ] && [ -z "$DRY" ]; then
+  owed="$(open_fixes | tr '\n' ' ' | sed 's/ $//')"
+  if [ -n "$owed" ]; then
+    say "engineering-check fixes still open: $owed"
+    notify "Engineering-check fixes still open (each is a sheet in ~/Work/tasks): $owed"
+  fi
+fi
+
 fails=0; unproved=0; ran=0
 LINES="$(due_lines)"
 [ -n "$NOW_KEY" ] && LINES="$(awk -F'\t' -v k="$NOW_KEY" '$1 == "FORM-PROOF" && $2 == k' <<<"$LINES")"
@@ -611,7 +646,7 @@ $list"
       if v="$(verdict_comment "$key" "Engineering check" "$start")"; then
         verdict="${v%%	*}"; url="${v#*	}"
         if [ "$verdict" = PASS ]; then mark ENG-CHECK "$key" DONE "$url"; say "  PASS $key $url"
-        else mark ENG-CHECK "$key" FAIL "$url"; fails=$((fails + 1)); say "  FAIL $key $url"; fi
+        else mark ENG-CHECK "$key" FAIL "$url"; fails=$((fails + 1)); say "  FAIL $key $url"; fix_sheet "$key" "$url"; fi
       else
         unproved=$((unproved + 1)); say "  NO VERDICT: no 'Engineering check:' comment on $key after the run; the line stays DUE"
       fi
@@ -628,7 +663,6 @@ fi
 #    output really is the outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it saw, with counts>`.
 #    Its FAIL stands; its PASS counts only with the floor met. No comment, a model outage or a usage limit is
 #    COULDNT-CHECK: the line stays DUE, the Notices line says NOT CHECKED, the exit is 1.
-TASKS="${POST_LAND_TASKS:-$HOME/Work/tasks}"
 TODAY="${POST_LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
 outcome_lines() { # key <TAB> sha <TAB> task <TAB> by <TAB> expect <TAB> outcome <TAB> check
   sed -nE 's/^- OUTCOME-CHECK DUE ([^ ]+#[0-9]+) ([^ ]+) — task:([^ ]*) by:([0-9]{4}-[0-9]{2}-[0-9]{2}) expect:(>=[0-9]+|infer) — outcome: (.*) — check: (.*)$/\1\t\2\t\3\t\4\t\5\t\6\t\7/p' "$HANDOFF" \
@@ -807,6 +841,6 @@ done <<<"$OUTL"
 ran=$((ran + oruns)); fails=$((fails + ofails)); unproved=$((unproved + ounproved))
 
 [ "$ran" -gt 0 ] || { say "nothing due${NOW_KEY:+ for $NOW_KEY}"; exit 0; }
-[ "$fails" -eq 0 ] || notify "Post-land check: $fails FAIL(s); each is marked FAIL in HANDOFF.md with its PR comment"
+[ "$fails" -eq 0 ] || notify "Post-land check: $fails FAIL(s); each is marked FAIL in HANDOFF.md and has a fix sheet in ~/Work/tasks"
 if [ "$unproved" -gt 0 ]; then notify "Post-land check: $unproved line(s) got no verdict and stay DUE"; exit 1; fi
 exit 0

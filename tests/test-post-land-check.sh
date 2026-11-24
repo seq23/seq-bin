@@ -41,11 +41,11 @@ done
 AI
 chmod +x "$W/bin/gh" "$W/bin/ai-run"
 export PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_LOG="$W/log" \
-  POST_LAND_HANDOFF="$W/HANDOFF.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify"
+  POST_LAND_HANDOFF="$W/HANDOFF.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/tasks"
 printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; chmod +x "$W/bin/notify"
 fails=0; passes=0
 check() { local label="$1"; shift; if "$@"; then passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${PLC_DEBUG:-}" ] || sed "s/^/    | /" "$W/out" 2>/dev/null | tail -8; fi; }
-reset() { rm -rf "$W/store" "$W/locks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 VERDICT_5 COMMENT_USER COMMENT_AT; }
+reset() { rm -rf "$W/store" "$W/locks" "$W/tasks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 VERDICT_5 COMMENT_USER COMMENT_AT; }
 handoff() { printf '# H\n<!-- TODAY:START -->\n<!-- JOBS:END -->\n%s\n<!-- TODAY:END -->\n' "$1" > "$W/HANDOFF.md"; }
 F1='- FORM-PROOF DUE o/site#1 abc123 — forms: contact form; deployed 23 Nov 2026 10:00 CT; a marked TEST submission on production proves each one'
 E2='- ENG-CHECK DUE o/app#2 def456 — landed on green CI with no reviewer'"'"'s PASS (Fast PRs) 23 Nov 2026 10:00 CT; a fresh reviewer checks'
@@ -88,6 +88,20 @@ check "eng PASS is DONE" grep -q '^- ENG-CHECK DONE o/app#2 ' "$W/HANDOFF.md"
 check "eng FAIL is FAIL" grep -q '^- ENG-CHECK FAIL o/app#3 ' "$W/HANDOFF.md"
 check "the second form line, after an ai-run that reads stdin, was still checked" grep -q '^- FORM-PROOF DONE o/site#4 ' "$W/HANDOFF.md"
 check "an eng FAIL files no issue" [ ! -f "$W/store/issues" ]
+check "an eng FAIL writes its fix sheet: STATUS TODO with the verdict link" grep -q '^STATUS: TODO .*app PR 3.*https://github.com/o/app/pull/3#c$' "$W/tasks/engfix-app-3.md"
+check "line 1 names no owner/repo#n, so land-after takes the FIX PR on this sheet" bash -c '! head -1 "$1" | grep -qE "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+"' _ "$W/tasks/engfix-app-3.md"
+check "the fix sheet names the land that closes it" grep -q 'land-after <fix pr> --task engfix-app-3 --repo o/app' "$W/tasks/engfix-app-3.md"
+check "an eng PASS writes no fix sheet" [ ! -e "$W/tasks/engfix-app-2.md" ]
+check "the FAIL banner points at the fix sheet" grep -q 'fix sheet' "$W/store/banners"
+echo "STATUS: TODO hand-edited" > "$W/tasks/engfix-app-3.md"
+handoff "- ENG-CHECK DUE o/app#3 0a0b0c — again"; run >/dev/null
+check "an existing fix sheet is never overwritten" grep -qx 'STATUS: TODO hand-edited' "$W/tasks/engfix-app-3.md"
+rm -f "$W/store/banners"; handoff ""; run >/dev/null
+check "a night with nothing due still banners the open fix" grep -q 'still open.*engfix-app-3' "$W/store/banners"
+mkdir -p "$W/tasks/done"; mv "$W/tasks/engfix-app-3.md" "$W/tasks/done/"; rm -f "$W/store/banners"
+handoff "- ENG-CHECK DUE o/app#3 0a0b0c — again"; run >/dev/null
+check "a landed fix (sheet in done/) ends the banner" bash -c '! grep -q "still open" "$1" 2>/dev/null' _ "$W/store/banners"
+check "…and a repeat FAIL never reopens a done fix" [ ! -e "$W/tasks/engfix-app-3.md" ]
 
 reset; handoff "$F1
 $E2"; export VERDICT_1="Form proof (production): PASS — ok" VERDICT_2="Engineering check: PASS — x"

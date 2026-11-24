@@ -8,6 +8,7 @@
 set -u
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 G="$BIN/command-guard.mjs"
+LIVE_SUM="$(shasum < "$BIN/pr-patch-check")"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0; n=0; ok(){ n=$((n+1)); echo "  ok   $1"; }; bad(){ echo "  FAIL $1"; fail=1; }
 hook() { node -e 'console.log(JSON.stringify({hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:process.argv[1]},cwd:process.argv[2]}))' "$1" "$2" | node "$G"; }
@@ -57,11 +58,13 @@ out=$(LAND_SRC=/nonexistent hook "gh pr create --title t --body x" "$T/w")
 [ -z "$out" ] && ok "no land to read: let through, never a guess" || bad "no-land case refused"
 
 # Negative proof: a checker that never runs land's gate passes the unanswered PR, and this test sees it.
-cp "$BIN/pr-patch-check" "$T/pr-patch-check.bak"
-perl -pi -e 's/^msg="\$\(gate_patch /msg="\$(true /' "$BIN/pr-patch-check"
-out=$(hook "gh pr create --title t --body 'changes alpha'" "$T/w")
-cp "$T/pr-patch-check.bak" "$BIN/pr-patch-check"
+# The mutation runs on COPIES under $T (the guard finds pr-patch-check beside itself): the live guard in
+# ~/bin is never edited, so a killed or failed run cannot leave every land's patch check passing.
+mkdir -p "$T/mut"; cp "$G" "$T/mut/command-guard.mjs"; cp "$BIN/pr-patch-check" "$T/mut/pr-patch-check"
+perl -pi -e 's/^msg="\$\(gate_patch /msg="\$(true /' "$T/mut/pr-patch-check"
+out=$(G="$T/mut/command-guard.mjs" LAND_SRC="$BIN/land" hook "gh pr create --title t --body 'changes alpha'" "$T/w")
 denied "$out" && bad "mutation (gate never run) was not noticed" || ok "mutation: a checker that skips land's gate lets the unanswered PR through (so case 1 is real)"
 
+[ "$(shasum < "$BIN/pr-patch-check")" = "$LIVE_SUM" ] && ok "the live pr-patch-check is byte-for-byte unchanged" || bad "the live pr-patch-check was changed by this test"
 node "$G" --self-test >/dev/null || bad "guard self-test"
 [ "$fail" -eq 0 ] && echo "test-pr-patch-check: $n checks passed — the patch-or-rebuild line is asked for when the PR opens" || { echo "test-pr-patch-check: FAILED"; exit 1; }

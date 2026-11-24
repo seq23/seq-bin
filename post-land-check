@@ -32,7 +32,7 @@
 # (an outage: D1 5xx, a gh rate limit, a site down); a count under the floor is FAIL (NOT WORKING), posted by code
 # with no model run. (2) Only a count that meets the floor goes to ONE fresh `ai-run --role brain`, which judges
 # whether that output is the promised outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it
-# saw, with counts>`; code overrules a PASS below the floor, and the model's FAIL stands. No comment, ai-run down
+# saw, with counts>`; a count below the floor never reaches it, and the model's FAIL stands. No comment, ai-run down
 # or a usage limit is COULDNT-CHECK. (3) PASS → the line DONE, the task sheet's line 1 DONE (moved to done/), a
 # Notices line "<repo> #<pr> <outcome>: working — <seen>". FAIL → FAIL, line 1 FAIL, a banner, "… NOT WORKING —
 # <seen>". COULDNT-CHECK → the line stays DUE, exit 1, a "… NOT CHECKED — <seen>" Notices line each day, and a
@@ -359,7 +359,6 @@ Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), run by post-land-che
     if v="$(outcome_comment "$key" "$start")"; then
       IFS=$'\t' read -r verdict url seen ranline <<<"$v"
       if [ "$expect" = infer ] && [ -z "$ranline" ]; then verdict=COULDNT; seen="the checker named no 'Ran:' command, so nothing it saw is proven"; fi
-      if [ "$verdict" = PASS ] && [ -n "$n" ] && [ "$n" -lt "${expect#>=}" ]; then verdict=FAIL; seen="saw $n, needed at least ${expect#>=} (the model's PASS is overruled)"; fi
     else
       verdict=COULDNT; seen="the checker posted no verdict (ai-run exit $arc: down, a usage limit or no comment)"; url="(no comment)"
     fi

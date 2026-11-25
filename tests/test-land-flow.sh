@@ -98,18 +98,20 @@ case "$a" in
   "pr view "*baseRefName*) answer base main ;;
   # the allowance GitHub reports (land reads it with --jq): spent, back in 3 s.
   "api rate_limit"*) echo $(( $(date +%s) + 3 )); exit 0 ;;
-  "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # pr-meta = the PR's files/body/comments JSON (case 1d); absent = one non-screen file, no body.
   # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
   "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
   # The PR's repo is its url (o/r, on the fixture live-repos.json unless a case says otherwise); no-url = GitHub left it out.
-  "pr view "*"files,body,comments"*) { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
+  "pr view "*"files,body,comments"*) head="$(answer head "$HEADSHA")" || exit $?
+    { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
+      | jq -c --arg head "$head" '.headRefOid = $head | .headRefName //= "fixture"' \
       | if [ -f "$FAKE_DIR/no-url" ]; then cat; else jq -c '.url //= "https://github.com/o/r/pull/7"'; fi \
       | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi \
       | if [ -f "$FAKE_DIR/no-forms" ]; then cat; else jq -c '.body = ((.body // "") + "\nForms: none — a fixture change touching no form")'; fi \
       | if [ -f "$FAKE_DIR/no-outcome" ]; then cat; else jq -c '.body = ((.body // "") + "\nOutcome: none — a fixture change that runs nothing")'; fi \
       | if [ -f "$FAKE_DIR/no-notbuilt" ]; then cat; else jq -c '.body = ((.body // "") + "\n\n## Not built\nNothing cut.")'; fi; exit 0 ;;
+  "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # label-events = every label ever added (gh's --jq answer over the PR's issue events); default none; tls = down.
   "api --paginate repos/"*"/issues/7/events "*) answer label-events '[]' ;;
   # live_add: seq-bin's list through the contents API (live-get = its answer), the PUT logged to live-put.

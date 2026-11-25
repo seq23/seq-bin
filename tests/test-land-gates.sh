@@ -95,6 +95,15 @@ run_cases() {
   gate "$owner_post"
   check "Noelle accepts the separate owner review comment naming the head" [ "$RC" -eq 0 ]
 
+  local workflow
+  workflow="$(FAST=1 NOREVIEW=1 meta "$GOOD"$'\nOwner override: ship it right now' '[{"path":".github/workflows/ci.yml"}]')"
+  gate "$workflow"
+  check ".github changes require a reviewer comment despite an owner bypass" [ "$RC" -eq 1 ]
+  gate "$(jq --arg b "$GOOD" '.comments = [{authorAssociation:"OWNER",body:$b}]' <<<"$workflow")"
+  check ".github change can pass with separate reviewer approval for this head" [ "$RC" -eq 0 ]
+  gate "$(jq '.from_git_github = true | .files = [{"path":"other/renamed.yml"}]' <<<"$workflow")"
+  check "an exact diff finding .github catches a rename out of it" [ "$RC" -eq 1 ]
+
 echo "=== ship-ready: a PR that changes what people see ==="
 repo; pr_head 2 '  return x + 2;'
 gate "$(meta 'Tweaks the page.' "$SITE")"
@@ -362,6 +371,8 @@ neg() { # label, sed expression applied to land
   if LAND_UNDER_TEST="$W/land-broken" bash "$0" >/dev/null 2>&1; then echo "  FAIL negative proof: $1 still passes"; exit 1; fi
   echo "  ok   negative proof: $1 fails this test"
 }
+neg "a gate that trusts the PR body for protected changes" '/^trusted_review_required()/a\
+  return 1'
 neg "a signoff that never asks who signed" '/^is_builder()/a\
   return 1'
 neg "a patch check that never reads history" '/^patch_fixes()/a\

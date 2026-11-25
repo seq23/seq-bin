@@ -1164,8 +1164,20 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
 }
-trusted_review_required() { # stdin: PR view JSON. Brokered branches require a separate owner-authored comment.
-  jq -e '(.headRefName // "") | startswith("noelle/")' >/dev/null 2>&1
+trusted_review_required() { # stdin: PR view JSON, with from_git_github on the pinned land path
+  jq -e '((.headRefName // "") | startswith("noelle/"))
+    or (.from_git_github == true)
+    or any(.files[]?; (.path // "") | test("^\\.github(/|$)"))' >/dev/null 2>&1
+}
+verified_workflow_paths() { # $1 PR $2 exact head; stdin: PR metadata. Include old paths for deletes and renames.
+  local meta base changes touches=false
+  meta="$(cat)"
+  git fetch -q origin main 2>/dev/null || return 75
+  have_head "$1" "$2" >/dev/null || return 75
+  base="$(git merge-base origin/main "$2")" || return 75
+  changes="$(git diff --name-only --no-renames "$base" "$2" -- .github)" || return 75
+  [ -z "$changes" ] || touches=true
+  jq -c --argjson touches "$touches" '.from_git_github = $touches' <<<"$meta"
 }
 review_entries() { # [$1 voided]; stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
   # stand: the body (no time), then each comment by the repo's OWNER account (oldest first, with its createdAt).
@@ -1890,6 +1902,11 @@ PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,
 PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
 jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
   || unverified network "PR #$PR's label history (its issue events) could not be read, so whether it was ever labeled review-required is unknown"
+# An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
+HEAD="$(jq -er '.headRefOid | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$PRMETA")" \
+  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
+PRMETA="$(verified_workflow_paths "$PR" "$HEAD" <<<"$PRMETA")" \
+  || unverified network "PR #$PR exact workflow changes could not be determined"
 # --owner: write her words into the PR body once, so the bypass is on the record (owner_override reads it).
 if [ -n "$OWNER_WORDS" ]; then
   trusted_review_required <<<"$PRMETA" && die "NAMED STOP [REVIEW_REQUIRED] PR #$PR needs a separate reviewer comment"
@@ -1902,9 +1919,6 @@ if [ -n "$OWNER_WORDS" ]; then
   fi
   say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
-# An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
-HEAD="$(jq -er '.headRefOid | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$PRMETA")" \
-  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
 # The stale-checks test reads an Actions run's sha. Only an Actions run link carries a run id —
 # a Cloudflare Pages link ends in a uuid whose trailing digits are not one.
 RUNID="$(jq -r '[.[] | .link | capture("/actions/runs/(?<id>[0-9]+)") | .id][0] // empty' <<<"$CHECKS")"

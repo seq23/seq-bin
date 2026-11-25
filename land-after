@@ -115,7 +115,7 @@ load_land_blocks() {
   [ -n "$block" ] || return 1
   eval "$block"
   LAND_LIVE_REPOS="$(dirname "$LAND_SRC")/live-repos.json"   # the list beside the land whose gates these are
-  declare -F with_label_history pr_repo live_repo review_class review_text voided_pass pass_line covers_engineering owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
+  declare -F with_label_history pr_repo live_repo review_class review_text voided_pass pass_line covers_engineering pr_owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -386,15 +386,15 @@ main() {
   VIEW="$(with_label_history "$PR" <<<"$VIEW")"
   jq -e '.label_history | type == "array"' <<<"$VIEW" >/dev/null 2>&1 \
     || { say "could not verify $REPO#$PR (its label history, GitHub's issue events, did not answer); nothing started"; exit 75; }
-  local state body review reviewer HEADSHA
-  state="$(jq -r .state <<<"$VIEW")"; body="$(jq -r '.body // ""' <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
+  local state review reviewer HEADSHA
+  state="$(jq -r .state <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
   review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
   # Fast PRs item 1 (her ruling 23 Nov 2026): only a review-class PR (land's review_class: the review-required
   # label, a repo not on live-repos.json, a change to that list, or anything unread) needs the PASS before
   # anything starts. Others start at once; land itself still refuses a first public launch with no PASS.
   local cls
-  if ! owner_override <<<"$body" && cls="$(review_class <<<"$VIEW")"; then
+  if ! pr_owner_override <<<"$VIEW" && cls="$(review_class <<<"$VIEW")"; then
     local why
     reviewer="$(signoff Ship-ready <<<"$review")" \
       || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse_review "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"

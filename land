@@ -1164,6 +1164,9 @@ pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line
   line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
   [ -n "$line" ] && printf '%s\n' "$line"
 }
+trusted_review_required() { # stdin: PR view JSON. Brokered branches require a separate owner-authored comment.
+  jq -e '(.headRefName // "") | startswith("noelle/")' >/dev/null 2>&1
+}
 review_entries() { # [$1 voided]; stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
   # stand: the body (no time), then each comment by the repo's OWNER account (oldest first, with its createdAt).
   # Every agent posts as the owner's login; a comment from any other account (a passer-by on a public repo, a bot)
@@ -1172,10 +1175,13 @@ review_entries() { # [$1 voided]; stdin: PR view JSON -> "<epoch or empty>|<base
   # earlier PASS (review N9); a PASS posted after that fail still counts.
   # A fail verdict is the comment's FIRST line only, `VERDICT: fail` as a whole word (review R5): a later
   # note that quotes an earlier fail, "failsafe" or "failed checks fixed" never voids a PASS.
-  jq -r '[{at: "", b: (.body // "")}, (.comments[]? | select(.authorAssociation == "OWNER")
+  local json strict=false
+  json="$(cat)"
+  trusted_review_required <<<"$json" && strict=true
+  jq -r '[(if $strict then empty else {at: "", b: (.body // "")} end), (.comments[]? | select(.authorAssociation == "OWNER")
           | {at: ((.createdAt // "") | (try (fromdateiso8601 | tostring) catch "")), b: (.body // "")})]
     | ([to_entries[] | select(.value.b | test("\\A\\W*verdict:\\W*fail\\b"; "i")) | .key] | last // 0) as $from
-    | (if $part == "voided" then .[:$from] else .[$from:] end)[] | "\(.at)|\(.b | @base64)"' --arg part "${1:-}" 2>/dev/null
+    | (if $part == "voided" then .[:$from] else .[$from:] end)[] | "\(.at)|\(.b | @base64)"' --arg part "${1:-}" --argjson strict "$strict" <<<"$json" 2>/dev/null
   # With "voided": the texts BEFORE that fail instead, the ones it voids (voided_pass says so to the builder).
 }
 review_text() { # stdin: PR view JSON -> the texts of review_entries, one after another
@@ -1295,7 +1301,12 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
   local line sha stale posted="" own arrived="" rc
   line="$(review_text <<<"$4" | pass_line "$1")" || return 0
   have_head "$2" "$3" || return 75
-  if ! sha="$(pass_sha "$line" "$3")"; then
+  sha="$(pass_sha "$line" "$3")" || sha=""
+  if trusted_review_required <<<"$4" && [ "$sha" != "$3" ]; then
+    echo "NAMED STOP [STALE_PASS] PR #$2 needs a reviewer comment naming its current head $(sha_name "$3")"
+    return 1
+  fi
+  if [ -z "$sha" ]; then
     if posted="$(pass_posted "$1" <<<"$4")" && own="$(own_work_sha "$3")"; then
       arrived="$(arrived_at "$own" "$3")"; rc=$?
       [ "$rc" -eq 75 ] && { echo "PR #$2's check suites could not be read, so when its last commit reached GitHub is unknown"; return 75; }
@@ -1360,6 +1371,7 @@ class_line() { # stdin: PR body -> rc 0 with why on stdout when its Review class
 }
 review_class() { # stdin: PR view JSON (labels, label_history, body, files, changedFiles, url) -> rc 0 when it needs a reviewer's PASS, with why on stdout
   local j repo rc why; j="$(cat)"
+  trusted_review_required <<<"$j" && { echo "it requires a separate reviewer comment"; return 0; }
   jq -e '.labels | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its labels could not be read"; return 0; }
   jq -e 'any(.labels[]; (.name // "") == "review-required")' <<<"$j" >/dev/null 2>&1 && { echo "it carries the review-required label"; return 0; }
   jq -e '.label_history | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its label history could not be read"; return 0; }
@@ -1496,6 +1508,11 @@ gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body + owner comments -> rc 1 wi
 owner_override() { # stdin: PR body -> 0 when it carries a real Owner override line
   grep -iE '^[[:space:]>*-]*Owner override:' | sed -E 's/^[[:space:]>*-]*Owner override://I' | grep -v '<' | awk 'NF >= 3 { ok = 1 } END { exit !ok }'
 }
+pr_owner_override() { # stdin: PR view JSON
+  local json
+  json="$(cat)"
+  ! trusted_review_required <<<"$json" && jq -r '.body // ""' <<<"$json" | owner_override
+}
 # BUILDERS PROVE THEIR OWN TESTS (her ruling 22 Nov 2026: "i wanted many agents to work as efficiently
 # as u do"). Most first reviews of 22 Nov failed on tests that could not fail. A PR that changes code
 # must carry, in its body or an owner-account comment, a "Mutation" heading followed by at least one
@@ -1543,7 +1560,7 @@ gate_proof() { # $1 PR  $2 PR view JSON  $3 PR body + owner comments -> rc 1 wit
 }
 gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line on stdout) | 75 could not read
   local base body msg
-  jq -r '.body // ""' <<<"$3" | owner_override && return 0
+  pr_owner_override <<<"$3" && return 0
   git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; return 75; }
   msg="$(gate_quality "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
   msg="$(gate_proof "$1" "$3" "$(owner_text <<<"$3")")" || { echo "$msg"; return 1; }
@@ -1868,23 +1885,25 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 BASELINE_RED="$(baseline_red "$CHECKS")" && die "PR #$PR's ship-ready-baseline check is not green ($BASELINE_RED): fix what its job summary lists, push, and land again."
 NOTGREEN="$(not_green "$CHECKS")"
 [ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
+PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles,additions,deletions,headRefName,headRefOid)" \
+  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
+PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
+jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
+  || unverified network "PR #$PR's label history (its issue events) could not be read, so whether it was ever labeled review-required is unknown"
 # --owner: write her words into the PR body once, so the bypass is on the record (owner_override reads it).
 if [ -n "$OWNER_WORDS" ]; then
+  trusted_review_required <<<"$PRMETA" && die "NAMED STOP [REVIEW_REQUIRED] PR #$PR needs a separate reviewer comment"
   [ "$(wc -w <<<"$OWNER_WORDS" | tr -d ' ')" -ge 3 ] || die "--owner needs her own words (3+), e.g. --owner=\"land it deploy it finish it\""
   OBODY="$(gh pr view "$PR" --json body -q .body 2>/dev/null)" || die "PR #$PR's body could not be read to record the owner override"
   if ! owner_override <<<"$OBODY"; then
     printf '%s\n\nOwner override: "%s" (%s)\n' "$OBODY" "$OWNER_WORDS" "$(TZ=America/Chicago date '+%d %b %Y %H:%M CT')" \
       | gh pr edit "$PR" --body-file - >/dev/null || die "the owner override could not be written to PR #$PR"
+    PRMETA="$(jq --arg words "$OWNER_WORDS" '.body += ("\nOwner override: " + $words)' <<<"$PRMETA")"
   fi
   say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
 fi
-PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles,additions,deletions)" \
-  || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"
-PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
-jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
-  || unverified network "PR #$PR's label history (its issue events) could not be read, so whether it was ever labeled review-required is unknown"
 # An EMPTY HEAD IS NOT A HEAD. The merge below is pinned to it, so it must be a real sha.
-HEAD="$(gh_read '^[0-9a-f]{40}$' pr view "$PR" --json headRefOid -q .headRefOid)" \
+HEAD="$(jq -er '.headRefOid | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$PRMETA")" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's head commit could not be read: $(gh_err)"
 # The stale-checks test reads an Actions run's sha. Only an Actions run link carries a run id —
 # a Cloudflare Pages link ends in a uuid whose trailing digits are not one.
@@ -1909,7 +1928,7 @@ FORMS_DUE=""
 FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"; FORM_RC=$?
 if [ "$FORM_RC" -eq 0 ]; then
   [ -z "$FORM_MSG" ] || { FORMS_DUE="$FORM_MSG"; say "    forms: $FORM_MSG — proven on the preview; production is proven right after the deploy"; }
-elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
+elif [ -n "$OWNER_WORDS" ] || pr_owner_override <<<"$PRMETA"; then
   FORMS_DUE="undeclared (landed under her bypass)"; say "    forms: undeclared under her bypass; every form this PR touches is proven on production right after the deploy"
 else
   die "NAMED STOP [FORMS_UNDECLARED] $FORM_MSG"
@@ -1923,7 +1942,7 @@ JOBS="$(jq -r '.files[]?.path' <<<"$PRMETA" | job_files "$HEAD" "$(git merge-bas
 LTODAY="${LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
 OUT_MSG="$(outcome_parse "$PR" "$OUT_TEXT" "$JOBS" "$LTODAY")"; OUT_RC=$?
 NB_MSG="$(gate_not_built "$PR" "$OUT_TEXT")"; NB_RC=$?
-BYPASS=""; { [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; } && BYPASS=1
+BYPASS=""; { [ -n "$OWNER_WORDS" ] || pr_owner_override <<<"$PRMETA"; } && BYPASS=1
 if [ "$OUT_RC" -eq 0 ] && [ "$OUT_MSG" != none ]; then OUTCOME_DUE="$OUT_MSG"; say "    outcome: $(cut -f3 <<<"$OUT_MSG") — checked live by post-land-check from $(cut -f1 <<<"$OUT_MSG") (expect >= $(cut -f2 <<<"$OUT_MSG"))"
 elif [ "$OUT_RC" -eq 0 ]; then say "    outcome: none (no job, pipeline or agent changed)"
 elif [ -n "$BYPASS" ]; then
@@ -1941,7 +1960,7 @@ printf '\n--- NOT BUILT (PR #%s, word for word) ---\n%s\n--- END NOT BUILT ---\n
 # PASS for this head (launch_pass, the launch gate's own check) in a repo not yet on live-repos.json is added to
 # the list by the exit trap once the land ends green (live_add). Never under her bypass: no review stood.
 LIVE_ADD=""
-if ! jq -r '.body // ""' <<<"$PRMETA" | owner_override && review_text <<<"$PRMETA" | signoff Launch-ready >/dev/null; then
+if ! pr_owner_override <<<"$PRMETA" && review_text <<<"$PRMETA" | signoff Launch-ready >/dev/null; then
   LREPO="$(pr_repo <<<"$PRMETA")"
   if [ -n "$LREPO" ] && ! live_repo "$LREPO"; then
     LMSG="$(launch_pass "$PR" "$PRMETA" "$HEAD" "the launch")"; LRC=$?
@@ -1957,7 +1976,7 @@ fi
 # or a comment, or (Fast PRs item 4, 23 Nov 2026) a fresh reviewer's Ship-ready PASS for this head whose
 # own line says `rendered: <screens>` (clicked_or_rendered). Read after the gates, so origin/main is fetched.
 UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
-if [ -n "$UIFILES" ] && ! jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
+if [ -n "$UIFILES" ] && ! pr_owner_override <<<"$PRMETA"; then
   CLICK_MSG="$(clicked_or_rendered "$PR" "$PRMETA" "$HEAD")"; CLICK_RC=$?
   [ "$CLICK_RC" -eq 75 ] && unverified network "PR #$PR's rendered: PASS could not be checked against its head"
   [ "$CLICK_RC" -eq 0 ] \
@@ -2014,7 +2033,7 @@ fi
 LAND_ENG_MIN_LINES="${LAND_ENG_MIN_LINES:-200}"
 eng_small() { jq -e --argjson m "$LAND_ENG_MIN_LINES" '(.additions | type == "number") and (.deletions | type == "number") and (.additions + .deletions < $m)' <<<"${PRMETA:-"{}"}" >/dev/null 2>&1; }
 if eng_small; then say "    engineering check: not needed ($(jq '.additions + .deletions' <<<"$PRMETA") changed lines, under $LAND_ENG_MIN_LINES); the next-day live check still runs"
-elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"${PRMETA:-"{}"}" 2>/dev/null | owner_override; then LAND_ENG_DUE=bypass
+elif [ -n "$OWNER_WORDS" ] || pr_owner_override <<<"${PRMETA:-"{}"}"; then LAND_ENG_DUE=bypass
 elif ! ship_pass "$PR" "${PRMETA:-"{}"}" "${HEAD:-}" "landed" "the diff" >/dev/null 2>&1; then LAND_ENG_DUE=unreviewed; fi
 say "3/5  syncing main"
 # THE OWNER'S WORKING TREE IS NEVER MUTATED HERE. This step used to `git checkout main && git pull`

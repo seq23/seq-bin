@@ -17,8 +17,10 @@ body(){ printf '%s\n' "$2" > "$T/b/seq23_boss-os_$1.md"; }
 rev(){ printf '{"tool_name":"Agent","tool_input":{"subagent_type":"reviewer","prompt":"review seq23/boss-os#%s"}}' "$1"; }
 run(){ echo "$2" | TASK_SHEETS_DIR="$T/tasks" BRIEF_GATE_PR_BODIES="$T/b" node brief-gate.mjs >/dev/null 2>&1; got=$?; [ "$got" = "$1" ] || { echo "FAIL want $1 got $got: $3"; fail=1; }; }
 full='THE REVIEW YOU WILL FACE HOW IT BREAKS SELF-PROOF HER WORDS ASKED FOR: “build noelle as she said” NOT ASKED FOR: none HER YES: “yes go” CLAUDE BECAUSE: needs the browser REVIEW CLASS: none — log wording only'
-run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose","prompt":"x"}}' "general agent refused"
-run 2 '{"tool_name":"Agent","tool_input":{"prompt":"x"}}' "no type = general, refused"
+run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"some-uncapped-type","prompt":"x"}}' "an agent type with no 200K cap refused"
+run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"helper","prompt":"x"}}' "helper (200K cap) passes"
+run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose","prompt":"x"}}' "general-purpose (200K cap since 25 Nov) passes"
+run 0 '{"tool_name":"Agent","tool_input":{"prompt":"x"}}' "no type = general-purpose (200K cap), passes"
 run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"Explore","prompt":"x"}}' "read-only helper passes"
 run 0 '{"tool_name":"Bash","tool_input":{}}' "not an Agent call"
 run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"builder","prompt":"x"}}' "builder brief missing sections"

@@ -1,6 +1,6 @@
 // Agent launch gate (her rulings 21-22 Nov 2026; weekend post-mortem 22 Nov: 59% of Fri-Sun spend was general-purpose
 // agents, which skipped this gate and the builder/reviewer 200K compaction cap and ran to 417K context).
-//  1. Work agents must be `builder` or `reviewer` (both carry autoCompactWindow 200K). Read-only helpers pass.
+//  1. Work agents must be `builder`, `reviewer`, `helper`, `claude` or `general-purpose` (all carry autoCompactWindow 200K in ~/.claude/agents since 25 Nov 2026; helper added that day for any one-off job). Read-only helpers pass.
 //  2. A builder brief must carry the reviewer-POV sections (agent-brief skill) and its REVIEW CLASS line
 //     (`REVIEW CLASS: none — <why>` or money|children|private-data|store|delete|launch — <why>), which the builder copies
 //     into the PR body as `Review class: ...`: land refuses a PR without it (eng check of #155, 23 Nov 2026).
@@ -36,10 +36,10 @@ let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
   let j;try{j=JSON.parse(s)}catch{process.exit(0)}
   if(j.tool_name!=='Agent')process.exit(0);
   const i=j.tool_input||{};const t=i.subagent_type||'general-purpose';
-  const READ_ONLY=['Explore','Plan','web-fetch','claude-code-guide','statusline-setup','fork'];
+  const READ_ONLY=['helper','claude','general-purpose','Explore','Plan','web-fetch','claude-code-guide','statusline-setup','fork'];
   if(READ_ONLY.includes(t))process.exit(0);
   if(t!=='builder'&&t!=='reviewer'){
-    console.error(`AGENT_TYPE_REFUSED: "${t}" has no 200K compaction cap and skips the brief gate. Use subagent_type "builder" (build/fix/land) or "reviewer" (any review).`);
+    console.error(`AGENT_TYPE_REFUSED: "${t}" has no 200K compaction cap and skips the brief gate. Use "helper" (any other job, same tools, 200K cap), "builder" (code build/fix/land) or "reviewer" (any review).`);
     process.exit(2);
   }
   const p=(i.prompt||'').toUpperCase();

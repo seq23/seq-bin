@@ -1069,7 +1069,16 @@ handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-for
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
 sleep 1
-check "forms under her bypass: lands rc 0 with ONE FORM-PROOF DUE line marked undeclared" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 1 ] && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: undeclared (landed under her bypass)"'
+check "forms under her bypass, diff touches no form: lands rc 0, NO FORM-PROOF line, no form test started" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 0 ] && has "the diff touches no form, so no form test runs" && [ ! -s "$W/plc-calls" ]'
+# The same bypass on a PR whose head adds a page with a <form>: the form test is owed and started.
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+git -C "$W/pusher" checkout -q pr; mkdir -p "$W/pusher/site"; echo '<form method="post" action="/api/lead"></form>' > "$W/pusher/site/contact.html"
+git -C "$W/pusher" add -A; git -C "$W/pusher" commit -qm "a form"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+git -C "$W/pusher" push -q -f origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
+echo '{"files":[{"path":"site/contact.html"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+sleep 1
+check "forms under her bypass, diff touches a form: ONE FORM-PROOF DUE line naming the file" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 1 ] && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: undeclared (landed under her bypass; the diff touches site/contact.html)"'
 check "…and post-land-check was started for that PR alone" eval 'grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
 handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
 echo '{"files":[{"path":"functions/api/lead.js"}],"labels":[],"body":"Forms: request form — preview: TEST submission 200, row recTEST stored\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the lead handler fix | tests/lead.test.js goes red |","comments":[]}' > "$FAKE/pr-meta"

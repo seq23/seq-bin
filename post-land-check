@@ -60,6 +60,19 @@ set -uo pipefail
 HANDOFF="${POST_LAND_HANDOFF:-$HOME/HANDOFF.md}"
 AI_RUN="${POST_LAND_AI_RUN:-$HOME/bin/ai-run}"
 LOG="${POST_LAND_LOG:-$HOME/Work/tasks/logs/post-land-check.log}"
+# HER PAUSE (owner, 25 Nov 2026: "cancel the next day checks tomorrow just for tomorrow b/c im out of usage").
+# A scheduled run (no arguments) on a day before the date in the skip file does nothing but say so; every DUE
+# line stays DUE and is checked on the first run after. The file expires by its own date; a run with arguments
+# (a manual one) is never skipped.
+SKIP_FILE="${POST_LAND_SKIP:-$HOME/.cache/post-land-check/skip-until}"
+if [ "$#" -eq 0 ] && [ -r "$SKIP_FILE" ]; then
+  skip_until="$(tr -d '[:space:]' < "$SKIP_FILE")"
+  if [[ "$skip_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && [[ "$(date +%Y-%m-%d)" < "$skip_until" ]]; then
+    msg="post-land-check: PAUSED by the owner until $skip_until ($SKIP_FILE); no check ran, every DUE line stays DUE"
+    echo "$msg"; mkdir -p "$(dirname "$LOG")" 2>/dev/null; echo "$(date '+%F %T') $msg" >> "$LOG" 2>/dev/null
+    exit 0
+  fi
+fi
 # THE CHECK ONLY READS (the re-review's F1, 24 Nov 2026). An Outcome check runs every night with her gh and wrangler
 # logins and no one watching, and the sandbox below stops only FILE writes: a POST, a `gh api -f`, a D1 DELETE goes
 # straight out over the network. So every check passes this gate first: `land` calls it on the PR's check before it

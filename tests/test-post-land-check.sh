@@ -247,6 +247,13 @@ if [ -x /usr/bin/sandbox-exec ]; then
   reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
   check "…and a read-only check under the sandbox still counts (PASS)" eval '[ "$(POST_LAND_SANDBOX=on orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
 fi
+# HER PAUSE (25 Nov 2026): a skip-until date in the future stops a scheduled run before any model call; DUE stays.
+reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+echo 2999-01-01 > "$W/skip"
+check "paused: a scheduled run before the skip date calls no model and leaves the line DUE" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && [ "$(calls)" = 0 ] && grep -q "PAUSED by the owner" "$W/out" && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+echo 2000-01-01 > "$W/skip"
+check "…an expired skip date runs the checks as usual" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && ! grep -q "PAUSED" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
+rm -f "$W/skip"
 unset POST_LAND_TASKS POST_LAND_SANDBOX POST_LAND_NOTICE POST_LAND_TODAY
 
 echo "post-land-check: $passes ok, $fails failed"

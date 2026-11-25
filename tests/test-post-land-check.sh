@@ -40,7 +40,7 @@ details" --arg u "$who" --arg t "$when" --arg url "https://github.com/$repo/pull
 done
 AI
 chmod +x "$W/bin/gh" "$W/bin/ai-run"
-export PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_LOG="$W/log" \
+export POST_LAND_SKIP="$W/no-skip-file" PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_LOG="$W/log" \
   POST_LAND_HANDOFF="$W/HANDOFF.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/tasks"
 printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; chmod +x "$W/bin/notify"
 fails=0; passes=0
@@ -251,6 +251,9 @@ fi
 reset; osheet; handoff "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
 echo 2999-01-01 > "$W/skip"
 check "paused: a scheduled run before the skip date calls no model and leaves the line DUE" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && [ "$(calls)" = 0 ] && grep -q "PAUSED by the owner" "$W/out" && grep -q "^- OUTCOME-CHECK DUE " "$W/HANDOFF.md"'
+check "paused: land's --now form proof is paused too (no model call, DUE kept)" eval '[ "$(POST_LAND_SKIP="$W/skip" orun --now o/site#1)" = 0 ] && [ "$(calls)" = 0 ] && grep -q "PAUSED by the owner" "$W/out"'
+check "…but land's --read-only-gate is never paused" eval '! POST_LAND_SKIP="$W/skip" "$PLC" --read-only-gate "echo hi" </dev/null 2>&1 | grep -q PAUSED'
+check "…and POST_LAND_FORCE=1 runs one anyway" eval '! POST_LAND_FORCE=1 POST_LAND_SKIP="$W/skip" "$PLC" </dev/null 2>&1 | grep -q PAUSED'
 echo 2000-01-01 > "$W/skip"
 check "…an expired skip date runs the checks as usual" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && ! grep -q "PAUSED" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
 rm -f "$W/skip"

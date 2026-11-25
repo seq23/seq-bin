@@ -1565,6 +1565,23 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 forms_lines() { # stdin: PR body + owner comments -> each Forms: line's text after the colon
   sed -nE 's/^[[:space:]>]*([-*][[:space:]]+)?(\*\*)?Forms:(\*\*)?[[:space:]]*//Ip' | tr -d '\r'
 }
+# Under her bypass a PR that says nothing about forms gets the production form test ONLY when its diff touches a form
+# (her words 25 Nov 2026: "form tests should only run on updates with forms"). Structure, not meaning: a changed page or
+# code file whose text (PR head, else the base for a deleted file) holds a form or a form submit handler. A file that
+# cannot be read at either end counts as a form (fail closed: a test that was owed is never skipped by an unread file).
+FORM_FILE_RE='\.(html?|astro|svelte|vue|jsx?|tsx?|mjs|cjs|php|py|rb|liquid|njk|hbs|ejs|erb)$'
+FORM_MARK_RE='<form([[:space:]>]|$)|<Form([[:space:]>]|$)|new FormData|\.formData\(|onSubmit|type=.?submit|method=.?post'
+form_files() { # $1 head sha  $2 base sha; stdin: the changed paths -> stdout each one that touches a form
+  local f a b
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -qiE "$FORM_FILE_RE" <<<"$f" || continue
+    case "$f" in tests/*|test/*|*/tests/*|*/test/*|*.test.*|*.spec.*|*/__tests__/*) continue ;; esac
+    a="$(git show "$1:$f" 2>/dev/null)"; b="$(git show "$2:$f" 2>/dev/null)"
+    if [ -z "$a$b" ]; then echo "$f (unread)"; elif grep -qE "$FORM_MARK_RE" <<<"$a
+$b"; then echo "$f"; fi
+  done
+}
 gate_forms() { # $1 PR  $2 PR body + owner comments -> rc 0 (stdout: the forms touched, empty when none) | rc 1 one plain line
   local lines touched none
   lines="$(forms_lines <<<"$2" | grep -v '<')"
@@ -1910,7 +1927,13 @@ FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"; FORM_RC=$?
 if [ "$FORM_RC" -eq 0 ]; then
   [ -z "$FORM_MSG" ] || { FORMS_DUE="$FORM_MSG"; say "    forms: $FORM_MSG — proven on the preview; production is proven right after the deploy"; }
 elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
-  FORMS_DUE="undeclared (landed under her bypass)"; say "    forms: undeclared under her bypass; every form this PR touches is proven on production right after the deploy"
+  git cat-file -e "$HEAD^{commit}" 2>/dev/null || git fetch -q origin "pull/$PR/head" 2>/dev/null
+  FORMFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | form_files "$HEAD" "$(git merge-base origin/main "$HEAD" 2>/dev/null || echo origin/main)" | paste -sd' ' -)"
+  if [ -n "$FORMFILES" ]; then
+    FORMS_DUE="undeclared (landed under her bypass; the diff touches $FORMFILES)"; say "    forms: undeclared under her bypass; the diff touches $FORMFILES, so the form is proven on production right after the deploy"
+  else
+    say "    forms: undeclared under her bypass; the diff touches no form, so no form test runs"
+  fi
 else
   die "NAMED STOP [FORMS_UNDECLARED] $FORM_MSG"
 fi

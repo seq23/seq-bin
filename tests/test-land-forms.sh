@@ -32,9 +32,36 @@ touched "* Forms: lead + RSVP — preview: two TEST posts, both 200 and stored" 
 # Wiring, read from land itself (the flow tests run land end to end).
 ok grep -q 'FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"' "$LAND"
 ok grep -q 'die "NAMED STOP \[FORMS_UNDECLARED\] $FORM_MSG"' "$LAND"
-ok grep -q 'FORMS_DUE="undeclared (landed under her bypass)"' "$LAND"
+ok grep -q 'FORMS_DUE="undeclared (landed under her bypass; the diff touches $FORMFILES)"' "$LAND"
 ok grep -q 'then note_form_proof "$FORMS_DUE"' "$LAND"
 ok grep -q '"$runner" --now "$slug#$PR"' "$LAND"
+
+# form_files (her words 25 Nov 2026: "form tests should only run on updates with forms"): a real repo, real commits.
+eval "$(sed -n '/^FORM_FILE_RE=/p; /^FORM_MARK_RE=/p; /^form_files()/,/^}/p' <<<"$BLOCK")"
+declare -F form_files >/dev/null || { echo "FAIL: form_files is not in land's gates block"; exit 1; }
+R="$(mktemp -d)"; trap 'rm -rf "$R"' EXIT
+git -C "$R" init -q -b main; git -C "$R" config user.email t@t; git -C "$R" config user.name t
+mkdir -p "$R/site" "$R/functions/api" "$R/tests"
+echo '<h1>home</h1>' > "$R/site/index.html"; echo '<form method="post"><input name=e></form>' > "$R/site/old.html"
+git -C "$R" add -A; git -C "$R" commit -qm base; BASE="$(git -C "$R" rev-parse HEAD)"
+echo '<form action="/api/lead"><button type="submit">Go</button></form>' > "$R/site/contact.html"
+echo 'export async function onRequestPost({request}){ const d = await request.formData(); }' > "$R/functions/api/lead.js"
+echo '<h1>home v2</h1>' > "$R/site/index.html"; echo '# notes <form>' > "$R/README.md"
+echo 'new FormData()' > "$R/tests/lead.test.js"; git -C "$R" rm -q site/old.html
+git -C "$R" add -A; git -C "$R" commit -qm pr; HD="$(git -C "$R" rev-parse HEAD)"
+ff() { (cd "$R" && printf '%s\n' "$@" | form_files "$HD" "$BASE"); }
+ok [ -z "$(ff site/index.html README.md tests/lead.test.js)" ]           # a plain page, docs and a test: no form test
+ok [ "$(ff site/contact.html)" = "site/contact.html" ]                   # a page with a <form>
+ok [ "$(ff functions/api/lead.js)" = "functions/api/lead.js" ]          # a form's server handler
+ok [ "$(ff site/old.html)" = "site/old.html" ]                          # a deleted form page: read at the base
+ok [ "$(ff site/gone.html)" = "site/gone.html (unread)" ]               # unreadable both ends: fail closed
+ok [ "$(ff README.md site/contact.html | wc -l | tr -d ' ')" = 1 ]
+ok grep -q 'form_files "$HEAD"' "$LAND"
+ok grep -q 'the diff touches no form, so no form test runs' "$LAND"
+# Negative proof: a check that never reads the files lets every page through as a form.
+eval "$(sed -n '/^form_files()/,/^}/p' <<<"$BLOCK" | sed 's/elif grep -qE "$FORM_MARK_RE"/elif true || grep -qE "$FORM_MARK_RE"/')"
+if [ -n "$(ff site/index.html)" ]; then passes=$((passes+1)); else echo "  FAIL the form_files mutation did not break it"; fails=$((fails+1)); fi
+eval "$(sed -n '/^form_files()/,/^}/p' <<<"$BLOCK")"
 
 # Negative proof: a gate that accepts any Forms: line lets a bare claim through.
 eval "$(sed -n '/^gate_forms()/,/^}/p' <<<"$BLOCK" | sed 's/lines="$(forms_lines <<<"$2" | grep -v .<.)"/lines="$(forms_lines <<<"$2")"; [ -n "$lines" ] \&\& return 0/')"

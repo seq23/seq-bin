@@ -56,6 +56,9 @@ chmod +x "$W/bin/gh" "$W/bin/ai-run"
 export POST_LAND_SKIP="$W/no-skip-file" PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_LOG="$W/log" \
   POST_LAND_DUE_FILE="$W/post-land-checks.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/tasks"
 printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; chmod +x "$W/bin/notify"
+# Open Loops (27 Nov 2026): a stand-in for open-loops-proof.mjs, so no run here ever reaches the live list.
+printf '#!/bin/bash\n[ -z "${LOOPS_DOWN:-}" ] || { echo "NAMED STOP [OPEN_LOOPS_UNREACHABLE] down"; exit 75; }\nprintf "%%s|%%s|%%s|%%s\\n" "$1" "$2" "$3" "$4" >> "%s/store/loops"\necho "OPEN_LOOPS CLOSED olp_test"\n' "$W" > "$W/bin/loops"; chmod +x "$W/bin/loops"
+export POST_LAND_LOOPS="$W/bin/loops"
 fails=0; passes=0
 check() { local label="$1"; shift; if "$@"; then passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${PLC_DEBUG:-}" ] || sed "s/^/    | /" "$W/out" 2>/dev/null | tail -8; fi; }
 reset() { rm -rf "$W/store" "$W/locks" "$W/tasks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 VERDICT_5 INFER_5 COMMENT_USER COMMENT_AT; }
@@ -278,6 +281,17 @@ reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (liv
 check "…an expired skip date runs the checks as usual" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && ! grep -q "PAUSED" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/post-land-checks.md"'
 # USAGE SAVER (27 Nov 2026): every checker run is the cheap kind: Sonnet, 15 minutes, 200 a day; no connectors, or no tools at all.
 check "every checker run asks ai-run for Sonnet, its caps, and no connectors (or no tools)" eval '[ -s "$PLC_STORE/ai-env" ] && ! grep -vE "^model=sonnet (mcp=none bare=|mcp= bare=1) secs=900 runs=200 ignore=1$" "$PLC_STORE/ai-env" | grep -q .'
+echo "=== Open Loops 'Landed, waiting on proof' (27 Nov 2026): PASS closes, FAIL returns, unknown or an outage touches nothing ==="
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on"
+check "PASS: the rows waiting on o/app#5 are handed PASS, what it saw and the day" eval '[ "$(orun)" = 0 ] && grep -qx "o/app#5|PASS|saw 4 of 4 decisions acted on|2026-11-25" "$W/store/loops"'
+check "…and the log names the row it closed" grep -q "open-loops: OPEN_LOOPS CLOSED olp_test" "$W/log"
+reset; osheet; due_list "$(oline 'cat ~/Work/tasks/one.log')"
+check "FAIL (code, below the floor): the rows are handed FAIL with what it saw" eval '[ "$(orun)" = 0 ] && grep -qx "o/app#5|FAIL|saw 1, needed at least 3|2026-11-25" "$W/store/loops"'
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): COULDNT-CHECK — the output does not say which day"
+check "COULDNT-CHECK: no Open Loops row is touched" eval '[ "$(orun)" = 1 ] && [ ! -e "$W/store/loops" ]'
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on"
+check "Open Loops down on a PASS: the verdict stands (DONE, exit 0), NAMED STOP in the log" eval '[ "$(LOOPS_DOWN=1 orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE o/app#5 " "$W/post-land-checks.md" && grep -q "NAMED STOP \[OPEN_LOOPS_UNREACHABLE\] the Open Loops rows waiting on o/app#5 were not updated" "$W/out"'
+check "…and her Notices line says the row was left as it was" grep -q "working — saw 4 of 4 decisions acted on (Open Loops could not be reached: a row waiting on this PR was left as it was)" "$W/store/notices"
 rm -f "$W/skip"
 unset POST_LAND_TASKS POST_LAND_NOTICE POST_LAND_TODAY
 

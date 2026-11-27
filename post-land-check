@@ -50,13 +50,20 @@
 # banner once it is 2+ days past its by-day. One try per line per night (a replay posts nothing twice). Public
 # comments and Notices carry counts only (emails masked); the check's raw output stays in the local log.
 #
+# OPEN LOOPS "LANDED, WAITING ON PROOF" (her words 27 Nov 2026: "we need a new section on open loops for the not yet
+# proven stuff and move it off the main list"): after an outcome verdict for <repo>#<pr>, every open row in that
+# section whose proof_pr is exactly that PR is closed on PASS ("<repo> #<pr> live check passed <date>: <seen>") or
+# returned to the main list on FAIL (next date today, next step "NOT WORKING (<date>): <seen> — …"), through
+# open-loops-proof.mjs (beside this file). COULDNT-CHECK touches no row. Open Loops down: the rows stay as they are,
+# the log says NAMED STOP [OPEN_LOOPS_UNREACHABLE] and the Notices line says the row was not updated.
+#
 # Scheduled nightly by launchd/com.seq.post-land-check.plist (23:15 Central, inside the Mac's 22:00–07:00
 # window; an ai-run job, so it stays on the Mac: her ruling 22 Nov 2026). Exit: 0 every line got a verdict
 # (FAILs included: they are results, and they are raised) · 1 a line got no verdict · 2 the list is missing or unreadable.
 # Env (tests): POST_LAND_DUE_FILE, POST_LAND_AI_RUN, POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text),
 #   POST_LAND_TASKS (task sheets dir), POST_LAND_TODAY (YYYY-MM-DD), POST_LAND_OUTCOME_READ (the reader; tests),
 #   POST_LAND_NOTICE (a command given key and text; default: boss-os scripts/ops/outcome-notice.mjs via the vault),
-#   POST_LAND_LOCKS.
+#   POST_LAND_LOCKS, POST_LAND_LOOPS (a command given pr, verdict, seen and day; default: open-loops-proof.mjs via the vault).
 set -uo pipefail
 
 DUE_FILE="${POST_LAND_DUE_FILE:-$HOME/Work/tasks/post-land-checks.md}"
@@ -368,6 +375,21 @@ notice() { # $1 key  $2 text -> rc 0 written (or already written)
   printf '%s Notices: %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$2" >> "$LOG"   # the line she reads, kept in the local log
   : > "$m"
 }
+LOOPS_CMD="${POST_LAND_LOOPS:-}"
+PROOF_JS="$(cd "$(dirname "$0")" && pwd)/open-loops-proof.mjs"
+proof_rows() { # $1 key  $2 PASS|FAIL  $3 seen -> rc 0 rows updated (or none waiting) | 1 Open Loops not reached: rows unchanged
+  [ -n "$DRY" ] && { say "[dry-run] would close or return the Open Loops rows waiting on $1 ($2)"; return 0; }
+  local out rc
+  if [ -n "$LOOPS_CMD" ]; then out="$("$LOOPS_CMD" "$1" "$2" "$3" "$TODAY" </dev/null 2>&1)"; rc=$?
+  else out="$(cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node "$PROOF_JS" --pr "$1" --verdict "$2" --seen "$3" --today "$TODAY" </dev/null 2>&1)"; rc=$?
+  fi
+  printf '%s\n' "$out" | sed 's/^/  open-loops: /' >> "$LOG"
+  if [ "$rc" -ne 0 ]; then
+    say "  NAMED STOP [OPEN_LOOPS_UNREACHABLE] the Open Loops rows waiting on $1 were not updated and stay as they are (see $LOG)"; return 1
+  fi
+  printf '%s\n' "$out" | grep -E '^OPEN_LOOPS (CLOSED|RETURNED) ' | sed "s/^/  open-loops: /" | while IFS= read -r l; do say "$l"; done
+  return 0
+}
 READ_TOOLS='A check is ONE read and its pipes. No shell runs it, so no variables, no $(…), no ; && ||, no redirects.
   first, one of:  gh api <path> [--jq <filter>]      a GET of the public GitHub API, with no sign-in (every repo is public)
                   curl -fsS[L] [-A <agent>] <https url>      a GET of a public page
@@ -508,13 +530,15 @@ Judged by a model with no tools, from that output alone.")" || { url="(comment n
     PASS)
       outcome_mark "$key" DONE "$url"; say "  PASS $key $url — $seen"
       sheet_set "$task" "$key" "STATUS: DONE $key $sha $TODAY — outcome checked live: $seen ($url)" 1
-      notice "outcome:$key:working" "$slugp $shortout: working — $seen" || ounproved=$((ounproved + 1)) ;;
+      loopnote=""; proof_rows "$key" PASS "$seen" || loopnote=" (Open Loops could not be reached: a row waiting on this PR was left as it was)"
+      notice "outcome:$key:working" "$slugp $shortout: working — $seen$loopnote" || ounproved=$((ounproved + 1)) ;;
     FAIL)
       outcome_mark "$key" FAIL "$url"; ofails=$((ofails + 1)); say "  FAIL $key $url — $seen"
       sheet_set "$task" "$key" "STATUS: FAIL $key $sha $TODAY — outcome NOT WORKING: $seen ($url)"
       # Three parts (her yes 25 Nov 2026): what was expected, what was seen, where to look.
       notify "NOT WORKING: $slugp $shortout — expected $(expected_words "$expect"); saw ${seen#saw }; look: $url"
-      notice "outcome:$key:not-working" "$slugp $shortout: NOT WORKING — expected $(expected_words "$expect"); saw ${seen#saw }; look: $url" || ounproved=$((ounproved + 1)) ;;
+      loopnote=""; proof_rows "$key" FAIL "$seen" || loopnote=" (Open Loops could not be reached: a row waiting on this PR was left as it was)"
+      notice "outcome:$key:not-working" "$slugp $shortout: NOT WORKING — expected $(expected_words "$expect"); saw ${seen#saw }; look: $url$loopnote" || ounproved=$((ounproved + 1)) ;;
     *)
       ounproved=$((ounproved + 1)); : > "$tried"
       say "  COULDNT-CHECK $key — $seen; the line stays DUE"

@@ -7,6 +7,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"; PLC="${PLC_UNDER_TEST:-$HERE/post-land-check}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+[ "$(uname)" = Darwin ] || export OUTCOME_READ_NO_SANDBOX_OK=1   # Linux CI has no sandbox-exec; the Mac always uses it
 mkdir -p "$W/bin" "$W/store"
 cat > "$W/bin/gh" <<'GH'
 #!/bin/bash

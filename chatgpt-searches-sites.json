@@ -110,7 +110,7 @@
     },
     {
       "id": "hicks", "label": "Hicks Consulting", "night": 7,
-      "about": "a Memphis licensed clinical social worker's therapy and coaching practice (in person and virtual across Tennessee) for adults, Black women in particular, carrying stress, burnout, anxiety or life transitions, with a faith-integrated approach when a client wants it, plus workplace mental health training",
+      "about": "a Memphis licensed clinical social worker's therapy and coaching practice (therapy by secure video for adults anywhere in Tennessee; organization trainings in person and virtual) for adults, Black women in particular, carrying stress, burnout, anxiety or life transitions, with a faith-integrated approach when a client wants it, plus workplace mental health training",
       "brain": "friends", "brain_headings": ["Hicks"],
       "domains": ["hicksconsulting.org"], "names": ["Hicks Consulting"],
       "seeds": { "repo": "seq23/hicks-consulting-canonical", "config": "search-loop.config.json" }

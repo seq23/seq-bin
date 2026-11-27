@@ -1558,7 +1558,8 @@ gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line
 # FORMS ARE NEVER LEFT BROKEN BY A FIX (her words 23 Nov 2026: "u need to make sure the forms are not broken …
 # after theee fixes u need to test them"). A SAFETY check: no Fast PRs item cuts it, and her bypass only records it.
 # Whether a PR touches a form's page or server path is meaning, so the builder (a model) says it, and the reviewer
-# judges the claim; land checks structure only. Every PR body (or an owner-account comment) carries ONE of:
+# judges the claim; land checks structure only. A PR whose diff touches a form carries ONE of these in its body (or an
+# owner-account comment); a PR whose diff touches no form needs neither (27 Nov 2026):
 #   Forms: none — <why no form is touched, 3+ words>
 #   Forms: <which form(s)> — preview: <the marked TEST submission on the preview and what received it, 3+ words>
 # Production is proven right after the deploy by post-land-check (land starts it, detached; FORM-PROOF DUE line).
@@ -1926,16 +1927,19 @@ FORMS_DUE=""
 FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"; FORM_RC=$?
 if [ "$FORM_RC" -eq 0 ]; then
   [ -z "$FORM_MSG" ] || { FORMS_DUE="$FORM_MSG"; say "    forms: $FORM_MSG — proven on the preview; production is proven right after the deploy"; }
-elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
+else
+  # NO FORMS LINE IS NOT A STOP BY ITSELF (her words 27 Nov 2026: "not eveyrhting has a fucking form and does not need
+  # a test"; #182, a local shell hook, was refused for the missing line). land reads the diff: a PR that touches no
+  # form needs no Forms: line and no form test. Only a PR whose diff DOES touch a form and says nothing is stopped.
   git cat-file -e "$HEAD^{commit}" 2>/dev/null || git fetch -q origin "pull/$PR/head" 2>/dev/null
   FORMFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | form_files "$HEAD" "$(git merge-base origin/main "$HEAD" 2>/dev/null || echo origin/main)" | paste -sd' ' -)"
-  if [ -n "$FORMFILES" ]; then
+  if [ -z "$FORMFILES" ]; then
+    say "    forms: no Forms: line; the diff touches no form, so no form test runs"
+  elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
     FORMS_DUE="undeclared (landed under her bypass; the diff touches $FORMFILES)"; say "    forms: undeclared under her bypass; the diff touches $FORMFILES, so the form is proven on production right after the deploy"
   else
-    say "    forms: undeclared under her bypass; the diff touches no form, so no form test runs"
+    die "NAMED STOP [FORMS_UNDECLARED] the diff touches a form ($FORMFILES). $FORM_MSG"
   fi
-else
-  die "NAMED STOP [FORMS_UNDECLARED] $FORM_MSG"
 fi
 # Outcome and Not built (outcome_parse, gate_not_built, above): safety checks, read under her bypass too, which is
 # never blocked by them: it records UNDECLARED, and a job PR still gets its next-day check (the checker infers it).

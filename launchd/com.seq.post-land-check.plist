@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!-- The same-day checks land promises (her ask 23 Nov 2026): every ENG-CHECK DUE line in one batched engineering
-     check, and any FORM-PROOF DUE line land's own detached run did not finish. 23:15 Central, inside the Mac's
+     check, and any FORM-PROOF DUE line land's own detached run did not finish. The lines are read from
+     ~/Work/tasks/post-land-checks.md (27 Nov 2026; before that, HANDOFF's Today). 23:15 Central, inside the Mac's
      22:00-07:00 window; an ai-run job, so it stays on the Mac. A Mac asleep at 23:15 runs it on wake. -->
 <dict>
 	<key>Label</key>

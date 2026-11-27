@@ -3,7 +3,8 @@
 # model). Proves: a same-day hand-written status is kept above the notes; a session's own older note is
 # replaced, not stacked; other sessions' notes survive a busy day (up to 6, the rest named); a FAILED
 # summary never replaces that session's good note; a new day drops old notes but carries the newest
-# status once, and drops it the day after; PINNED text is never touched.
+# status once, and drops it the day after; PINNED text is never touched; post-land-check lines found in Today
+# move to their own list, once each; the Jobs list never counts that list as a task sheet.
 set -u
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/handoff-on-compact.sh"
 T=$(mktemp -d); export HOME="$T"; fail=0; bad(){ echo "FAIL: $1"; fail=1; }
@@ -63,26 +64,34 @@ run sess-10 "## In flight
 - NOTE-SESS-10"
 grep -q 'Carried over from 2000-01-01' "$H" && bad "the carried block survived a second day"
 grep -q 'PINNED-LINE-STAYS' "$H" || bad "PINNED text was touched"
-# DUE lines (24 Nov 2026 review A): every unmarked OUTCOME-CHECK / ENG-CHECK / FORM-PROOF DUE line survives
-# any number of day rollovers, once each, until post-land-check marks it; a marked (DONE) line is not carried.
+# Post-land-check lines (24 Nov 2026 review A; moved 27 Nov 2026): they live in ~/Work/tasks/post-land-checks.md,
+# the list `land` writes and `post-land-check` closes. Any such line still in Today (an older `land` wrote it
+# there) is moved to the list at the next compaction: every one, exactly once, over any number of day
+# rollovers, a closed (DONE) line too; HANDOFF keeps none of them, only ONE line with the count and the path.
 OD='- OUTCOME-CHECK DUE o/r#7 abc1234 — task:job by:2000-01-04 expect:>=3 — outcome: x — check: echo 3'
 ED='- ENG-CHECK DUE o/r#8 def5678 — landed under her bypass; a fresh reviewer checks'
 FD='- FORM-PROOF DUE o/r#9 0a0b0c0 — forms: contact'
-python3 - "$H" "$OD" "$ED" "$FD" <<'PYT'
+DD='- ENG-CHECK DONE o/r#6 1111111 — x → https://x'
+DUEF="$T/Work/tasks/post-land-checks.md"
+python3 - "$H" "$OD" "$ED" "$FD" "$DD" <<'PYT'
 import sys; p, *ls = sys.argv[1:]; d = open(p).read()
-d = d.replace("<!-- JOBS:END -->\n", "<!-- JOBS:END -->\n" + "\n".join(ls) + "\n- ENG-CHECK DONE o/r#6 1111111 — x → https://x\n", 1)
+d = d.replace("<!-- JOBS:END -->\n", "<!-- JOBS:END -->\n" + "\n".join(ls) + "\n", 1)
 open(p, "w").write(d)
 PYT
 for day in 2000-01-03 2000-01-04 2000-01-05; do
   sed -i.bak -E "s/<!-- day:[0-9-]+ -->/<!-- day:$day -->/" "$H"
   run "sess-due-$day" "## In flight
 - NOTE-$day"
-  for l in "$OD" "$ED" "$FD"; do [ "$(grep -cxF -- "$l" "$H")" = 1 ] || bad "DUE carry: after the rollover from $day, '${l:0:30}…' is not there exactly once"; done
+  for l in "$OD" "$ED" "$FD" "$DD"; do
+    [ "$(grep -cxF -- "$l" "$DUEF" 2>/dev/null)" = 1 ] || bad "post-land checks: after the rollover from $day, '${l:0:30}…' is not in the list exactly once"
+    grep -qxF -- "$l" "$H" && bad "post-land checks: after the rollover from $day, '${l:0:30}…' is still in HANDOFF"
+  done
+  [ "$(grep -c '^- \*\*Post-land checks\*\*: 3 DUE at .*~/Work/tasks/post-land-checks.md' "$H")" = 1 ] || bad "post-land checks: after the rollover from $day, HANDOFF does not have exactly one line with the count (3 DUE) and the list's path"
 done
-grep -q 'ENG-CHECK DONE o/r#6' "$H" && bad "DUE carry: a marked DONE line was carried past its day"
+[ "$(grep -cE '(ENG-CHECK|FORM-PROOF|OUTCOME-CHECK) (DUE|DONE|FAIL) ' "$H")" = 0 ] || bad "post-land checks: a check line is still somewhere in HANDOFF"
 # Jobs (22 Nov 2026): Today carries ONE Jobs list from `land-after --status` (open sheets only, line 1 +
 # path, never a sheet's body), replaced on every write.
-grep -q 'none open' "$H" || bad "jobs: no open sheets did not say 'none open'"
+grep -q 'none open' "$H" || bad "jobs: no open sheets did not say 'none open' (the post-land-check list in ~/Work/tasks is not a task sheet)"
 mkdir -p "$T/Work/tasks/done"
 printf 'STATUS: building o/r#1 aaa 2026-11-22T09:00\nGoal: SHEET-BODY-A\n' > "$T/Work/tasks/job-a.md"
 printf 'STATUS: landing o/r#2 bbb 2026-11-22T09:05\nGoal: SHEET-BODY-B\n' > "$T/Work/tasks/job-b.md"

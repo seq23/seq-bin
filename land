@@ -16,7 +16,7 @@
 #   land 96         # that PR number
 #   land 96 --owner="<her words>"  # HER bypass (21 Nov 2026): skips the review, click-through and patch
 #                      # sign-offs; CI, the safety checks, deploy and smoke still run. Only when SHE says ship it.
-#                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/HANDOFF.md Today (same-day review),
+#                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/Work/tasks/post-land-checks.md (same-day review),
 #                      # as it does for EVERY land with no fresh reviewer's PASS (Fast PRs: the day's batched check).
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
@@ -29,7 +29,7 @@
 # Missing → NAMED STOP [OUTCOME_UNDECLARED] / [NOT_BUILT_UNDECLARED] with the lines to add; a check that is not
 # read-only (post-land-check --read-only-gate says why) → NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]. land prints Not built
 # word for word, and on a green land with a real Outcome writes `OUTCOME-CHECK DUE <repo>#<pr> <sha> — task:<slug>
-# by:<day> …` into ~/HANDOFF.md Today; post-land-check runs that check after its by-day and only its PASS makes the
+# by:<day> …` into ~/Work/tasks/post-land-checks.md; post-land-check runs that check after its by-day and only its PASS makes the
 # work "working" (land-after's sheet says LANDED-UNCHECKED until then, DONE after). Her bypass is never blocked: it
 # records `Outcome: UNDECLARED (owner bypass)` and writes a DUE line whose check the fresh Claude infers.
 #
@@ -1606,7 +1606,7 @@ gate_forms() { # $1 PR  $2 PR body + owner comments -> rc 0 (stdout: the forms t
 # (`by:` may be left off: the next day, Central). The count is the bare number a check prints on its last line,
 # else its number of non-empty lines. A PR that touches a job (job_files) may not say none. On a green land the
 # exit trap writes `- OUTCOME-CHECK DUE <repo>#<pr> <sha> — task:<slug> by:<day> expect:>=<N> — outcome: … — check: …`
-# into HANDOFF Today, and post-land-check runs the command itself once the day has come (only if its read-only gate
+# into ~/Work/tasks/post-land-checks.md, and post-land-check runs the command itself once the day has come (only if its read-only gate
 # passes it again that night; land asks the same gate first, below).
 # And a `## Not built` section: what from the plan or brief was not built, or `Nothing cut.`; land prints it word
 # for word (between NOT BUILT markers) and land-after copies it onto the task sheet under line 1.
@@ -1718,17 +1718,17 @@ gate_not_built() { # $1 PR  $2 PR body + owner comments -> rc 0 stdout the secti
 # dont allow things to be built cheaply and horribly going forward where we have this debt"). A PR that
 # landed under `Owner override:`, or any Fast PR that landed on green CI with no reviewer's PASS (her ruling
 # 23 Nov 2026), skipped its engineering review, so once it is green and deployed land
-# writes ONE line into the Today section of ~/HANDOFF.md (the coordinator's start-here; the handoff hook
-# keeps a line there all day) and prints it:
+# writes ONE line into ~/Work/tasks/post-land-checks.md (LAND_DUE_FILE in tests; the one list of post-land checks
+# since 27 Nov 2026, when they moved out of ~/HANDOFF.md, whose Today keeps only their count) and prints it:
 #   - ENG-CHECK DUE <owner/repo>#<pr> <merge sha> — landed under her bypass <time CT>; ...
-# The coordinator launches the same-day reviewer from it, then turns DUE into DONE. It is never a row on
+# post-land-check reads that list nightly, runs the check, then turns DUE into DONE or FAIL. It is never a row on
 # her Open Loops list (her ruling 22 Nov 2026, on Monday's list: "they should have been done today and
 # 0 out"; that list is only her decisions, money, her-only accounts and waits on someone else). A re-run
 # on the same PR adds no second line (nor after its DUE was turned into DONE). A line that cannot be written is NAMED STOP [ENG_CHECK_NOT_NOTED],
 # exit 4: the PR IS landed but its check is not noted, so it never ends a silent 0.
 LAND_RC_ENG_CHECK_NOT_NOTED=4
 note_eng_check() { # $1 why no reviewer saw it: bypass | unreviewed
-  local slug sha line out how handoff="${LAND_HANDOFF:-$HOME/HANDOFF.md}"
+  local slug sha line out how due_file="${LAND_DUE_FILE:-$HOME/Work/tasks/post-land-checks.md}"
   case "${1:-bypass}" in
     unreviewed) how="landed on green CI with no reviewer's PASS (Fast PRs)" ;;
     *) how="landed under her bypass" ;;
@@ -1736,34 +1736,25 @@ note_eng_check() { # $1 why no reviewer saw it: bypass | unreviewed
   slug="$(printf '%s' "$REMOTE_URL" | sed -nE 's#\.git$##; s#.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"; slug="${slug:-seq23/$NAME}"
   sha="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)}"
   line="${LAND_ENG_LINE:-ENG-CHECK DUE $slug#$PR ${sha:-merge-sha-unread} — $how $(TZ=America/Chicago date '+%d %b %Y %H:%M CT'); the nightly post-land-check checks the merged diff against every automatic fail in engineering.md today}"
-  # One writer at a time with the PreCompact hook (handoff-on-compact.sh takes the same lock), then an
-  # atomic replace. The line goes after the Jobs list, where the hook keeps hand-written lines all day.
+  # One writer at a time (post-land-check and handoff-on-compact.sh take the same lock), then an atomic
+  # replace. The line is added at the end of the list; the file and its folder are made on first use.
   if out="$(python3 -c '
 import os, re, sys, fcntl
 path, key, line = sys.argv[1], sys.argv[2], sys.argv[3]
-S, E, JE = "<!-- TODAY:START -->", "<!-- TODAY:END -->", "<!-- JOBS:END -->"
 lock = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "handoff-md.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
-doc = open(path).read() if os.path.exists(path) else ""
+doc = open(path, encoding="utf-8").read() if os.path.exists(path) else "# Post-land checks\n\nOne line per check a land still owes. `land` adds a line; `post-land-check` runs it and turns DUE into DONE or FAIL. Never hand-delete a DUE line.\n\n"
 kind = line.split(" DUE ", 1)[0]
 if re.search(r"(?m)^- " + re.escape(kind) + " (DUE|DONE|FAIL) " + re.escape(key) + " ", doc):
     print(kind + " for " + key + " is already in " + path); sys.exit(0)
-item = "- " + line + "\n"
-if S not in doc or E not in doc:
-    doc = doc.rstrip() + "\n\n## Today (temporary: in flight + done today; replaced each day, never stacked)\n" + S + "\n" + item + E + "\n"
-else:
-    head, rest = doc.split(S, 1); body, tail = rest.split(E, 1)
-    if JE in body:
-        a, b = body.split(JE, 1); body = a + JE + "\n" + item + (b[1:] if b.startswith("\n") else b)
-    else:
-        m = re.match(r"\n?(<!-- day:[^>]*-->\n)?(_[^\n]*_\n)?", body)
-        body = body[:m.end()] + item + body[m.end():]
-    doc = head + S + body + E + tail
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 tmp = path + ".land.tmp"
-open(tmp, "w").write(doc); os.replace(tmp, path)
-print(line + "  (in " + path + ", Today)")
-' "$handoff" "$slug#$PR" "$line" 2>&1)"; then echo "     $out"; return 0; fi
-  printf '\n\033[31;1mNAMED STOP [ENG_CHECK_NOT_NOTED] #%s LANDED, but its same-day engineering check was NOT written to %s: %s\nAdd this line to Today in %s by hand:\n  - %s\033[0m\n' \
-    "$PR" "$handoff" "$(tail -1 <<<"$out")" "$handoff" "$line"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(doc + ("" if doc.endswith("\n") else "\n") + "- " + line + "\n"); f.flush(); os.fsync(f.fileno())
+os.replace(tmp, path)
+print(line + "  (in " + path + ")")
+' "$due_file" "$slug#$PR" "$line" 2>&1)"; then echo "     $out"; return 0; fi
+  printf '\n\033[31;1mNAMED STOP [ENG_CHECK_NOT_NOTED] #%s LANDED, but its post-land check was NOT written to %s: %s\nAdd this line to %s by hand:\n  - %s\033[0m\n' \
+    "$PR" "$due_file" "$(tail -1 <<<"$out")" "$due_file" "$line"
   return 1
 }
 # THE LIVE FORM IS PROVEN RIGHT AFTER THE DEPLOY (gate_forms). Same writer as the engineering check, kind
@@ -1894,7 +1885,7 @@ if [ -n "$OWNER_WORDS" ]; then
     printf '%s\n\nOwner override: "%s" (%s)\n' "$OBODY" "$OWNER_WORDS" "$(TZ=America/Chicago date '+%d %b %Y %H:%M CT')" \
       | gh pr edit "$PR" --body-file - >/dev/null || die "the owner override could not be written to PR #$PR"
   fi
-  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/HANDOFF.md Today for a same-day engineering check)"
+  say "    owner override: \"$OWNER_WORDS\" (review, click-through and patch sign-offs skipped; CI, safety checks, deploy and smoke still run; ENG-CHECK DUE goes into ~/Work/tasks/post-land-checks.md for a same-day engineering check)"
 fi
 PRMETA="$(gh_read '^\{' pr view "$PR" --json files,body,comments,author,commits,labels,url,changedFiles,additions,deletions)" \
   || unverified "$(gh_kind "$(gh_err)")" "PR #$PR's files could not be read, so whether it changes a screen is unknown: $(gh_err)"

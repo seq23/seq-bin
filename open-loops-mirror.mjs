@@ -4,8 +4,11 @@
 // Publishing needs the claude.ai artifact tools, which only an interactive Claude session has (claude -p cannot, tested 5 Nov 2026).
 // So: any session that changes Open Loops runs this, then publish_files to slug bff28f87-655d-4829-9bc1-ea23e70a2fac when it prints CHANGED.
 import fs from "node:fs"; import crypto from "node:crypto"; import os from "node:os";
-const DIR = `${os.homedir()}/.boss-os/open-loops-mirror`; fs.mkdirSync(DIR, { recursive: true });
-const O = "https://boss.sequoiataylor.com";
+// "Landed, waiting on proof" (her words 27 Nov 2026: "move it off the main list"): rows in section `proving` sit in
+// their own folded section between the dated list and Parked, and no header count but "N waiting on proof" counts them.
+// Env (tests): OPEN_LOOPS_MIRROR_DIR, BOSS_ORIGIN.
+const DIR = process.env.OPEN_LOOPS_MIRROR_DIR || `${os.homedir()}/.boss-os/open-loops-mirror`; fs.mkdirSync(DIR, { recursive: true });
+const O = process.env.BOSS_ORIGIN || "https://boss.sequoiataylor.com";
 const u = await fetch(`${O}/api/boss/auth/unlock`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode: process.env.BOSS_PASSCODE }) });
 const cookie = (u.headers.get("set-cookie") ?? "").split(";")[0];
 const r = await fetch(`${O}/api/boss/open-loops`, { headers: { cookie } });
@@ -25,15 +28,19 @@ const row = (l) => {
   return `<li class="${l.owner === "sequoia" ? "mine" : ""}"><details><summary><span class="t">${esc(l.title)}</span><span class="s">${esc(who)} · ${esc(BIZ[l.business] ?? l.business)}${l.next_date ? " · " + day(l.next_date) : ""}</span>${wait}</summary>
 <p><b>Next:</b> ${esc(l.next_step ?? "")}</p><p><b>Done when:</b> ${esc(l.finish_line ?? "")}</p></details></li>`;
 };
-const active = L.filter((l) => l.section !== "parked").sort((a, b) => (a.next_date || "9").localeCompare(b.next_date || "9") || a.title.localeCompare(b.title));
+const active = L.filter((l) => l.section === "not_finished").sort((a, b) => (a.next_date || "9").localeCompare(b.next_date || "9") || a.title.localeCompare(b.title));
 const parked = L.filter((l) => l.section === "parked").sort((a, b) => a.title.localeCompare(b.title));
+const proving = L.filter((l) => l.section === "proving").sort((a, b) => a.title.localeCompare(b.title));
+const proofRow = (l) => `<li class="${l.owner === "sequoia" ? "mine" : ""}"><details><summary><span class="t">${esc(l.title)}</span><span class="s">waiting on ${esc(l.proof_pr ?? "its PR")}'s live check</span></summary>
+<p><b>Done when:</b> ${esc(l.finish_line ?? "")}</p></details></li>`;
 const overdue = active.filter((l) => l.next_date && l.next_date < today);
 const groups = new Map();
 for (const l of active.filter((l) => !(l.next_date && l.next_date < today))) { const k = l.next_date || "no date"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(l); }
 const yours = active.filter((l) => l.owner === "sequoia").length;
-let body = `<p class="sum">${active.length} open · ${overdue.length} overdue · ${yours} yours · ${parked.length} parked</p>`;
+let body = `<p class="sum">${active.length} open · ${overdue.length} overdue · ${yours} yours · ${proving.length} waiting on proof · ${parked.length} parked</p>`;
 if (overdue.length) body += `<h2 class="late">Overdue</h2><ul>${overdue.map(row).join("")}</ul>`;
 for (const [k, rows] of groups) body += `<h2>${k === "no date" ? "No date" : day(k) + (k === today ? " · today" : "")} <small>${rows.length}</small></h2><ul>${rows.map(row).join("")}</ul>`;
+body += `<details class="park"><summary><h2>Landed, waiting on proof <small>${proving.length}</small> ▾</h2></summary><p class="meta">The fix landed; the next-day live check decides. A pass closes it, a fail brings it back marked NOT WORKING.</p><ul>${proving.map(proofRow).join("")}</ul></details>`;
 body += `<details class="park"><summary><h2>Parked <small>${parked.length}</small> ▾</h2></summary><ul>${parked.map(row).join("")}</ul></details>`;
 const content = body; const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 const stamp = new Date().toLocaleString("en-US", { timeZone: tz, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });

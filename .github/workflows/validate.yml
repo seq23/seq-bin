@@ -83,6 +83,11 @@ jobs:
         run: ./tests/test-pass-line.sh
       - name: the Open Loops mirror hook rebuilds only after Open Loops changes and is never silent on an outage
         run: ./tests/test-open-loops-mirror-hook.sh
+      # 27 Nov 2026 (her words: "a new section on open loops for the not yet proven stuff and move it off the main list").
+      - name: the Open Loops mirror keeps "Landed, waiting on proof" rows off the main list and out of its counts
+        run: node --test tests/test-open-loops-mirror.mjs
+      - name: open-loops-proof closes a proving row on PASS, returns it on FAIL, and never closes one on an outage
+        run: node --test tests/test-open-loops-proof.mjs
 
       # seq-bin's last land step fast-forwards the launchd copy (the main checkout, ~/bin), never
       # the worktree land runs from (20 Nov 2026: a false STOPPED after a good merge from a worktree).

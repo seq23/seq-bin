@@ -33,6 +33,20 @@
 #   AI_RUN_ADD_DIRS        colon-separated extra writable directories for the worker (a job's state dir).
 #   AI_RUN_CALLER          name logged as the caller (default: the parent process's script).
 #   AI_RUN_LOG             usage log (default ~/Library/Logs/ai-run.log).
+#   AI_RUN_MCP=none        Claude starts with NO connectors or MCP servers (a checker that only reads a diff or a
+#                          command's output needs none; each one loaded is start-up tokens paid on every run).
+#   AI_RUN_MAX_SECS        Claude runs only: wall-clock cap in seconds (default 3600; 0 = none). At the cap the run is
+#                          stopped: exit 124 and NAMED STOP [TIME_CAP]. Codex runs have no cap here (her ChatGPT plan).
+#   AI_RUN_MAX_RUNS        Claude runs only: most runs one caller may make in a day (default 100; 0 = none), counted
+#                          from the usage log. Past it: exit 75 and NAMED STOP [RUN_CAP]. This is what stops a retry
+#                          loop that would otherwise spend her plan all night.
+#   AI_RUN_IGNORE_PAUSE=1  a run SHE starts by hand (a build queue, a one-off) ignores the pause below.
+#
+# ONE PAUSE FOR EVERY SCHEDULED AI JOB (her yes 25 Nov 2026: "yea add that to the open loops for friday"; built
+# 27 Nov 2026). `ai-pause 2026-11-29` (or `ai-pause 1` for one day) writes a date to ~/.boss-os/ai-pause-until.
+# Until that date every ai-run call, Codex or Claude, ends at once with exit 75 and NAMED STOP [PAUSED]: the same
+# "the work waits" code as a usage limit, so each caller keeps its place and the first slot after the date runs it.
+# The file expires by its own date; `ai-pause off` removes it. post-land-check reads the same file.
 #   AI_RUN_CODEX_BIN / AI_RUN_CLAUDE_BIN   the binaries (default: PATH, then /opt/homebrew/bin).
 #
 # OUTPUT. With --out, everything the engine prints (stdout and stderr) is APPENDED to FILE as it
@@ -43,8 +57,10 @@
 # but never commit (proved 3 Nov 2026: `git add` -> index.lock: Operation not permitted). The git
 # directories of --cwd's repo and of each repo directly under --cwd are added as writable roots.
 #
-# Every run appends one line to the usage log: time, role, engine, caller, exit.
-# Exit: the engine's own code; 75 CODEX_LIMIT; 76 CLAUDE_LIMIT; 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
+# Every run appends one line to the usage log: time, role, engine, caller, exit, then bytes= (the prompt's size)
+# and secs= (how long the engine ran), so a job whose start-up or run time grows shows up in the log.
+# Exit: the engine's own code; 75 CODEX_LIMIT / PAUSED / RUN_CAP; 76 CLAUDE_LIMIT; 124 TIME_CAP;
+# 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
 set -uo pipefail
 
 usage() {
@@ -99,8 +115,8 @@ CALLER="$(caller_name)"
 ENGINE=""
 log_line() { # log_line <exit> [stop]
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
-  printf '%s\trole=%s\tengine=%s\tcaller=%s\texit=%s%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$ROLE" "${ENGINE:-none}" \
-    "$CALLER" "$1" "${2:+	stop=$2}" >> "$LOG" 2>/dev/null
+  printf '%s\trole=%s\tengine=%s\tcaller=%s\texit=%s%s\tbytes=%s\tsecs=%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$ROLE" "${ENGINE:-none}" \
+    "$CALLER" "$1" "${2:+	stop=$2}" "${#PROMPT}" "$(( SECONDS - ${T0:-$SECONDS} ))" >> "$LOG" 2>/dev/null
 }
 stop() { # stop <code> <NAME> <text>
   local line="NAMED STOP [$2] $3"
@@ -132,6 +148,29 @@ else
   DEST="$(mktemp "${TMPDIR:-/tmp}/ai-run.XXXXXX")"
   START_BYTES=0
   trap 'rm -f "$DEST"' EXIT
+fi
+
+# --- her pause, then the run cap: both end the run before any model starts ------------------------
+PAUSE_FILE="${AI_RUN_PAUSE_FILE:-$HOME/.boss-os/ai-pause-until}"
+if [ "${AI_RUN_IGNORE_PAUSE:-}" != 1 ] && [ -r "$PAUSE_FILE" ]; then
+  PAUSE_UNTIL="$(tr -d '[:space:]' < "$PAUSE_FILE")"
+  if [[ "$PAUSE_UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    [[ "$(date +%Y-%m-%d)" < "$PAUSE_UNTIL" ]] &&
+      stop 75 PAUSED "by the owner until $PAUSE_UNTIL ($PAUSE_FILE) — no model ran; this work waits and runs on the first slot after."
+  else
+    # A pause file that cannot be read as a date is NOT "no pause": she asked for a pause and the date was lost.
+    stop 75 PAUSED "the pause file $PAUSE_FILE does not hold a date (YYYY-MM-DD) — no model ran. Fix it with: ai-pause <date> or ai-pause off"
+  fi
+fi
+if [ "$ENGINE_KIND" = claude ]; then
+  MAX_RUNS="${AI_RUN_MAX_RUNS:-100}"
+  [[ "$MAX_RUNS" =~ ^[0-9]+$ ]] || { echo "ai-run: AI_RUN_MAX_RUNS must be a whole number (got '$MAX_RUNS')" >&2; exit 64; }
+  if [ "$MAX_RUNS" -gt 0 ] && [ -r "$LOG" ]; then
+    RUNS_TODAY="$(awk -F'\t' -v d="$(date +%Y-%m-%d)" -v c="caller=$CALLER" \
+      'index($1, d) == 1 && $3 ~ /^engine=claude/ && $4 == c && $0 !~ /stop=(PAUSED|RUN_CAP)/ { n++ } END { print n + 0 }' "$LOG" 2>/dev/null)"
+    [ "${RUNS_TODAY:-0}" -ge "$MAX_RUNS" ] &&
+      stop 75 RUN_CAP "$CALLER has already made $RUNS_TODAY Claude runs today (cap $MAX_RUNS, AI_RUN_MAX_RUNS) — no model ran; this work waits for tomorrow."
+  fi
 fi
 
 # --- build the command --------------------------------------------------------------------------
@@ -172,6 +211,11 @@ else
     EXTRA=(--dangerously-skip-permissions)
   fi
   CMD=("$CLAUDE" -p --model "${AI_RUN_CLAUDE_MODEL:-opus}" ${EXTRA[@]+"${EXTRA[@]}"})
+  case "${AI_RUN_MCP:-}" in
+    "") ;;
+    none) CMD+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}') ;;
+    *) echo "ai-run: AI_RUN_MCP must be unset or none (got '$AI_RUN_MCP')" >&2; exit 64 ;;
+  esac
 fi
 
 # --- run it, forwarding a kill to the engine (a watchdog or a cap kills THIS pid) ----------------
@@ -180,12 +224,26 @@ CHILD=""
 forward() { [ -n "$CHILD" ] && kill -TERM "$CHILD" 2>/dev/null; }
 trap forward TERM INT HUP
 if [ -n "$CWD" ]; then cd "$CWD" || exit 64; fi
+T0=$SECONDS
 if [ "$ENGINE_KIND" = codex ]; then
   "${CMD[@]}" < /dev/null >> "$DEST" 2>&1 &
 else
   printf '%s' "$PROMPT" | "${CMD[@]}" >> "$DEST" 2>&1 &   # $! is claude itself, the last in the pipe
 fi
 CHILD=$!
+# The time cap (Claude runs only): a watchdog stops the engine at the cap and leaves a marker, so a capped run is
+# named as one, never mistaken for the engine's own failure.
+CAPPED="" WATCH=""
+if [ "$ENGINE_KIND" = claude ]; then
+  MAX_SECS="${AI_RUN_MAX_SECS:-3600}"
+  [[ "$MAX_SECS" =~ ^[0-9]+$ ]] || MAX_SECS=3600
+  if [ "$MAX_SECS" -gt 0 ]; then
+    CAPPED="$(mktemp "${TMPDIR:-/tmp}/ai-run-cap.XXXXXX")"; rm -f "$CAPPED"
+    ( sleep "$MAX_SECS" & SL=$!; trap 'kill $SL 2>/dev/null; exit 0' TERM; wait $SL
+      kill -0 "$CHILD" 2>/dev/null && { : > "$CAPPED"; kill -TERM "$CHILD" 2>/dev/null; } ) &
+    WATCH=$!
+  fi
+fi
 wait "$CHILD"; RC=$?
 [ -n "${AI_RUN_TEST_FOREIGN_PID:-}" ] && CHILD="$AI_RUN_TEST_FOREIGN_PID"   # tests only: the PID got reused
 # A trap can end `wait` early while the engine still runs, so wait again while it lives. But a PID
@@ -198,8 +256,13 @@ while kill -0 "$CHILD" 2>/dev/null; do
   RC=$r
 done
 trap - TERM INT HUP
+[ -n "$WATCH" ] && { kill -TERM "$WATCH" 2>/dev/null; wait "$WATCH" 2>/dev/null; }
 
 [ -n "$OUT" ] || cat "$DEST"
+if [ -n "$CAPPED" ] && [ -e "$CAPPED" ]; then
+  rm -f "$CAPPED"
+  stop 124 TIME_CAP "the Claude run for $CALLER was stopped at its $MAX_SECS-second cap (AI_RUN_MAX_SECS) — what it printed before then is kept."
+fi
 
 # --- a Codex usage limit: the work waits for the reset -------------------------------------------
 # Only Codex's own error line counts, and only on a failed exit, near the end: a run that merely

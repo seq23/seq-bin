@@ -27,6 +27,7 @@ cat > "$W/bin/ai-run" <<'AI'
 #!/bin/bash
 # Reads the prompt; for each "owner/repo#N" in it, posts the scenario's verdict as a comment.
 S="$PLC_STORE"; echo x >> "$S/ai-calls"
+echo "model=${AI_RUN_CLAUDE_MODEL:-} mcp=${AI_RUN_MCP:-} secs=${AI_RUN_MAX_SECS:-} runs=${AI_RUN_MAX_RUNS:-} ignore=${AI_RUN_IGNORE_PAUSE:-}" >> "$S/ai-env"
 prompt="${@: -1}"
 # Swallow stdin like claude -p would (bounded, so a mutation fails the test instead of hanging it).
 timeout 5 cat >/dev/null 2>&1 || true
@@ -256,6 +257,8 @@ check "…but land's --read-only-gate is never paused" eval '! POST_LAND_SKIP="$
 check "…and POST_LAND_FORCE=1 runs one anyway" eval '! POST_LAND_FORCE=1 POST_LAND_SKIP="$W/skip" "$PLC" </dev/null 2>&1 | grep -q PAUSED'
 echo 2000-01-01 > "$W/skip"
 check "…an expired skip date runs the checks as usual" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && ! grep -q "PAUSED" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/HANDOFF.md"'
+# USAGE SAVER (27 Nov 2026): every checker run is the cheap kind: Sonnet, no connectors, 15 minutes, 200 a day.
+check "every checker run asks ai-run for Sonnet, no connectors and its caps" eval '[ -s "$PLC_STORE/ai-env" ] && ! grep -qv "^model=sonnet mcp=none secs=900 runs=200 ignore=1$" "$PLC_STORE/ai-env"'
 rm -f "$W/skip"
 unset POST_LAND_TASKS POST_LAND_SANDBOX POST_LAND_NOTICE POST_LAND_TODAY
 

@@ -19,6 +19,11 @@ one runner, `~/bin/ai-run`, and names the role; nothing calls `claude -p` or `co
 
     ai-run --role worker|brain [--cwd DIR] [--network] [--out FILE] -- "<prompt>"   # or the prompt on stdin
 
+**One pause for every scheduled AI job:** `ai-pause 1` (one day), `ai-pause 2026-11-29`, `ai-pause off`, `ai-pause status`.
+Until the date every `ai-run` call ends with `NAMED STOP [PAUSED]` (exit 75) and its work waits; `post-land-check` reads
+the same file. Claude runs are also capped: `AI_RUN_MAX_SECS` (default 3600) and `AI_RUN_MAX_RUNS` a day per caller
+(default 100); `AI_RUN_MCP=none` starts a checker with no connectors.
+
 | Role | Engine | How |
 |---|---|---|
 | `worker` (fixing, building, landing) | Codex (the `codex` CLI on her ChatGPT plan) | `codex exec -s workspace-write`, stdin `</dev/null`, network only with `--network`, `--cwd` as its root. The `.git` of `--cwd`'s repo and of each repo directly under it are added as writable roots (workspace-write keeps `.git` read-only, so a worker could not commit). `AI_RUN_ADD_DIRS` adds a job's state directory. |

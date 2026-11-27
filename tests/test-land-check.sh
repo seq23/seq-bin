@@ -70,6 +70,7 @@ eval "$(grep '^sha_name() ' "$LAND")"   # land's own helper, never a copy
 
 chk() { # [repo dir name] -> OUT, RC of the real `land --check 7`
   local d="${1:-newrepo}"; HEADSHA="$(git -C "$W/$d" rev-parse HEAD)"; export HEADSHA
+  LAND_STOPS_DIR="$(mktemp -d "$W/stops.XXXXXX")"; export LAND_STOPS_DIR   # each case a fresh PR history ("tried before")
   OUT="$(cd "$W/$d" && PATH="$BIN:$PATH" env ${SURF:+LAND_SURFACES="$SURF"} "$LAND" --check 7 2>&1 </dev/null | sed $'s/\033\\[[0-9;]*m//g'; exit "${PIPESTATUS[0]}")"; RC=$?
 }
 reset() { rm -f "$F"/body "$F"/files "$F"/labels "$F"/comments "$F"/state "$F"/base "$F"/url "$F"/outage "$F"/events "$F"/label-events; printf '%s' "${1-}" > "$F/body"; }

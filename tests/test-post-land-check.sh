@@ -182,23 +182,23 @@ reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (liv
 check "outcome model FAIL (count met, meaning wrong): a result, exit 0" [ "$(orun)" = 0 ]
 check "…the line is FAIL" grep -q '^- OUTCOME-CHECK FAIL o/app#5 ' "$W/post-land-checks.md"
 check "…the sheet's line 1 is FAIL and it stays open" eval 'head -1 "$POST_LAND_TASKS/job5.md" | grep -q "^STATUS: FAIL o/app#5 aaa111 2026-11-25 — outcome NOT WORKING: saw 0 of 11"'
-check "…the banner says NOT WORKING" grep -q '^NOT WORKING: app #5 Noelle acts on her decisions — saw 0 of 11' "$W/store/banners"
-check "…the Notices line says NOT WORKING" grep -qx $'outcome:o/app#5:not-working\tapp #5 Noelle acts on her decisions: NOT WORKING — saw 0 of 11 decisions acted on; the 4 lines are log headers' "$W/store/notices"
+check "…the banner says NOT WORKING: expected, saw, look" grep -q '^NOT WORKING: app #5 Noelle acts on her decisions — expected at least 3; saw 0 of 11 decisions acted on; the 4 lines are log headers; look: https://github.com/o/app/pull/5#code$' "$W/store/banners"
+check "…the Notices line says NOT WORKING" grep -qx $'outcome:o/app#5:not-working\tapp #5 Noelle acts on her decisions: NOT WORKING — expected at least 3; saw 0 of 11 decisions acted on; the 4 lines are log headers; look: https://github.com/o/app/pull/5#code' "$W/store/notices"
 
 reset; osheet; due_list "$(oline 'cat ~/Work/tasks/one.log')"; export VERDICT_5="Outcome check (live): PASS — fine"
 check "below the floor (1 < 3): FAIL by code, exit 0" [ "$(orun)" = 0 ]
 check "…no model ran, so no model PASS could count" [ "$(calls)" = 0 ]
 check "…code posted the FAIL comment itself, naming the count" eval '[ "$(first)" = "Outcome check (live): FAIL — saw 1, needed at least 3" ]'
-check "…the line is FAIL and the Notices line says NOT WORKING" eval 'grep -q "^- OUTCOME-CHECK FAIL o/app#5 " "$W/post-land-checks.md" && grep -q "NOT WORKING — saw 1, needed at least 3" "$W/store/notices"'
+check "…the line is FAIL and the Notices line says NOT WORKING" eval 'grep -q "^- OUTCOME-CHECK FAIL o/app#5 " "$W/post-land-checks.md" && grep -q "NOT WORKING — expected at least 3; saw 1, needed at least 3" "$W/store/notices"'
 reset; osheet; due_list "$(oline 'grep -c nomatch ~/Work/tasks/acted.log')"; export VERDICT_5="Outcome check (live): PASS — fine"
-check "grep -c finding nothing (the Noelle case: 0 acted on) is NOT WORKING by code, never 'could not check'" eval '[ "$(orun)" = 0 ] && grep -q "^- OUTCOME-CHECK FAIL " "$W/post-land-checks.md" && grep -q "NOT WORKING — saw 0, needed at least 3" "$W/store/notices" && [ "$(calls)" = 0 ]'
+check "grep -c finding nothing (the Noelle case: 0 acted on) is NOT WORKING by code, never 'could not check'" eval '[ "$(orun)" = 0 ] && grep -q "^- OUTCOME-CHECK FAIL " "$W/post-land-checks.md" && grep -q "NOT WORKING — expected at least 3; saw 0, needed at least 3" "$W/store/notices" && [ "$(calls)" = 0 ]'
 
 for o in "no reader:READER_GONE" "missing file:grep -c acted ~/Work/tasks/gone.log" "empty output:cat ~/Work/tasks/empty.log"; do
   c="${o#*:}"; reset; osheet; due_list "$(oline "$c")"; export VERDICT_5="Outcome check (live): PASS — fine"
   if [ "$c" = READER_GONE ]; then due_list "$(oline "$FOUR")"; export POST_LAND_OUTCOME_READ="$W/nonexistent"; fi
   check "outage (${o%%:*}): exit 1, never PASS" [ "$(orun)" = 1 ]
   check "…(${o%%:*}) the line stays DUE, no model ran, the sheet's line 1 unchanged" eval 'grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && [ "$(calls)" = 0 ] && head -1 "$POST_LAND_TASKS/job5.md" | grep -q "^STATUS: LANDED-UNCHECKED"'
-  check "…(${o%%:*}) the comment says COULDNT-CHECK and the Notices line NOT CHECKED, in plain words" eval 'first | grep -q "^Outcome check (live): COULDNT-CHECK — " && grep -qE "^outcome:o/app#5:not-checked:2026-11-25	app #5 Noelle acts on her decisions: NOT CHECKED — the check (could not read the live system|printed nothing)$" "$W/store/notices"'
+  check "…(${o%%:*}) the comment says COULDNT-CHECK and the Notices line NOT CHECKED, in plain words" eval 'first | grep -q "^Outcome check (live): COULDNT-CHECK — " && grep -qE "^outcome:o/app#5:not-checked:2026-11-25	app #5 Noelle acts on her decisions: NOT CHECKED — the check never gave a reading: the check (could not read the live system|printed nothing); look: https://github.com/o/app/pull/5#code$" "$W/store/notices"'
   unset POST_LAND_OUTCOME_READ
 done
 check "replay of a COULDNT night: a second run posts no second comment or Notices line, and still exits 1" eval '[ "$(orun)" = 1 ] && [ "$(comments)" = 1 ] && [ "$(notices)" = 1 ]'
@@ -209,15 +209,15 @@ export POST_LAND_TODAY=2026-11-25
 
 reset; osheet; due_list "$(oline "$FOUR")"; unset VERDICT_5
 check "Rule 0, the model answered with no verdict line: exit 1" [ "$(orun)" = 1 ]
-check "…the line stays DUE and the Notices line says NOT CHECKED" eval 'grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the checker gave no verdict" "$W/store/notices"'
+check "…the line stays DUE and the Notices line says NOT CHECKED" eval 'grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the checker gave no verdict" "$W/store/notices"'
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="I think it is probably fine. PASS"
 check "…a PASS that is not on the verdict line never counts: exit 1, DUE" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md"'
 reset; osheet; due_list "$(oline "$FOUR")"
-check "Rule 0, ai-run down or a usage limit: exit 1, line DUE, NOT CHECKED" eval '[ "$(POST_LAND_AI_RUN="$W/bin/ai-run-down" orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the checker gave no verdict (it was down, out of its usage limit, or answered nothing)" "$W/store/notices" && ! grep -qi "exit" "$W/store/notices"'
+check "Rule 0, ai-run down or a usage limit: exit 1, line DUE, NOT CHECKED" eval '[ "$(POST_LAND_AI_RUN="$W/bin/ai-run-down" orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the checker gave no verdict (it was down, out of its usage limit, or answered nothing)" "$W/store/notices" && ! grep -qi "exit" "$W/store/notices"'
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): COULDNT-CHECK — the output does not say which day"
-check "the model says COULDNT-CHECK: exit 1, line DUE, NOT CHECKED with its words" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the output does not say which day" "$W/store/notices"'
+check "the model says COULDNT-CHECK: exit 1, line DUE, NOT CHECKED with its words" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the output does not say which day" "$W/store/notices"'
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4" GH_COMMENT_FAIL=1
-check "a PASS whose comment cannot be posted is never DONE: exit 1, DUE" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the verdict could not be posted" "$W/store/notices"'
+check "a PASS whose comment cannot be posted is never DONE: exit 1, DUE" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the verdict could not be posted" "$W/store/notices"'
 unset GH_COMMENT_FAIL
 
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4" POST_LAND_TODAY=2026-11-24
@@ -236,12 +236,12 @@ Check: grep -c acted ~/Work/tasks/acted.log
 Expect: >= 9" VERDICT_5="Outcome check (live): PASS — fine"
 check "infer: the model's own floor holds (4 < 9): FAIL by code, the judge never runs" eval '[ "$(orun)" = 0 ] && grep -q "^- OUTCOME-CHECK FAIL " "$W/post-land-checks.md" && [ "$(calls)" = 1 ]'
 reset; osheet; due_list "$(oline infer infer)"; export INFER_5="Check: none — the rows are in a D1 table behind a sign-in" VERDICT_5="Outcome check (live): PASS — fine"
-check "infer: 'Check: none' is NOT CHECKED with its reason, never PASS" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — no check can see its output without a sign-in: the rows are in a D1 table behind a sign-in" "$W/store/notices"'
+check "infer: 'Check: none' is NOT CHECKED with its reason, never PASS" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: no check can see its output without a sign-in: the rows are in a D1 table behind a sign-in" "$W/store/notices"'
 reset; osheet; due_list "$(oline infer infer)"; export INFER_5="Check: cat ~/.config/gh/hosts.yml
 Expect: >= 1" VERDICT_5="Outcome check (live): PASS — fine"
-check "infer: a model-written check that reaches for her login is refused, never run: NOT CHECKED, the token never leaves" eval '[ "$(orun)" = 1 ] && grep -q "NOT CHECKED — the check was not run, because it needs something outside the allowed read tools" "$W/store/notices" && ! grep -rq gho_FAKE "$W/store" "$W/log" "$W/out"'
+check "infer: a model-written check that reaches for her login is refused, never run: NOT CHECKED, the token never leaves" eval '[ "$(orun)" = 1 ] && grep -q "NOT CHECKED — the check never gave a reading: the check was not run, because it needs something outside the allowed read tools" "$W/store/notices" && ! grep -rq gho_FAKE "$W/store" "$W/log" "$W/out"'
 reset; osheet; due_list "$(oline infer infer)"; export INFER_5="Expect: >= 1"
-check "infer: no Check line: NOT CHECKED" eval '[ "$(orun)" = 1 ] && grep -q "NOT CHECKED — the checker gave no check" "$W/store/notices"'
+check "infer: no Check line: NOT CHECKED" eval '[ "$(orun)" = 1 ] && grep -q "NOT CHECKED — the check never gave a reading: the checker gave no check" "$W/store/notices"'
 
 echo "=== no shell and no logins: a check is never handed to a shell, and her login files cannot be read ==="
 probe="$W/probe-$$"
@@ -251,7 +251,7 @@ for o in "curl -d:curl -s -d x=1 https://e.x/api" "&& touch:grep -c acted ~/Work
          "her gh login:cat ~/.config/gh/hosts.yml" "a script:node -e 1"; do
   reset; osheet; due_list "$(oline "${o#*:}")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
   check "refused (${o%%:*}): exit 1, never run, no model, no PASS" eval '[ "$(orun)" = 1 ] && [ ! -e "$probe" ] && [ "$(calls)" = 0 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md"'
-  check "…(${o%%:*}) NOT CHECKED in plain words; the comment names why; no token anywhere" eval 'grep -q "NOT CHECKED — the check was not run, because it needs something outside the allowed read tools" "$W/store/notices" && jq -r ".[-1].body" "$CJ" | grep -q "^Refused by outcome-read: not run: " && ! grep -rq gho_FAKE "$W/store" "$W/log"'
+  check "…(${o%%:*}) NOT CHECKED in plain words; the comment names why; no token anywhere" eval 'grep -q "NOT CHECKED — the check never gave a reading: the check was not run, because it needs something outside the allowed read tools" "$W/store/notices" && jq -r ".[-1].body" "$CJ" | grep -q "^Refused by outcome-read: not run: " && ! grep -rq gho_FAKE "$W/store" "$W/log"'
 done
 reset; osheet; due_list "$(oline 'curl -s -d x=1 https://e.x/api | wc -l')"
 check "--dry-run: a refused check is reported, never run" eval '[ "$(orun --dry-run)" = 0 ] && grep -q "would not be run" "$W/out"'

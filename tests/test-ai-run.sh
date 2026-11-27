@@ -59,11 +59,12 @@ case "$(cat "$FAKE/claude-mode" 2>/dev/null)" in
   epoch)   echo "Claude AI usage limit reached|1764000000"; exit 1 ;;
   noreset) echo "You've hit your session limit"; exit 1 ;;
   essay)   for i in $(seq 1 30); do echo "Paragraph $i: we discussed how you've hit your weekly limit in planning and what resets 9am means for the schedule."; done; exit 0 ;;
+  slow)    echo "STARTED"; sleep 30; echo "LATE-ANSWER" ;;
   *)       echo "BRAIN-DONE" ;;
 esac
 SH
 chmod +x "$BIN"/*
-export FAKE="$TMP" AI_RUN_LOG="$TMP/ai-run.log"
+export FAKE="$TMP" AI_RUN_LOG="$TMP/ai-run.log" AI_RUN_PAUSE_FILE="$TMP/no-pause-file"
 reset() { rm -f "$TMP"/codex-* "$TMP"/claude-* "$TMP/out.log"; }
 run() { env PATH="$BIN:$PATH" "$@"; }
 codex_calls()  { grep -c . "$TMP/codex-args.log" 2>/dev/null || echo 0; }
@@ -85,7 +86,7 @@ absent "…and no network without --network" grep -q 'network_access' "$TMP/code
 check "codex's stdin was /dev/null (the caller's stdin never reached it)" [ ! -s "$TMP/codex-stdin" ]
 check "claude was never called" no_claude
 check "without --out the output is on stdout" grep -q 'WORKER-DONE' <<<"$out"
-check "a usage-log line: role, engine, caller, exit" grep -qE $'\trole=worker\tengine=codex\tcaller=[^\t]+\texit=0$' "$AI_RUN_LOG"
+check "a usage-log line: role, engine, caller, exit" grep -qE $'\trole=worker\tengine=codex\tcaller=[^\t]+\texit=0\tbytes=[1-9][0-9]*\tsecs=[0-9]+$' "$AI_RUN_LOG"
 
 echo "=== 2. --network and --out ==="
 reset
@@ -198,7 +199,7 @@ check "…named, with Claude's own reset time" grep -q 'NAMED STOP \[CLAUDE_LIMI
 check "…and the stop line is in --out too" grep -q 'NAMED STOP \[CLAUDE_LIMIT\]' "$TMP/out.log"
 check "…codex was never called" [ "$(codex_calls)" -eq 0 ]
 check "…claude ran once, not retried" [ "$(claude_calls)" -eq 1 ]
-check "…the usage log records stop=CLAUDE_LIMIT exit 76" grep -qE $'exit=76\tstop=CLAUDE_LIMIT$' "$AI_RUN_LOG"
+check "…the usage log records stop=CLAUDE_LIMIT exit 76" grep -qE $'exit=76\tstop=CLAUDE_LIMIT\tbytes=[1-9][0-9]*\tsecs=[0-9]+$' "$AI_RUN_LOG"
 reset; echo weekly1 > "$TMP/claude-mode"
 out="$(run "$AI" --role brain -- "x")"; rc=$?
 check "a limit notice with exit 1 is exit 76 (rc=$rc)" grep -q 'CLAUDE_LIMIT\] resets 9am (America/New_York)' <<<"$out"
@@ -220,6 +221,67 @@ reset; echo limit > "$TMP/codex-mode"; echo weekly1 > "$TMP/claude-mode"
 out="$(run "$AI" --role worker -- "fix")"; rc=$?
 check "a Codex limit handed to a Claude that is also out ends at 76 CLAUDE_LIMIT (rc=$rc)" [ "$rc" -eq 76 ]
 check "…codex ran once, claude once, nothing else" [ "$(codex_calls)$(claude_calls)" = "11" ]
+
+echo "=== her pause: one date file stops every ai-run call, Codex and Claude, and nothing is lost ==="
+tomorrow="$(date -v+1d +%Y-%m-%d 2>/dev/null || date -d tomorrow +%Y-%m-%d)"; yesterday="$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d yesterday +%Y-%m-%d)"
+reset; echo "$tomorrow" > "$TMP/pause"
+out="$(AI_RUN_PAUSE_FILE="$TMP/pause" run "$AI" --role brain -- "summarise the week")"; rc=$?
+check "paused brain: exit 75 (rc=$rc), the same 'work waits' code as a limit" [ "$rc" -eq 75 ]
+check "…NAMED STOP [PAUSED] naming the date" grep -q "NAMED STOP \[PAUSED\] by the owner until $tomorrow" <<<"$out"
+check "…and claude never ran" no_claude
+out="$(AI_RUN_PAUSE_FILE="$TMP/pause" run "$AI" --role worker -- "fix it")"; rc=$?
+check "paused worker: exit 75 and codex never ran (rc=$rc)" eval '[ "$rc" -eq 75 ] && [ ! -s "$TMP/codex-args.log" ]'
+check "…the usage log records stop=PAUSED" grep -q 'stop=PAUSED' "$AI_RUN_LOG"
+out="$(AI_RUN_IGNORE_PAUSE=1 AI_RUN_PAUSE_FILE="$TMP/pause" run "$AI" --role brain -- "her own run")"; rc=$?
+check "a run she starts by hand (AI_RUN_IGNORE_PAUSE=1) still runs (rc=$rc)" eval '[ "$rc" -eq 0 ] && [ "$(claude_calls)" -eq 1 ]'
+reset; echo "$yesterday" > "$TMP/pause"
+out="$(AI_RUN_PAUSE_FILE="$TMP/pause" run "$AI" --role brain -- "summarise the week")"; rc=$?
+check "an expired pause date runs as usual (rc=$rc)" eval '[ "$rc" -eq 0 ] && [ "$(claude_calls)" -eq 1 ]'
+reset; echo "sometime soon" > "$TMP/pause"
+out="$(AI_RUN_PAUSE_FILE="$TMP/pause" run "$AI" --role brain -- "summarise the week")"; rc=$?
+check "a pause file with no readable date is still a pause, never 'no pause' (rc=$rc)" eval '[ "$rc" -eq 75 ] && no_claude && grep -q "does not hold a date" <<<"$out"'
+
+echo "=== ai-pause: the one command that sets, shows and ends the pause ==="
+PAUSE="$ROOT/ai-pause"; PF="$TMP/pause2"
+out="$(AI_RUN_PAUSE_FILE="$PF" "$PAUSE" 1)"; check "ai-pause 1 writes tomorrow's date and says PAUSED until it" eval '[ "$(cat "$PF")" = "$tomorrow" ] && grep -q "PAUSED until $tomorrow" <<<"$out"'
+reset; out="$(AI_RUN_PAUSE_FILE="$PF" run "$AI" --role brain -- "x")"; rc=$?
+check "…and ai-run then stops on that file (rc=$rc)" eval '[ "$rc" -eq 75 ] && no_claude'
+out="$(AI_RUN_PAUSE_FILE="$PF" "$PAUSE" "$yesterday")"; rc=$?
+check "a date that is not ahead is refused and the pause is left as it was (rc=$rc)" eval '[ "$rc" -eq 64 ] && [ "$(cat "$PF")" = "$tomorrow" ]'
+out="$(AI_RUN_PAUSE_FILE="$PF" "$PAUSE" banana)"; rc=$?
+check "a word that is not a date is refused, nothing changed (rc=$rc)" eval '[ "$rc" -eq 64 ] && [ "$(cat "$PF")" = "$tomorrow" ]'
+out="$(AI_RUN_PAUSE_FILE="$PF" "$PAUSE" off)"; check "ai-pause off removes the file and says no pause" eval '[ ! -e "$PF" ] && grep -q "no pause" <<<"$out"'
+reset; out="$(AI_RUN_PAUSE_FILE="$PF" run "$AI" --role brain -- "x")"; rc=$?
+check "…and ai-run runs again (rc=$rc)" eval '[ "$rc" -eq 0 ] && [ "$(claude_calls)" -eq 1 ]'
+
+echo "=== the usage caps: runs a day per caller, and seconds per run (Claude only) ==="
+reset; : > "$AI_RUN_LOG"
+for i in 1 2 3; do AI_RUN_CALLER=loopy AI_RUN_MAX_RUNS=3 run "$AI" --role brain -- "round $i" >/dev/null; done
+out="$(AI_RUN_CALLER=loopy AI_RUN_MAX_RUNS=3 run "$AI" --role brain -- "round 4")"; rc=$?
+check "the 4th Claude run of a caller capped at 3 a day: exit 75, NAMED STOP [RUN_CAP] (rc=$rc)" eval '[ "$rc" -eq 75 ] && grep -q "NAMED STOP \[RUN_CAP\] loopy has already made 3 Claude runs today" <<<"$out"'
+check "…and claude ran exactly 3 times" [ "$(claude_calls)" -eq 3 ]
+out="$(AI_RUN_CALLER=other AI_RUN_MAX_RUNS=3 run "$AI" --role brain -- "someone else")"; rc=$?
+check "another caller is not held by loopy's count (rc=$rc)" [ "$rc" -eq 0 ]
+out="$(AI_RUN_CALLER=loopy AI_RUN_MAX_RUNS=3 run "$AI" --role worker -- "codex work")"; rc=$?
+check "the run cap counts Claude runs only: the same caller's Codex run still runs (rc=$rc)" [ "$rc" -eq 0 ]
+reset; echo slow > "$TMP/claude-mode"; t0=$SECONDS
+out="$(AI_RUN_MAX_SECS=2 run "$AI" --role brain -- "think for a long time")"; rc=$?
+check "a Claude run past its 2-second cap is stopped: exit 124 in well under the engine's 30 s (rc=$rc, $((SECONDS-t0)) s)" eval '[ "$rc" -eq 124 ] && [ $((SECONDS-t0)) -lt 15 ]'
+check "…NAMED STOP [TIME_CAP], with what it printed before the cap kept and the late answer absent" eval 'grep -q "NAMED STOP \[TIME_CAP\]" <<<"$out" && grep -q STARTED <<<"$out" && ! grep -q LATE-ANSWER <<<"$out"'
+reset
+out="$(AI_RUN_MAX_SECS=2 run "$AI" --role brain -- "quick")"; rc=$?
+check "a run that finishes inside its cap is untouched (rc=$rc)" eval '[ "$rc" -eq 0 ] && grep -q BRAIN-DONE <<<"$out" && ! grep -q TIME_CAP <<<"$out"'
+
+echo "=== AI_RUN_MCP=none: Claude starts with no connectors ==="
+reset
+AI_RUN_MCP=none run "$AI" --role brain -- "judge this diff" >/dev/null
+check "claude is started with --strict-mcp-config and an empty server list" grep -qF -- '--strict-mcp-config --mcp-config {"mcpServers":{}}' "$TMP/claude-args.log"
+reset
+run "$AI" --role brain -- "needs her connectors" >/dev/null
+absent "without it the connectors are left as they are" grep -q -- '--strict-mcp-config' "$TMP/claude-args.log"
+reset
+out="$(AI_RUN_MCP=some run "$AI" --role brain -- "x" 2>&1)"; rc=$?
+check "an unknown AI_RUN_MCP value is refused, never guessed (rc=$rc)" eval '[ "$rc" -eq 64 ] && no_claude'
 
 echo
 [ "$asserts" -gt 0 ] || { echo "NAMED STOP [ZERO_ASSERTIONS] nothing was checked."; exit 3; }

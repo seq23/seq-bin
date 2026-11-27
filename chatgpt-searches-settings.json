@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "mcp__claude-in-chrome__tabs_create_mcp",
+      "mcp__claude-in-chrome__tabs_close_mcp",
+      "mcp__claude-in-chrome__navigate",
+      "mcp__claude-in-chrome__javascript_tool",
+      "mcp__claude-in-chrome__get_page_text"
+    ],
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "Agent",
+      "Skill",
+      "mcp__claude-in-chrome__computer",
+      "mcp__claude-in-chrome__form_input",
+      "mcp__claude-in-chrome__file_upload",
+      "mcp__claude-in-chrome__upload_image",
+      "mcp__claude-in-chrome__find",
+      "mcp__claude-in-chrome__read_page",
+      "mcp__claude-in-chrome__gif_creator",
+      "mcp__claude-in-chrome__browser_batch"
+    ]
+  }
+}

@@ -1,0 +1,293 @@
+#!/bin/bash
+# lessons-pass — each night, one short list of the day's failures, repeats counted, each with a DRAFTED check line,
+# for the coordinator to read in the morning (her row #17, 27 Nov 2026: "add a step to the existing nightly run on the
+# cheaper model with a usage cap that drafts checks and never edits rules"). It only DRAFTS: her 25 Nov rejection of
+# the automatic version ("Dreaming") stands, so nothing here writes a rule, a skill, CLAUDE.md or rules-history.
+#
+#   lessons-pass            the Central day just ended (run at or after 18:00 CT: today; before: yesterday)
+#   lessons-pass --force    write the day's file again even when it is already complete
+#
+# Runs at the end of post-land-check (launchd 23:15 Central), after its verdicts; its exit never changes
+# post-land-check's.
+#
+# HOW. CODE gathers the day's failure lines from fixed sources and masks every email address. ONE model call, a fresh
+# Claude Haiku through `ai-run --role brain` with AI_RUN_BARE=1 (no tools: no shell, no files, no connectors, so it can
+# write nothing; it only answers in text), a 300-second cap and at most 2 runs a day, groups lines that share a cause
+# and drafts one check line per group. CODE parses its answer, counts each group from the item numbers (the model never
+# supplies a count), and writes ONE file: ~/Work/tasks/lessons/<YYYY-MM-DD>.md (a temp file beside it, then a rename).
+# Nothing else is ever written.
+#
+# SOURCES (all in ~/Work/tasks): logs/post-land-check.log (that day's FAIL, COULDNT-CHECK, NOT WORKING, NOT CHECKED,
+# no-verdict and NAMED STOP lines; each FAIL's verdict comment is read with one `gh api` GET for its reason),
+# post-land-checks.md (the FAIL line of the same PR, for what was checked), task sheets *.md whose line 1 is
+# `STATUS: FAIL … <that day>`, land logs logs/*.log changed that day (their `STOPPED:` lines), and engfix-*.md sheets
+# changed that day. The same PR seen in several sources is ONE failure; a repeat is the same cause on different work.
+#
+# RULE 0. A day with no failures still writes its file: "No failures" plus every source read and how many lines it
+# gave. A source that is missing or unreadable is named in the file. No source readable at all: the file says so,
+# exit 2. The model down, capped, paused or answering nothing usable: the file names the stop and still lists every
+# failure line unsorted; exit 1 (or ai-run's own code). Never a blank "nothing failed".
+#
+# Exit: 0 the file is complete · 1 the model gave nothing usable (file written, unsorted) · 2 nothing could be read ·
+#   64 usage · 75/76/124/69 ai-run's own stop (file written, unsorted).
+# Env (tests): LESSONS_TASKS (default ~/Work/tasks), LESSONS_OUT (default <tasks>/lessons), LESSONS_DAY (YYYY-MM-DD),
+#   LESSONS_AI_RUN (default ~/bin/ai-run), LESSONS_GH (default gh), LESSONS_NOW (YYYY-MM-DDTHH:MM, Central).
+set -uo pipefail
+
+TASKS="${LESSONS_TASKS:-$HOME/Work/tasks}"
+OUT="${LESSONS_OUT:-$TASKS/lessons}"
+AI_RUN="${LESSONS_AI_RUN:-$HOME/bin/ai-run}"
+FORCE=""
+case "${1:-}" in
+  "") ;;
+  --force) FORCE=1 ;;
+  *) echo "usage: lessons-pass [--force]" >&2; exit 64 ;;
+esac
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/lessons-pass.XXXXXX")" || { echo "lessons-pass: no temp dir" >&2; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+# --- gather: code reads the sources; writes $WORK/items.json and prints the day ------------------------------------
+# (a heredoc inside $(...) is mis-parsed by macOS bash 3.2, so the day comes back through a file)
+LESSONS_GH="${LESSONS_GH:-gh}" python3 - "$TASKS" "$WORK" "${LESSONS_DAY:-}" "${LESSONS_NOW:-}" <<'PY'
+import datetime, glob, json, os, re, subprocess, sys, zoneinfo
+
+tasks, work, day_arg, now_arg = sys.argv[1:5]
+CT = zoneinfo.ZoneInfo("America/Chicago")
+if day_arg:
+    day = datetime.date.fromisoformat(day_arg)
+else:
+    now = datetime.datetime.fromisoformat(now_arg).replace(tzinfo=CT) if now_arg else datetime.datetime.now(CT)
+    day = now.date() if now.hour >= 18 else now.date() - datetime.timedelta(days=1)
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")   # post-land-check's mask() shape
+KEY = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)\b")
+URLKEY = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:pull|issues)/(\d+)(?:#issuecomment-(\d+))?")
+
+def clean(s, n=400):
+    s = EMAIL.sub("[email]", " ".join(s.split()))
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+def on_day(path):
+    return datetime.datetime.fromtimestamp(os.path.getmtime(path), CT).date() == day
+
+def key_of(s):
+    m = URLKEY.search(s)
+    if m: return f"{m.group(1)}#{m.group(2)}"
+    m = KEY.search(s)
+    return f"{m.group(1)}#{m.group(2)}" if m else ""
+
+sources, missing, items = [], [], []
+def add(source, text, key=None):
+    items.append({"source": source, "key": key if key is not None else key_of(text), "text": clean(text)})
+
+# 1. post-land-check.log: that day's verdict lines that are not a pass ("27 Nov 23:39 CT   FAIL …")
+log = os.path.join(tasks, "logs", "post-land-check.log")
+stamp = day.strftime("%d %b") + " "
+BAD = re.compile(r"\bFAIL\b|COULDNT-CHECK|NOT WORKING|NOT CHECKED|NAMED STOP|got no verdict|no verdict")
+try:
+    with open(log, encoding="utf-8", errors="replace") as f:
+        lines = [l.rstrip("\n") for l in f if l.startswith(stamp)]
+    n = 0
+    for l in lines:
+        body = re.sub(r"^\d\d \w{3} \d\d:\d\d CT\s+", "", l)
+        if not BAD.search(body): continue
+        n += 1
+        reason = ""
+        m = URLKEY.search(body)
+        if m and m.group(3):
+            try:
+                r = subprocess.run([os.environ.get("LESSONS_GH", "gh"), "api", f"repos/{m.group(1)}/issues/comments/{m.group(3)}", "--jq", ".body"],
+                                   capture_output=True, text=True, timeout=30)
+                first = next((x for x in r.stdout.splitlines() if x.strip()), "") if r.returncode == 0 else ""
+                reason = first.strip("* ") if first else "(its verdict comment could not be read)"
+            except Exception:
+                reason = "(its verdict comment could not be read)"
+        add("post-land-check.log", body + (f" — verdict: {reason}" if reason else ""))
+    sources.append(f"logs/post-land-check.log ({len(lines)} lines that day, {n} not a pass)")
+except OSError as e:
+    missing.append(f"logs/post-land-check.log ({e.strerror})")
+
+# 2. post-land-checks.md: the FAIL line of a PR already found above says what was checked (context, not a new failure)
+due = os.path.join(tasks, "post-land-checks.md")
+try:
+    with open(due, encoding="utf-8", errors="replace") as f:
+        fails = [l.strip() for l in f if re.match(r"^- [A-Z-]+ FAIL ", l)]
+    ctx = {}
+    for l in fails:
+        k = key_of(l)
+        if k: ctx.setdefault(k, l)
+    for it in items:
+        if it["key"] in ctx: it["text"] = clean(it["text"] + " — checked: " + ctx[it["key"]])
+    sources.append(f"post-land-checks.md ({len(fails)} FAIL lines, used as context)")
+except OSError as e:
+    missing.append(f"post-land-checks.md ({e.strerror})")
+
+# 3. task sheets whose line 1 is STATUS: FAIL dated that day
+iso = day.isoformat()
+sheets = sorted(glob.glob(os.path.join(tasks, "*.md")))
+if os.path.isdir(tasks):
+    n = 0
+    for p in sheets:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                first = f.readline().strip()
+        except OSError:
+            continue
+        if first.startswith("STATUS: FAIL") and iso in first:
+            n += 1; add("task sheet " + os.path.basename(p), first)
+    sources.append(f"task sheets ({len(sheets)} read, {n} FAIL that day)")
+else:
+    missing.append("task sheets (no folder " + tasks + ")")
+
+# 4. land logs: their STOPPED: lines from that day's runs. A log holds many runs (land-after appends), each opened by
+#    a header like "=== land 182 (2026-11-27T07:34)", so a line takes the date of the header above it; a log with no
+#    header yet takes its file's date. Only logs changed on or after that day can hold its lines.
+HDR = re.compile(r"^=== .*?(\d{4}-\d{2}-\d{2})T\d\d:\d\d")
+def mday(p): return datetime.datetime.fromtimestamp(os.path.getmtime(p), CT).date()
+logs = [p for p in sorted(glob.glob(os.path.join(tasks, "logs", "*.log"))) if os.path.basename(p) != "post-land-check.log"]
+if os.path.isdir(os.path.join(tasks, "logs")):
+    recent = [p for p in logs if mday(p) >= day]
+    n = 0
+    for p in recent:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                when = mday(p).isoformat()
+                for l in f:
+                    h = HDR.match(l)
+                    if h: when = h.group(1)
+                    elif l.startswith("STOPPED:") and when == iso:
+                        n += 1; add("land log " + os.path.basename(p), l.strip())
+        except OSError:
+            missing.append("land log " + os.path.basename(p) + " (unreadable)")
+    sources.append(f"land logs ({len(recent)} changed since, {n} STOPPED lines that day)")
+else:
+    missing.append("land logs (no folder logs/)")
+
+# 5. engfix sheets changed that day (an engineering FAIL's fix sheet)
+eng = [p for p in sorted(glob.glob(os.path.join(tasks, "engfix-*.md"))) if on_day(p)]
+for p in eng:
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            add("engfix sheet " + os.path.basename(p), " ".join(f.read().split()[:80]))
+    except OSError:
+        missing.append("engfix sheet " + os.path.basename(p) + " (unreadable)")
+sources.append(f"engfix sheets ({len(eng)} changed that day)")
+
+# the same PR in several sources is ONE failure
+merged, seen = [], {}
+for it in items:
+    k = it["key"]
+    if k and k in seen:
+        m = merged[seen[k]]
+        if it["source"] not in m["source"]: m["source"] += ", " + it["source"]
+        m["text"] = clean(m["text"] + " | " + it["text"], 700)
+        continue
+    if k: seen[k] = len(merged)
+    merged.append(dict(it))
+json.dump({"day": iso, "items": merged, "sources": sources, "missing": missing,
+           "nothing_read": not os.path.exists(log) and not os.path.exists(due) and not os.path.isdir(tasks)},
+          open(os.path.join(work, "items.json"), "w"))
+open(os.path.join(work, "day"), "w").write(iso)
+PY
+GRC=$?; [ "$GRC" -eq 0 ] && DAY="$(cat "$WORK/day" 2>/dev/null)" && [ -n "$DAY" ] || { echo "lessons-pass: gathering failed" >&2; exit 2; }
+
+FILE="$OUT/$DAY.md"
+if [ -z "$FORCE" ] && grep -q '^<!-- lessons-pass:complete -->$' "$FILE" 2>/dev/null; then
+  echo "lessons-pass: $FILE is already complete (--force writes it again)"; exit 0
+fi
+mkdir -p "$OUT" || { echo "lessons-pass: cannot make $OUT" >&2; exit 2; }
+
+# --- the one model call (only when there is something to sort) ------------------------------------------------------
+NITEMS="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["items"]))' "$WORK/items.json")"
+ARC=0
+if [ "$NITEMS" -gt 0 ] && ! grep -q 'AI_RUN_BARE' "$AI_RUN" 2>/dev/null; then
+  # An ai-run that does not know AI_RUN_BARE would start Claude WITH tools: never run it (the file names why).
+  echo "NAMED STOP [BARE_UNSUPPORTED] $AI_RUN has no AI_RUN_BARE (no-tools) mode, so the model was not run" > "$WORK/answer"; ARC=69
+elif [ "$NITEMS" -gt 0 ]; then
+  python3 - "$WORK/items.json" > "$WORK/prompt" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"""You are sorting yesterday's ({d['day']}) failures from an automated build-and-land system, so a person can
+add checks that stop them happening again. You draft only: you change nothing and nobody acts on your words without
+reading them.
+
+Each numbered line below is ONE failure (its source in brackets). Put failures that share one cause in the same group:
+a repeat is the same kind of mistake on different work. Then draft ONE check line for each group: a concrete test,
+gate or review line that would have caught it before it shipped, saying where it would live (a repo test, `land`,
+post-land-check, a ship-ready review line). Use plain words; no names of people.
+
+Answer with one line per group and nothing else, exactly in this shape:
+GROUP <the failure numbers, comma-separated> | <what failed, in a few plain words> | CHECK: <the drafted check line>
+
+Every number must appear in exactly one group. A failure with no partner is a group of one.
+
+Failures:""")
+for i, it in enumerate(d["items"], 1):
+    print(f"{i}. [{it['source']}] {it['text']}")
+PY
+  # Started from its own empty temp folder: Claude Code tells a model about the folder it starts in (a repo's git
+  # status, its file names), and the model must see only the failure lines (a real run drafted checks into this
+  # repo's own test file from that).
+  (cd "$WORK" && AI_RUN_BARE=1 AI_RUN_CLAUDE_MODEL=haiku AI_RUN_MAX_SECS=300 AI_RUN_MAX_RUNS=2 AI_RUN_CALLER=lessons-pass \
+    "$AI_RUN" --role brain --out "$WORK/answer" < "$WORK/prompt" > "$WORK/ai-stdout" 2>&1); ARC=$?
+  cat "$WORK/ai-stdout" >> "$WORK/answer" 2>/dev/null
+fi
+
+# --- write the day's file: code counts, code writes, one file ------------------------------------------------------
+python3 - "$WORK/items.json" "$WORK/answer" "$ARC" "$FILE" <<'PY'
+import json, os, re, sys, tempfile
+items_path, answer_path, arc, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+d = json.load(open(items_path)); items = d["items"]; n = len(items)
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+def clean(s): return EMAIL.sub("[email]", " ".join(s.split()))
+try: answer = open(answer_path, encoding="utf-8", errors="replace").read()
+except OSError: answer = ""
+groups, used = [], set()
+for line in answer.splitlines():
+    m = re.match(r"^\s*GROUP\s+([0-9 ,]+?)\s*\|\s*(.+?)\s*\|\s*CHECK:\s*(.+?)\s*$", line)
+    if not m: continue
+    ids = []
+    for x in re.findall(r"\d+", m.group(1)):
+        i = int(x)
+        if 1 <= i <= n and i not in used and i not in ids: ids.append(i)
+    if not ids: continue
+    used.update(ids); groups.append((ids, clean(m.group(2)), clean(m.group(3))))
+stop = next((l.strip() for l in answer.splitlines() if "NAMED STOP" in l), "")
+L = [f"# Lessons for {d['day']} (Central day)", "",
+     "Drafts only: nothing here changes a rule, skill or CLAUDE.md. A check goes in only when the coordinator, or she, adds it by hand.", ""]
+complete = True; rc = 0
+if d["nothing_read"]:
+    complete = False; rc = 2
+    L += ["**NOTHING COULD BE READ**: no failure source exists, so this day is NOT known to be clean.", ""]
+elif n == 0:
+    L += [f"**No failures on {d['day']}** in the sources below.", ""]
+elif groups and arc == 0:
+    left = [i for i in range(1, n + 1) if i not in used]
+    for i in left: groups.append(([i], "(the model did not group this one)", "(none drafted)"))
+    groups.sort(key=lambda g: (-len(g[0]), g[0][0]))
+    L += [f"Model: Claude Haiku through ai-run, no tools, one call. {n} failure(s) in {len(groups)} group(s)" +
+          (f"; {len(left)} left ungrouped by the model" if left else "") + ".", "", "## Failures, repeats counted"]
+    for k, (ids, what, check) in enumerate(groups, 1):
+        L += [f"{k}. **{len(ids)}×** {what} (failures {', '.join(map(str, ids))})", f"   - Draft check: {check}"]
+    L.append("")
+else:
+    complete = False; rc = arc if arc else 1
+    why = stop or (f"ai-run exit {arc}" if arc else "the model answered nothing in the GROUP shape")
+    L += [f"**MODEL DID NOT SORT THESE** ({clean(why)}). Every failure is listed below unsorted; no check was drafted.", ""]
+if n:
+    L.append("## Every failure line (emails masked)")
+    L += [f"{i}. [{it['source']}] {it['text']}" for i, it in enumerate(items, 1)]
+    L.append("")
+L.append("## Sources read")
+L += [f"- {s}" for s in d["sources"]]
+if d["missing"]:
+    L.append("## Sources missing or unreadable")
+    L += [f"- {s}" for s in d["missing"]]
+if complete: L += ["", "<!-- lessons-pass:complete -->"]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(out), prefix=".lessons-", suffix=".tmp")
+with os.fdopen(fd, "w") as f: f.write("\n".join(L) + "\n")
+os.replace(tmp, out)
+print(f"OUTPUT 1 lessons-file {out} ({n} failure(s), {len(groups) if complete else 0} group(s))")
+if not complete: print(f"NAMED STOP [{'LESSONS_NOT_READ' if rc == 2 else 'LESSONS_UNSORTED'}] {out} lists the failures unsorted; no check was drafted")
+sys.exit(rc)
+PY

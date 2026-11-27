@@ -172,6 +172,9 @@ jobs:
         run: ./tests/test-pr-patch-check.sh
       - name: post-land-check turns each DUE line into a verdict, and an engineering FAIL into a fix sheet bannered nightly until it lands
         run: ./tests/test-post-land-check.sh
+      # 27 Nov 2026 (her row #17): the nightly lessons pass only DRAFTS check lines; a model down is never "no failures".
+      - name: lessons-pass sorts the day's failures with a no-tools model, counts repeats in code and never touches a rule
+        run: shellcheck lessons-pass && ./tests/test-lessons-pass.sh
       - name: the agent launch gate refuses general agents and full re-reviews of a failed PR, and never caps agents
         run: ./tests/test-brief-gate.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the

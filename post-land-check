@@ -220,7 +220,9 @@ take() { # $1 key -> rc 1 when another run holds it
   if [ -n "$(find "$d" -maxdepth 0 -mmin +120 2>/dev/null)" ]; then HELD+=("$d"); return 0; fi
   return 1
 }
-trap 'for d in "${HELD[@]:-}"; do [ -n "$d" ] && rmdir "$d" 2>/dev/null; done' EXIT
+# On the way out of a nightly run (every exit below, "nothing due" included), after the verdicts: lessons-pass drafts
+# check lines from the day's failures. Its exit never changes this script's (an EXIT trap keeps the exit code).
+trap 'for d in "${HELD[@]:-}"; do [ -n "$d" ] && rmdir "$d" 2>/dev/null; done; [ -n "$NOW_KEY$DRY" ] || "${POST_LAND_LESSONS:-$HOME/bin/lessons-pass}" >> "$LOG" 2>&1 || { say "NAMED STOP [LESSONS_NOT_WRITTEN] lessons-pass did not finish; see ~/Work/tasks/lessons"; notify "Lessons pass did not finish: see ~/Work/tasks/lessons"; }' EXIT
 
 # The fixes earlier FAILs still owe, before any new check (and on nights with nothing due).
 if [ -z "$NOW_KEY" ] && [ -z "$DRY" ]; then

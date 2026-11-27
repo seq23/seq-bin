@@ -65,6 +65,8 @@ F1='- FORM-PROOF DUE o/site#1 abc123 — forms: contact form; deployed 23 Nov 20
 E2='- ENG-CHECK DUE o/app#2 def456 — landed on green CI with no reviewer'"'"'s PASS (Fast PRs) 23 Nov 2026 10:00 CT; a fresh reviewer checks'
 E3='- ENG-CHECK DUE o/app#3 0a0b0c — landed under her bypass 23 Nov 2026 11:00 CT; a fresh reviewer checks'
 run() { "$PLC" "$@" </dev/null >/dev/null 2>&1; echo $?; }
+# The nightly lessons step is a stub here (never her real lessons-pass or a model); tests/test-lessons-pass.sh proves it.
+export POST_LAND_LESSONS="$W/bin/lessons"; printf '#!/bin/bash\nexit 0\n' > "$W/bin/lessons"; chmod +x "$W/bin/lessons"
 
 reset; rm -f "$W/post-land-checks.md"
 check "a missing list is exit 2" [ "$(run)" = 2 ]

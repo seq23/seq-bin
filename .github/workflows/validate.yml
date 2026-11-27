@@ -240,13 +240,14 @@ jobs:
       - name: ci-sweep-alert-lanes.sh turns every alert type into fix work and never calls an unread list clean
         run: ./tests/test-alert-lanes.sh
 
-      # Owner ruling 3 Nov 2026: Codex does the hands-on work, Claude only the brains, and a
-      # Codex usage limit waits (exit 75, CODEX_LIMIT) — never handed to Claude. Stub binaries only.
+      # Owner ruling 3 Nov 2026: Codex does the hands-on work, Claude only the brains; a Codex usage
+      # limit hands the run to Claude (6 Nov), and a Claude usage limit runs once on the free API
+      # credit, then is the named stop (27 Nov). Stub binaries and a stub vault only: no network, no key.
       # 22 Nov 2026: one Play products tool and one RevenueCat tool for every app (they were copies per repo).
       - name: the store tools write only what is missing and fail loudly on every outage
         run: ./tests/test-store-tools.sh
 
-      - name: ai-run routes worker to Codex, brain to Claude, and a Codex limit never falls back
+      - name: ai-run routes worker to Codex, brain to Claude; a Claude limit runs once on the free API credit, then stops by name
         run: ./tests/test-ai-run.sh
 
       # Her design of 2026-09-23 (then once a day at 06:00; Mon+Fri 08:00 since 2 Oct 2026): park per repo, rounds while

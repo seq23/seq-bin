@@ -182,6 +182,7 @@ reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (liv
 check "outcome model FAIL (count met, meaning wrong): a result, exit 0" [ "$(orun)" = 0 ]
 check "…the line is FAIL" grep -q '^- OUTCOME-CHECK FAIL o/app#5 ' "$W/post-land-checks.md"
 check "…the sheet's line 1 is FAIL and it stays open" eval 'head -1 "$POST_LAND_TASKS/job5.md" | grep -q "^STATUS: FAIL o/app#5 aaa111 2026-11-25 — outcome NOT WORKING: saw 0 of 11"'
+check "…the local log keeps the Notices line she reads" grep -q 'Notices: app #5 Noelle acts on her decisions: NOT WORKING — expected at least 3; saw ' "$W/log"
 check "…the banner says NOT WORKING: expected, saw, look" grep -q '^NOT WORKING: app #5 Noelle acts on her decisions — expected at least 3; saw 0 of 11 decisions acted on; the 4 lines are log headers; look: https://github.com/o/app/pull/5#code$' "$W/store/banners"
 check "…the Notices line says NOT WORKING" grep -qx $'outcome:o/app#5:not-working\tapp #5 Noelle acts on her decisions: NOT WORKING — expected at least 3; saw 0 of 11 decisions acted on; the 4 lines are log headers; look: https://github.com/o/app/pull/5#code' "$W/store/notices"
 

@@ -365,6 +365,7 @@ notice() { # $1 key  $2 text -> rc 0 written (or already written)
   if [ -n "$NOTICE_CMD" ]; then "$NOTICE_CMD" "$1" "$2" </dev/null
   else (cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$2" </dev/null)
   fi >>"$LOG" 2>&1 || { say "  NAMED STOP [NOTICE_UNWRITTEN] the Notices line for $1 could not be written (see $LOG); the line in the list and the PR comment stand"; return 1; }
+  printf '%s Notices: %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$2" >> "$LOG"   # the line she reads, kept in the local log
   : > "$m"
 }
 READ_TOOLS='A check is ONE read and its pipes. No shell runs it, so no variables, no $(…), no ; && ||, no redirects.

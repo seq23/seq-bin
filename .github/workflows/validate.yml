@@ -232,6 +232,8 @@ jobs:
         run: ./tests/test-scooter-watch-watchdog.sh
       - name: Partner tail runs with background tasks off
         run: ./tests/test-scooter-watch-foreground.sh
+      - name: Partner tail gets its full 2 h and retries a capped email once
+        run: ./tests/test-scooter-watch-cap.sh
 
   # 22 Nov 2026 (her ask: land faster, same quality): the lane is three parallel jobs, so the merge gate
   # finishes inside her 5-minute rule. Same steps, none removed (each runs in exactly one job).

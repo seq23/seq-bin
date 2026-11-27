@@ -42,12 +42,14 @@ export LAND_DUE_FILE="$W/post-land-checks.md"
 # land reads live-repos.json beside itself (LAND_DIR = $W, where its fixture copy runs): o/r has launched, so its
 # PRs land on green CI unless a case makes them review-class.
 printf '{"live": ["o/r", "seq23/boss-os"]}\n' > "$W/live-repos.json"
+cp "$HERE/../pr-body-template.md" "$W/"   # the ONE template beside land (same LAND_DIR): every "add:" line land prints comes from it
 FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 # The build-first shape (staging on every land, a named e2e workflow, promote.yml on a green e2e)
 # has no live repo since both creator dashboards retired (3 Nov 2026), so these cases run against a
 # copy of land carrying one fixture route of exactly that shape, inserted before the catch-all.
 FIXTURE_ROUTE='  build-first-fixture) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://build-first-fixture.invalid/healthz" ;;'
-awk -v r="$FIXTURE_ROUTE" '/^  \*\) die "\$NAME has no deploy route recorded/ && !done { print r; done=1 } { print }' "$LAND" > "$W/land-with-fixture"
+awk -v r="$FIXTURE_ROUTE" '/^  \*\) .*die "\$NAME has no deploy route recorded/ && !done { print r; done=1 } { print }' "$LAND" > "$W/land-with-fixture"
+grep -q "$(head -1 <<<"$FIXTURE_ROUTE" | cut -c1-12)" "$W/land-with-fixture" || { echo "FAIL: the fixture route was not put into land's routes case"; exit 1; }
 grep -q '^  build-first-fixture)' "$W/land-with-fixture" || { echo "FAIL: could not add the build-first fixture route"; exit 1; }
 LAND="$W/land-with-fixture"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -341,13 +343,16 @@ echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[
 run_land approvalprep
 check "item 4: a fresh reviewer's PASS whose own line says rendered: needs no Clicked through line: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called && has "rendered by the reviewer: "'
 
-echo "=== 1f. the review class is written and sticky, and new until launched (eng check of #155, 23 Nov 2026) ==="
+echo "=== 1f. the review class: her final list (27 Nov 2026), written or read from the paths, and sticky ==="
 code_pr() { # body [extra jq] -> a code PR in o/r with no PASS line, labels []
   jq -nc --arg b "$1" '{files: [{path: "worker/x.ts"}], labels: [], body: $b, comments: []}' | jq -c "${2:-.}" > "$FAKE/pr-meta"
 }
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.$(printf "$MP")"
 run_land approvalprep
-check "safety: a code PR with labels [] and no Review class line is refused (rc 1, not merged), saying what to add" eval '[ "$RC" -eq 1 ] && has "no \`Review class:\` line" && has "Review class: none — <why>" && ! merge_called'
+check "her list (27 Nov 2026): a code PR with labels [] and NO Review class line, on no class path in a repo with no data store, is read as none from its paths: lands with no PASS (rc 0, merged), no reviewer asked" eval '[ "$RC" -eq 0 ] && merge_called && ! has "needs a review" && ! has "REVIEW_CLASS_UNDECLARED"'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the charge.$(printf "$MP")" '.files = [{path: "src/billing/charge.ts"}]'
+run_land approvalprep
+check "safety: no Review class line on a payments path is NEVER read as none: NAMED STOP [REVIEW_CLASS_UNDECLARED] (rc 1, not merged), naming the path and the line to add" eval '[ "$RC" -eq 1 ] && has "STOPPED: NAMED STOP [REVIEW_CLASS_UNDECLARED]" && has "no \`Review class:\` line" && has "money (src/billing/charge.ts)" && has "add: Review class: none — <why this is in no review class, 3+ words>" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.
 Review class: none — log wording only$(printf "$MP")"
 run_land approvalprep
@@ -357,9 +362,9 @@ Review class: money — changes how payouts are sent$(printf "$MP")"
 run_land approvalprep
 check "safety: 'Review class: money' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "Review class: money" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes it.
-Review class: none — <why>$(printf "$MP")"
+Review class: none — <why>$(printf "$MP")" '.files = [{path: "src/billing/charge.ts"}]'
 run_land approvalprep
-check "abuse: a placeholder none is no reason: refused, not merged" eval '[ "$RC" -eq 1 ] && has "gives no reason" && ! merge_called'
+check "abuse: a placeholder none is no reason, so on a payments path it is no line at all: refused, not merged" eval '[ "$RC" -eq 1 ] && has "gives no reason" && has "[REVIEW_CLASS_UNDECLARED]" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.labels = [{name: "bug"}]'
 echo '["review-required","bug"]' > "$FAKE/label-events"
 run_land approvalprep
@@ -369,17 +374,34 @@ run_land approvalprep
 check "outage: the label history unread: exit 75 'could not verify', not merged" eval '[ "$RC" -eq 75 ] && has "label history" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
 run_land approvalprep
-check "new until launched: a code-only PR in a repo not on live-repos.json is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "o/brand-new has not launched" && ! merge_called'
+check "her list (27 Nov 2026): a code-only PR in a repo NOT on live-repos.json is no class by that alone: lands on green CI with no reviewer PASS (rc 0, merged), and nothing is added to the list" eval '[ "$RC" -eq 0 ] && merge_called && ! has "has not launched" && ! has "needs a review" && [ ! -f "$FAKE/live-put" ]'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "The first site.
+Review class: launch — the first public launch of this site$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
+run_land approvalprep
+check "…its ONE launch review still stands: 'Review class: launch' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "STOPPED: NAMED STOP [REVIEW_PASS_MISSING]" && has "it says Review class: launch" && ! merge_called'
+for cls in private-data delete store outreach; do
+  fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Does the thing.
+Review class: $cls — the brief put it in this class$(printf "$MP")"
+  run_land approvalprep
+  check "safety: 'Review class: $cls' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "it says Review class: $cls" && has "add: Ship-ready: PASS — " && ! merge_called'
+done
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; : > "$FAKE/no-outcome"; : > "$FAKE/no-notbuilt"; code_pr "Fixes the sync." '.files = [{path: "src/billing/charge.ts"}]'
+run_land approvalprep
+check "ONE pass (27 Nov 2026): a description lacking four lines is told ALL four in one run, each with its line, then stopped ONCE, not merged" eval '[ "$RC" -eq 1 ] && has "4 problem(s) to fix" && has "1. [REVIEW_CLASS_UNDECLARED]" && has "2. [MUTATION_PROOF_MISSING]" && has "3. [OUTCOME_UNDECLARED]" && has "4. [NOT_BUILT_UNDECLARED]" && has "add: ## Mutation proof" && has "add: Outcome: none — <" && has "add: ## Not built" && [ "$(grep -c "STOPPED:" <<<"$OUT")" -eq 1 ] && has "And 3 more (MUTATION_PROOF_MISSING, OUTCOME_UNDECLARED, NOT_BUILT_UNDECLARED)" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/O/R/pull/7"'
 run_land approvalprep
 check "promise: a listed repo is not slowed, whatever GitHub's case (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"
 cp "$W/live-repos.json" "$W/live-repos.keep"; echo '{"live": [' > "$W/live-repos.json"
 run_land approvalprep
-check "outage: live-repos.json unreadable: NAMED STOP [LIVE_REPOS_UNREAD], refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+check "live-repos.json unreadable no longer holds a PR that is in no class (the list decides no review since 27 Nov 2026): rc 0, merged, nothing written to the list" eval '[ "$RC" -eq 0 ] && merge_called && ! has "LIVE_REPOS_UNREAD" && [ ! -f "$FAKE/live-put" ]'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Lists my repo.$(printf "$MP")" '.files = [{path: "live-repos.json"}]'
+run_land approvalprep
+check "…while a PR that CHANGES the list is still refused with the list unreadable (fail closed), not merged" eval '[ "$RC" -eq 1 ] && has "changes live-repos.json" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"
 rm -f "$W/live-repos.json"
 run_land approvalprep
-check "outage: live-repos.json missing: the same named stop, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+check "live-repos.json missing: the same, a PR in no class lands (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called && ! has "LIVE_REPOS_UNREAD"'
 mv "$W/live-repos.keep" "$W/live-repos.json"
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"; : > "$FAKE/no-url"
 run_land approvalprep

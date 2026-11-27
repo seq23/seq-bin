@@ -117,6 +117,13 @@ jobs:
       # 23 Nov 2026: a touched form needs a marked TEST submission on preview before land.
       - name: land's forms gate refuses an undeclared or unproved form
         run: ./tests/test-land-forms.sh
+      # 27 Nov 2026 ("give a root fix to this ---is there a template followed?"; "everything doesnt fucking neeed a
+      # reviewr"): `land --check` lists EVERY missing description line in one run, each with the line to add from the
+      # ONE template (pr-body-template.md; red when land can ask for a line it does not carry); only her list waits on
+      # a reviewer; a missing Review class line is read from the diff's paths, never guessed; an outage is exit 75;
+      # --check makes no write call.
+      - name: land --check lists every missing line at once, from the one template; only her list waits on a reviewer
+        run: ./tests/test-land-check.sh
       # post-land-check RUNS each due outcome check itself, only after its read-only gate passes it (a check that could
       # write is never run) and in a file-write sandbox on the Mac; it refuses a PASS below the
       # floor, and an outage, no comment or ai-run down stays DUE, NOT CHECKED, exit non-zero. ENG-CHECK and FORM-PROOF too.

@@ -18,15 +18,16 @@
 #                      # sign-offs; CI, the safety checks, deploy and smoke still run. Only when SHE says ship it.
 #                      # Once green, `ENG-CHECK DUE <repo>#<pr> <sha>` goes into ~/Work/tasks/post-land-checks.md (same-day review),
 #                      # as it does for EVERY land with no fresh reviewer's PASS (Fast PRs: the day's batched check).
+#   land --check 96    # READ-ONLY: every description gate at once; prints ALL that is missing, each with the line to
+#                      # add from pr-body-template.md. exit 0 nothing to fix | 1 the list | 75 GitHub did not answer.
 #   land 96 --run-e2e  # that PR, and run the full e2e suite on main before production whatever its size
 #   land --promote [<repo>] [--run-e2e]   # ship the newest e2e-green main commit to production
 #
 # DONE MEANS CHECKED (her order 24 Nov 2026, after Noelle landed green and acted on 0 of 11 decisions: "u said
-# nothing yesterday"). Every PR states `Outcome:` and `## Not built`, or land stops by name:
-#   Outcome: none — <why nothing scheduled or produced changes, 3+ words>     (refused on a PR touching a job file)
-#   Outcome: <real output> — check: <read-only cmd> — expect: >= N — by: <day>  (default by: next day)
-#   ## Not built  <each item from the plan or brief not built, or "Nothing cut.">
-# Missing → NAMED STOP [OUTCOME_UNDECLARED] / [NOT_BUILT_UNDECLARED] with the lines to add; a check that is not
+# nothing yesterday"). Every PR states `Outcome:` and `## Not built`, or land stops by name. ONE file carries the
+# exact form of every line land can ask for: pr-body-template.md, beside this script. A description that lacks
+# several is told ALL of them in one run, each with the line to add, then stopped once: NAMED STOP
+# [OUTCOME_UNDECLARED], [NOT_BUILT_UNDECLARED], [FORMS_UNDECLARED] and the rest of LAND_BODY_CODES; a check that is not
 # read-only (post-land-check --read-only-gate says why) → NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]. land prints Not built
 # word for word, and on a green land with a real Outcome writes `OUTCOME-CHECK DUE <repo>#<pr> <sha> — task:<slug>
 # by:<day> …` into ~/Work/tasks/post-land-checks.md; post-land-check runs that check after its by-day and only its PASS makes the
@@ -114,23 +115,21 @@ if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-# The screens people operate, out of a list of changed paths (stdin, one per line): the app's client
-# code and component files. Tests, stories and content pages (.html/.md, a site's articles) are not
-# screens someone operates. Pure; prints nothing when none.
-operated_ui_files() { grep -E '(^|/)src/client/|\.(tsx|jsx|vue|svelte)$' | grep -vE '(^|/)(tests?|__tests__|e2e|playwright)/|\.(test|spec|stories)\.' || true; }
 die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
 
 MODE="land"; PR=""; TARGET=""; RUN_E2E=""; OWNER_WORDS=""
 for a in "$@"; do
   case "$a" in
     --promote) MODE="promote" ;;
+    --check) MODE="check" ;;
     --run-e2e) RUN_E2E=1 ;;
     --owner=*) OWNER_WORDS="${a#--owner=}" ;;
     -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --*) die "unknown flag $a (land [<pr>] [--owner="<her words>"] | land --promote [<repo>] [--run-e2e])" ;;
+    --*) die "unknown flag $a (land [<pr>] [--owner="<her words>"] | land --check [<pr>] | land --promote [<repo>] [--run-e2e])" ;;
     *) if [ "$MODE" = promote ]; then TARGET="$a"; else PR="$a"; fi ;;
   esac
 done
+[ "$MODE" != check ] || { [ -z "$OWNER_WORDS" ] && [ -z "$RUN_E2E" ]; } || die "land --check only reads: it takes a PR number and nothing else (--owner writes her bypass onto the PR; give it to land itself)"
 if [ -n "$TARGET" ]; then
   case "$TARGET" in */*|.*) : ;; *) [ -d "$TARGET" ] || TARGET="$HOME/GitHub/$TARGET" ;; esac
   [ -d "$TARGET" ] || die "no such repo directory: $TARGET"
@@ -466,7 +465,7 @@ case "$NAME" in
   # README's deploy is wrangler inside the Boss OS vault (CLOUDFLARE_API_TOKEN), as aplayer-mode does.
   # Added 23 Nov 2026 when land refused whisperalmanac-site #3 (d10-scan-protect).
   whisperalmanac-site)  DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && npx --yes wrangler@4 deploy")' ; SELF="" ;;
-  *) die "$NAME has no deploy route recorded in this script. Add one before landing." ;;
+  *) [ "${MODE:-land}" = check ] || die "$NAME has no deploy route recorded in this script. Add one before landing." ;;   # land --check reads a description; it deploys nothing
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"
 # --- routes end ---
@@ -1129,8 +1128,8 @@ rate_reset_in() { # -> seconds until GitHub's spent allowance comes back (its re
 #     such fix. Functions use git's default funcname rule (a line starting with a letter, _ or $ opens
 #     one; it runs to the next); history is `git log -L` on the merge base. 19 Nov 2026, west-peek-os:
 #     webPropertyChange.ts took #527, #531, #532, #537, #540, #546 and #551 in one day.
-#  2. SHIP-READY. A REVIEW-CLASS PR (review_class: the `review-required` label, a repo not on live-repos.json,
-#     a change to that list, or anything unread; or a first public launch: a launch marker or the first thing
+#  2. SHIP-READY. A PR in a REVIEW CLASS (review_class: a declared class, the `review-required` label now or ever,
+#     a change to live-repos.json, or anything unread; or a first public launch: a launch marker or the first thing
 #     people see, per land-surfaces.json) stops, whatever it changes, unless its body has
 #     `Ship-ready: PASS — <reviewer> looked at <real output>` (in the body, or in a comment by the repo's
 #     owner account: `review_text`) from a reviewer who is not the builder
@@ -1161,7 +1160,7 @@ surface_files() { # $1 ERE from surface_re; stdin: changed paths -> the ones a p
 }
 pass_line() { # $1 Ship-ready|Launch-ready; stdin: PR body -> its last PASS line (rc 1 none)
   local line
-  line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | tail -1)"
+  line="$(grep -iE "^[[:space:]>*-]*$1: *PASS *(—|–|-{1,2}|:) *.+ looked at .+" | grep -vE '<[A-Za-z][^<>]*>' | tail -1)"   # the template's own <placeholder> line is no PASS
   [ -n "$line" ] && printf '%s\n' "$line"
 }
 review_entries() { # [$1 voided]; stdin: PR view JSON -> "<epoch or empty>|<base64 text>" for each place a reviewer's PASS line may
@@ -1309,16 +1308,22 @@ fresh_pass() { # $1 Ship-ready|Launch-ready  $2 PR  $3 head  $4 PR view JSON (bo
   echo "NAMED STOP [STALE_PASS] PR #$2 changed $(head -3 <<<"$stale" | paste -sd' ' -)$([ "$(grep -c . <<<"$stale")" -gt 3 ] && echo " and more") after the commit its $1 PASS names ($(sha_name "$sha")): the reviewer re-checks git diff $(sha_name "$sha")..$(sha_name "$3") and posts a new PASS line naming $(sha_name "$3")"
   return 1
 }
-# FAST PRs (her ruling 23 Nov 2026, item 1: "review only what can really hurt"): a fresh reviewer's PASS is
-# required only of a REVIEW-CLASS PR: money, children's or private data, store submissions, deleting people's
-# data, first public launches, and EVERY PR in a repo not yet launched. The class is the PR's `review-required`
-# label (set by whoever writes the brief), its repo missing from live-repos.json, a change to that list itself,
-# plus the launch markers below (a first public launch). Anything unread is a review-class PR: unknown is never
-# "no review needed". Everything else lands on green CI; the day's merged diffs get ONE batched engineering check.
-# NEW UNTIL LAUNCHED (her ruling 23 Nov 2026: "i do want a full reviewer process for any NEW repo"; asked where the
-# line is: "new until launched"). live-repos.json, beside land in seq-bin, lists every launched repo (owner/repo).
-# Only land's launch path writes it (live_add: a fresh reviewer's Launch-ready PASS, landed green); a PR that
-# changes it by hand is review-class itself, so no builder lists its own repo to dodge the review.
+# WHAT WAITS ON A REVIEWER (her final list, 27 Nov 2026: "everything doesnt fucking neeed a reviewr this is why shit
+# is taking so long"; it replaces "new until launched" of 23 Nov). A fresh reviewer's PASS is required only of a PR
+# in a REVIEW CLASS (REVIEW_CLASSES below, the ONE list): money (charges, refunds, prices, payouts); private-data
+# (children's, LP or deal data, people's personal details); delete (deleting or bulk-changing people's data or live
+# business records); store (App Store, Play, KDP submissions); launch (the ONE first public launch of a new site or
+# app); outreach (a new email or sender going to real customers, LPs or prospects). A PR is in a class when it SAYS
+# so (`Review class: <class> — <why>`, in its body or an owner-account comment), when it carries or EVER carried the
+# `review-required` label, when it changes live-repos.json, when the launch markers show a first public launch
+# (gate_quality), or when what it is cannot be read (unknown is never "no review needed"). Nothing else waits:
+# local tools, hooks, scripts, bug fixes, tests, docs, config, refactors, content and search pages on a live site,
+# internal screens, and ANY PR in a repo not yet launched land on green CI. Size never asks for a reviewer (the
+# nightly ENG-CHECK DUE of a 200+ line PR holds no land).
+# live-repos.json, beside land in seq-bin, lists every repo whose launch review has landed (owner/repo). Only land's
+# launch path writes it (live_add: a fresh reviewer's Launch-ready PASS, landed green); a PR that changes it by hand
+# needs the PASS itself. A repo missing from it is NOT a class by that alone: its one launch review is the PR that
+# declares `Review class: launch` or trips the launch markers.
 # Read beside the land that runs (LAND_DIR is set by land's own re-exec, never by a caller): no env var points it
 # at another list.
 LAND_LIVE_REPOS="${LAND_DIR:-$HOME/bin}/live-repos.json"
@@ -1330,12 +1335,61 @@ live_repo() { # $1 owner/repo -> rc 0 on live-repos.json | 1 not on it | 2 the l
   jq -e '.live | type == "array" and length > 0 and all(.[]; type == "string")' "$LAND_LIVE_REPOS" >/dev/null 2>&1 || return 2
   jq -e --arg r "$1" 'any(.live[]; ascii_downcase == ($r | ascii_downcase))' "$LAND_LIVE_REPOS" >/dev/null 2>&1
 }
-# THE CLASS IS WRITTEN, AND A LABEL NEVER COMES OFF (eng check of #155, 23 Nov 2026: nothing applied the label and a
-# builder could remove it). Every PR body carries `Review class: none — <why, 3+ words>` or the class it is in
-# (money | children | private-data | store | delete | launch — <why>); the brief names it (brief-gate). A missing
-# or unreasoned line is a class, never a guess of none; a review-required label added EVER (label_history: GitHub's
-# issue events, read once by land and land-after) still counts after it is taken off.
-REVIEW_CLASSES="money|children|private-data|store|delete|launch"
+# THE CLASS IS WRITTEN, OR READ FROM THE PATHS THE DIFF CHANGES, AND A LABEL NEVER COMES OFF. A PR says
+# `Review class: none — <why, 3+ words>` or names its class. A PR with NO usable line is not bounced for that alone
+# (her words 27 Nov 2026: "give a root fix to this"): review_class reads the changed paths. A diff touching none of
+# the class surfaces land-surfaces.json names by path (.review: payments code, migrations and bulk-data scripts,
+# store metadata, email templates and senders), in a repo that holds no data store, is `none`. A diff touching one,
+# or any code change in a repo with a data store (private data has no honest path test: any code can read a
+# person's record), cannot be told, so the line is asked for (REVIEW_CLASS_UNDECLARED), never guessed. Structure
+# only: a path match never demands a reviewer and never says what a change means; the declared class does. A
+# review-required label added EVER (label_history: GitHub's issue events, read once) still counts after it is taken
+# off, so deleting a line or a label dodges nothing.
+REVIEW_CLASSES="money|private-data|delete|store|launch|outreach"
+# ONE TEMPLATE, ONE LIST (her words 27 Nov 2026: "is there a template followed?"). Every line a PR's description can
+# be stopped for has ONE written form, in pr-body-template.md beside land, under a `<!-- land:CODE … -->` marker.
+# The gates below say only what is wrong; problems_print adds the line to write, read from that file, never from a
+# second copy here. LAND_BODY_CODES is every stop a line fixes (tests/test-land-check.sh fails when one has no
+# template entry, or when a gate raises a code this list lacks); LAND_STATE_CODES are stops no line fixes.
+LAND_TEMPLATE="${LAND_DIR:-$HOME/bin}/pr-body-template.md"
+LAND_BODY_CODES="REVIEW_CLASS_UNDECLARED REVIEW_PASS_MISSING STALE_PASS LAUNCH_PASS_MISSING MUTATION_PROOF_MISSING PATCH_OR_REBUILD_MISSING FORMS_UNDECLARED OUTCOME_UNDECLARED OUTCOME_CHECK_NOT_READ_ONLY NOT_BUILT_UNDECLARED NOT_CLICKED_THROUGH"
+LAND_STATE_CODES="LAND_SURFACES_UNREAD STACKED_PR"
+problem() { # $1 code  $2 what is wrong -> one "CODE<TAB>reason" line
+  printf '%s\t%s\n' "$1" "$(printf '%s' "$2" | tr '\n\t' '  ')"
+}
+pass_problem() { # $1 code  $2 ship_pass or launch_pass's line -> its problem line (a stale PASS keeps its own code)
+  case "$2" in "NAMED STOP [STALE_PASS] "*) problem STALE_PASS "${2#"NAMED STOP [STALE_PASS] "}" ;; *) problem "$1" "$2" ;; esac
+}
+template_add() { # $1 code -> the line(s) pr-body-template.md carries for it (rc 1: none there, or the file is unread)
+  awk -v c="$1" '
+    /^<!-- land:/ { on = 0; s = $0; sub(/^<!-- land:/, "", s); sub(/[^A-Z_,].*$/, "", s)
+                    n = split(s, a, ","); for (i = 1; i <= n; i++) if (a[i] == c) on = 1; next }
+    on && /^[[:space:]]*$/ { on = 0 }
+    on { print; found = 1 }
+    END { exit !found }' "$LAND_TEMPLATE" 2>/dev/null
+}
+problems_print() { # $1 PR  $2 head sha; stdin: problem lines -> ALL of them, numbered, each with the line to add
+  local all n=0 code why add
+  all="$(grep . || true)"
+  printf '\nPR #%s: %s to fix in its description. ALL of them are listed here, each with the line to add (the forms live in pr-body-template.md, seq-bin):\n' "$1" "$(grep -c . <<<"$all") problem(s)"
+  while IFS=$'\t' read -r code why; do
+    [ -n "$code" ] || continue
+    n=$((n + 1)); printf '  %d. [%s] %s\n' "$n" "$code" "$why"
+    case " $LAND_BODY_CODES " in *" $code "*) ;; *) continue ;; esac
+    if add="$(template_add "$code")"; then
+      [ -z "${2:-}" ] || add="${add//<head sha>/$(sha_name "$2")}"
+      printf '%s\n' "$add" | sed 's/^/       add: /'
+    else printf '       add: (the line for %s could not be read from %s: restore it from seq-bin main)\n' "$code" "$LAND_TEMPLATE"; fi
+  done <<<"$all"
+}
+problems_stop() { # $1 PR; stdin: problem lines -> the ONE stop line: the first problem under its own code, and how many more stand above
+  local all code why n rest
+  all="$(grep . || true)"; n="$(grep -c . <<<"$all")"
+  IFS=$'\t' read -r code why <<<"$(head -1 <<<"$all")"
+  if [ "$n" -le 1 ]; then printf 'NAMED STOP [%s] %s' "$code" "$why"
+  else rest="$(tail -n +2 <<<"$all" | cut -f1 | paste -sd',' - | sed 's/,/, /g')"
+    printf 'NAMED STOP [%s] %s And %s more (%s): every one is listed above with the line to add; land --check %s prints the list again.' "$code" "$why" "$((n - 1))" "$rest" "$1"; fi
+}
 with_label_history() { # $1 PR; stdin: PR view JSON (url) -> it, plus .label_history (every label ever added; null = unread)
   local j repo ev try; j="$(cat)"
   if repo="$(pr_repo <<<"$j")"; then
@@ -1348,37 +1402,71 @@ with_label_history() { # $1 PR; stdin: PR view JSON (url) -> it, plus .label_his
   fi
   jq -c '.label_history = null' <<<"$j"
 }
-class_line() { # stdin: PR body -> rc 0 with why on stdout when its Review class line puts it in a class (or is missing)
-  local lines bad
-  lines="$(sed -nE 's/^[[:space:]]*([-*][[:space:]]+)?(\*\*)?Review class:(\*\*)?[[:space:]]*//p' | tr -d '\r')"
-  [ -n "$lines" ] || { echo "its body has no \`Review class:\` line (add \`Review class: none — <why>\`, or the class: ${REVIEW_CLASSES//|/, })"; return 0; }
-  bad="$(grep -viE '^(none|no)[[:space:]]*(—|–|--|-|:)' <<<"$lines" | head -1)"
-  [ -n "$bad" ] && { echo "its body says Review class: ${bad%%[[:space:]—]*}"; return 0; }
-  grep -viE '^(none|no)[[:space:]]*(—|–|--|-|:)[[:space:]]*[^[:space:]<]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" | grep -q . \
-    && { echo "its \`Review class: none\` gives no reason (3+ words after the dash)"; return 0; }
+class_line() { # stdin: PR body + owner comments -> rc 0 (why on stdout) a line names a class | 1 a reasoned none | 2 no usable line (why on stdout)
+  # Any line that names a class wins over a none beside it. A line still carrying the template's <placeholder> is no line.
+  local lines cls
+  lines="$(sed -nE 's/^[[:space:]>]*([-*][[:space:]]+)?(\*\*)?Review class:(\*\*)?[[:space:]]*//Ip' | tr -d '\r' | sed -E 's/^[*`[:space:]]+//' | grep -vE '^(<|$)' || true)"
+  cls="$(grep -viE '^(none|no)([[:space:]]*(—|–|--|-|:)|[[:space:]]*$)' <<<"$lines" | head -1)"
+  [ -n "$cls" ] && { echo "it says Review class: $(sed -E 's/[[:space:]]*(—|–|--|:|[[:space:]]-[[:space:]]).*$//' <<<"$cls" | cut -c1-40)"; return 0; }
+  grep -qiE '^(none|no)[[:space:]]*(—|–|--|-|:)[[:space:]]*[^[:space:]<]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" && return 1
+  if [ -n "$lines" ]; then echo "its \`Review class: none\` gives no reason (3+ words after the dash)"; else echo "it has no \`Review class:\` line"; fi
+  return 2
+}
+class_paths() { # stdin: changed paths -> one "<class> (<paths>)" line per class whose surface a path names (land-surfaces.json
+  # .review); nothing when none | rc 2 the list could not be read. Tests and docs (.exclude) are no surface.
+  local paths ex c re hit
+  paths="$(cat)"; ex="$(gate_lines '.exclude')" && [ -n "$ex" ] || return 2
+  paths="$(grep -vE "$ex" <<<"$paths" || true)"
+  for c in ${REVIEW_CLASSES//|/ }; do
+    case "$c" in private-data|launch) continue ;; esac   # data_store and the launch markers (gate_quality) read those two
+    re="$(gate_lines ".review[\"$c\"]")" && [ -n "$re" ] || return 2
+    hit="$(grep -iE "$re" <<<"$paths" | head -2 | paste -sd' ' -)"
+    [ -z "$hit" ] || echo "$c ($hit)"
+  done
+  return 0
+}
+data_store() { # $1 every path on main -> rc 0 (stdout: the path that shows it) this repo holds a data store | 1 none | 2 unread
+  local re b ex f hit
+  re="$(gate_lines '.review.data_store.paths')" && [ -n "$re" ] || return 2
+  b="$(gate_lines '.review.data_store.bindings')" && [ -n "$b" ] || return 2
+  ex="$(gate_lines '.exclude')" && [ -n "$ex" ] || return 2
+  hit="$(grep -vE "$ex" <<<"$1" | grep -iE "$re" | head -1)"; [ -n "$hit" ] && { echo "$hit"; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git show "origin/main:$f" 2>/dev/null | grep -qE "$b" && { echo "$f"; return 0; }
+  done < <(grep -E '(^|/)wrangler\.(toml|jsonc?)$' <<<"$1")
   return 1
 }
-review_class() { # stdin: PR view JSON (labels, label_history, body, files, changedFiles, url) -> rc 0 when it needs a reviewer's PASS, with why on stdout
-  local j repo rc why; j="$(cat)"
+review_class() { # $1 every path on main; stdin: PR view JSON (labels, label_history, body, comments, files, changedFiles)
+  # -> rc 0 it needs a reviewer's PASS (why on stdout) | 1 no class | 2 cannot tell: the Review class line is asked for (why on stdout)
+  local j why rc hits store code
+  j="$(cat)"
   jq -e '.labels | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its labels could not be read"; return 0; }
   jq -e 'any(.labels[]; (.name // "") == "review-required")' <<<"$j" >/dev/null 2>&1 && { echo "it carries the review-required label"; return 0; }
   jq -e '.label_history | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its label history could not be read"; return 0; }
   jq -e 'any(.label_history[]; . == "review-required")' <<<"$j" >/dev/null 2>&1 \
     && { echo "it was labeled review-required (a label taken off still counts)"; return 0; }
-  why="$(jq -r '.body // ""' <<<"$j" | class_line)" && { echo "$why"; return 0; }
+  why="$(owner_text <<<"$j" | class_line)"; rc=$?
+  [ "$rc" -eq 0 ] && { echo "$why"; return 0; }
   jq -e '.files | type == "array"' <<<"$j" >/dev/null 2>&1 || { echo "its files could not be read"; return 0; }
   jq -e '(.changedFiles // (.files | length)) > (.files | length)' <<<"$j" >/dev/null 2>&1 \
     && { echo "GitHub listed only $(jq '.files | length' <<<"$j") of its $(jq '.changedFiles' <<<"$j") files, so the rest are unread"; return 0; }
   jq -e 'any(.files[]; (.path // "") | test("(^|/)live-repos\\.json$"))' <<<"$j" >/dev/null 2>&1 \
-    && { echo "it changes live-repos.json, the list of launched repos that land without a review (only land's launch path writes it)"; return 0; }
-  repo="$(pr_repo <<<"$j")" || { echo "its repository could not be read from GitHub's answer, so whether it has launched is unknown"; return 0; }
-  live_repo "$repo"; rc=$?
-  case "$rc" in
-    0) return 1 ;;
-    1) echo "$repo has not launched (not on seq-bin's live-repos.json: new until launched; a landed Launch-ready PASS adds it)" ;;
-    *) echo "NAMED STOP [LIVE_REPOS_UNREAD] $LAND_LIVE_REPOS could not be read, so whether $repo has launched is unknown: restore it from seq-bin main" ;;
+    && { echo "it changes live-repos.json, the list of launched repos (only land's launch path writes it)"; return 0; }
+  [ "$rc" -eq 1 ] && return 1
+  # No usable line: the changed paths say none, or the line is asked for. Never a guess.
+  hits="$(jq -r '.files[]?.path' <<<"$j" | class_paths)" \
+    || { echo "$why, and $LAND_SURFACES could not be read, so which review-class paths its diff touches is unknown"; return 2; }
+  [ -n "$hits" ] && { echo "$why, and its diff touches paths a review class lives in: $(paste -sd';' - <<<"$hits" | sed 's/;/; /g')"; return 2; }
+  code="$(jq -r '.files[]?.path' <<<"$j" | grep -vE "$(gate_lines '.exclude')" | head -1)"
+  [ -n "$code" ] || return 1   # tests and docs only
+  [ -n "${1:-}" ] || { echo "$why, and main's file list could not be read, so whether this repo holds a data store is unknown"; return 2; }
+  store="$(data_store "$1")"
+  case $? in
+    1) return 1 ;;
+    0) echo "$why, and this repo holds a data store ($store), where no path test can say a change keeps clear of private data"; return 2 ;;
+    *) echo "$why, and $LAND_SURFACES could not be read, so whether this repo holds a data store is unknown"; return 2 ;;
   esac
-  return 0
 }
 ship_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what the PR does  $5 what the reviewer looks at
   # -> rc 0 when a fresh reviewer (not the builder) stands on the last Ship-ready PASS line, with Engineering: PASS,
@@ -1387,10 +1475,10 @@ ship_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what the PR does  $5 what th
   local body ids reviewer why msg
   body="$(review_text <<<"$2")"; ids="$(builders <<<"$2")"
   reviewer="$(signoff Ship-ready <<<"$body")" \
-    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $4, but $why:  Ship-ready: PASS — <its session or run id> looked at <what> at $(sha_name "$3"); Engineering: PASS"; return 1; }
-         echo "PR #$1 $4: add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <$5> at $(sha_name "$3"); Engineering: PASS"; return 1; }
+    || { why="$(voided_pass Ship-ready <<<"$2")" && { echo "PR #$1 $4, but $why, naming head $(sha_name "$3")"; return 1; }
+         echo "PR #$1 $4, and no fresh reviewer's Ship-ready PASS line stands for it: a fresh reviewer looks at $5 at head $(sha_name "$3") and posts the line as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body)"; return 1; }
   is_builder "$reviewer" "$ids" \
-    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign  Ship-ready: PASS — <its own session or run id> looked at <what> at <head sha>; Engineering: PASS"; return 1; }
+    && { echo "PR #$1's Ship-ready PASS is signed by the builder ($reviewer): a fresh reviewer must look at the real output and sign its own line"; return 1; }
   pass_line Ship-ready <<<"$body" | covers_engineering \
     || { echo "PR #$1's Ship-ready PASS ($reviewer) does not cover how it is built: that same reviewer checks every automatic fail in ~/.claude/skills/ship-ready/engineering.md on the diff and ends the line with  ; Engineering: PASS"; return 1; }
   msg="$(fresh_pass Ship-ready "$1" "$3" "$2")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
@@ -1401,7 +1489,7 @@ ship_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what the PR does  $5 what th
 # (a builder's comment, a line of its own) proves nothing.
 clicked_or_rendered() { # $1 PR  $2 PR view JSON  $3 head -> rc 0 with the line that satisfied it | 1 none | 75 unread
   local line rc
-  line="$(jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$2" | grep -iE '^[[:space:]>*-]*Clicked through:' | tail -1)"
+  line="$(jq -r '([.body // ""] + [.comments[]?.body // ""]) | .[]' <<<"$2" | grep -iE '^[[:space:]>*-]*Clicked through:' | grep -vE '<[A-Za-z][^<>]*>' | tail -1)"
   [ -n "$line" ] && { printf 'clicked through: %s\n' "$(cut -c1-140 <<<"$line")"; return 0; }
   line="$(review_text <<<"$2" | pass_line Ship-ready)" || return 1
   grep -qiE '(^|[^[:alnum:]])rendered:' <<<"$line" || return 1
@@ -1414,18 +1502,19 @@ launch_pass() { # $1 PR  $2 PR view JSON  $3 head  $4 what goes public -> rc 0 w
   # One check, used by the launch gate and by live_add's decision to list the repo, never two copies.
   local reviewer msg
   reviewer="$(review_text <<<"$2" | signoff Launch-ready)" \
-    || { echo "PR #$1 puts something new in public ($4): add as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body) the line  Launch-ready: PASS — <fresh reviewer> looked at <logo, banner, bio, links, starter posts, 404, store assets> at <head sha>"; return 1; }
+    || { echo "PR #$1 puts something new in public ($4), and no fresh reviewer's Launch-ready PASS line stands for it: a fresh reviewer checks the launch list (logo, banner, bio, links, starter posts, 404, store assets) at head $(sha_name "$3") and posts the line as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body)"; return 1; }
   is_builder "$reviewer" "$(builders <<<"$2")" \
-    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign  Launch-ready: PASS — <its own session or run id> looked at <what> at <head sha>"; return 1; }
+    && { echo "PR #$1's Launch-ready PASS is signed by the builder ($reviewer): a fresh reviewer must check the launch list and sign its own line"; return 1; }
   msg="$(fresh_pass Launch-ready "$1" "$3" "$2")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
 }
-gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, url, author, commits)  $3 head sha -> rc 1 with one plain line on stdout
-  # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every REVIEW-CLASS PR (review_class, or a first
-  # public launch), whatever it changes. Other PRs land on green CI.
-  local tree re files code what look added launch msg cls
+gate_quality() { # $1 PR  $2 PR view JSON (files, body, comments, labels, url, author, commits)  $3 head sha
+  # -> stdout one problem line per thing wrong, ALL of them; rc 0 none | 1 problems | 75 could not read (one plain line).
+  # A fresh reviewer's Ship-ready PASS (with Engineering: PASS) on every PR in a review class (review_class, or a
+  # first public launch), whatever it changes. Other PRs land on green CI.
+  local tree re files code what look added launch msg cls out=""
   tree="$(git ls-tree -r --name-only origin/main 2>/dev/null)"
-  re="$(surface_re <<<"$tree")" || { echo "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
-  files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { echo "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
+  re="$(surface_re <<<"$tree")" || { problem LAND_SURFACES_UNREAD "$LAND_SURFACES could not be read, so what PR #$1 shows people is unknown: restore it from seq-bin main and land again."; return 1; }
+  files="$(jq -r '.files[]?.path' <<<"$2" | surface_files "$re")" || { problem LAND_SURFACES_UNREAD "$LAND_SURFACES could not be read: restore it from seq-bin main and land again."; return 1; }
   code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
   launch=""
   if [ -n "$files" ]; then   # Launch-ready is for something new in public, never for code alone
@@ -1433,13 +1522,26 @@ gate_quality() { # $1 PR  $2 PR view JSON (files, body, labels, url, author, com
     launch="$(grep -E "$(gate_lines '.launch')" <<<"$added" || true)"
     [ -n "$(surface_files "$re" <<<"$tree")" ] || launch="${launch:+$launch }(first surface in this repo)"
   fi
-  if [ -n "$launch" ]; then cls="it puts something new in public"; else cls="$(review_class <<<"$2")" || return 0; fi
+  if [ -n "$launch" ]; then cls="it puts something new in public"
+  else
+    cls="$(review_class "$tree" <<<"$2")"
+    case $? in
+      0) : ;;
+      1) return 0 ;;
+      *) problem REVIEW_CLASS_UNDECLARED "PR #$1 does not say its review class ($cls), so land cannot tell whether it waits on a reviewer: say none with the reason, or name the class."; return 1 ;;
+    esac
+  fi
   if [ -n "$files" ]; then what="needs a review ($cls) and changes what people see ($(head -3 <<<"$files" | paste -sd' ' -))"; look="the real output: page at 390 px, rendered email, frames"
   elif [ -n "$code" ]; then what="needs a review ($cls) and changes code ($(head -3 <<<"$code" | paste -sd' ' -))"; look="the diff, its tests and their mutation proof"
   else what="needs a review ($cls) and changes $(jq -r '.files[]?.path' <<<"$2" | head -3 | paste -sd' ' -)"; look="the diff"; fi
-  msg="$(ship_pass "$1" "$2" "$3" "$what" "$look")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
-  [ -n "$launch" ] || return 0
-  msg="$(launch_pass "$1" "$2" "$3" "$(head -2 <<<"$launch" | paste -sd' ' -)")"; case $? in 0) return 0 ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
+  msg="$(ship_pass "$1" "$2" "$3" "$what" "$look")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) out="$(pass_problem REVIEW_PASS_MISSING "$msg")" ;; esac
+  if [ -n "$launch" ]; then
+    msg="$(launch_pass "$1" "$2" "$3" "$(head -2 <<<"$launch" | paste -sd' ' -)")"
+    case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) out="${out:+$out
+}$(pass_problem LAUNCH_PASS_MISSING "$msg")" ;; esac
+  fi
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"; return 1
 }
 patch_code() { # stdin: paths -> those that hold code (functions), not data, docs, media or lockfiles
   grep -vE '(^|/)(tests?|__tests__|e2e|fixtures)/|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$|\.(json|jsonc|md|mdx|txt|csv|tsv|lock|svg|snap|ya?ml|html?|css|scss|xml|png|jpe?g|gif|webp|avif|ico|mp4|mov|mp3|wav|pdf)$' || true
@@ -1484,7 +1586,7 @@ gate_patch() { # $1 PR  $2 base  $3 head  $4 PR body + owner comments -> rc 1 wi
   [ -n "$fixes" ] || return 0
   missing="$(cut -f1 <<<"$fixes" | while IFS= read -r ref; do patch_answered "$4" "$ref" || printf '%s ' "$ref"; done)"
   [ -n "$missing" ] || return 0
-  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): add to the PR body, or as a PR comment by the repo's owner account, the line  Patch or rebuild: <why a patch and not a rebuild of that design> (${missing% })"
+  echo "PR #$1 changes functions that fix ${missing% } changed in the last $LAND_PATCH_DAYS days ($(cut -f2 <<<"$fixes" | sort -u | sed 's#.*/##' | head -3 | paste -sd' ' -)): its body, or a PR comment by the repo's owner account, must carry a Patch or rebuild line that says why a patch and not a rebuild of that design and names ${missing% }"
   return 1
 }
 # OWNER OVERRIDE (her ruling 21 Nov 2026: "if i ask for one aspect of something to be added quickly and
@@ -1538,22 +1640,28 @@ gate_proof() { # $1 PR  $2 PR view JSON  $3 PR body + owner comments -> rc 1 wit
   code="$(jq -r '.files[]?.path' <<<"$2" | patch_code)"
   [ -n "$code" ] || return 0
   proof_listed <<<"$3" && return 0
-  echo "PR #$1 changes code ($(head -3 <<<"$code" | paste -sd' ' -)) and lists no mutation proof: undo each fix, see its test go red, and add to the PR body a '## Mutation proof' section with one row per fix (a table under a header row, or a bullet), each saying the mutation and the test that went red in 4 or more words, with no unticked [ ] box; or 'Mutation proof: none — <why there is no behaviour to break, 6+ words>'."
+  echo "PR #$1 changes code ($(head -3 <<<"$code" | paste -sd' ' -)) and lists no mutation proof: undo each fix, see its test go red, and list one row per fix (a table under a header row, or a bullet), each saying the mutation and the test that went red in 4 or more words, with no unticked [ ] box; or say none with why there is no behaviour to break, in 6 or more words."
   return 1
 }
-gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> rc 0 pass | 1 refused (line on stdout) | 75 could not read
-  local base body msg
+gate_pr() { # $1 PR  $2 head sha  $3 PR view JSON -> stdout one problem line ("CODE<TAB>reason") per thing wrong, ALL of
+  # them in one run (review class, reviewer PASS, mutation proof, patch or rebuild); rc 0 none | 1 problems | 75 could
+  # not read (one plain line). Her bypass (an Owner override line in the body) skips these sign-offs.
+  local base body msg out=""
   jq -r '.body // ""' <<<"$3" | owner_override && return 0
   git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; return 75; }
-  msg="$(gate_quality "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) echo "$msg"; return 1 ;; esac
-  msg="$(gate_proof "$1" "$3" "$(owner_text <<<"$3")")" || { echo "$msg"; return 1; }
-  # The patch check needs the PR's commits only when it changes code that is already on main.
-  jq -r '.files[]?.path' <<<"$3" | patch_code | while IFS= read -r p; do git cat-file -e "origin/main:$p" 2>/dev/null && echo "$p"; done | grep -q . || return 0
-  have_head "$1" "$2" || return 75
-  base="$(git merge-base origin/main "$2")" || { echo "PR #$1 has no merge base with main"; return 75; }
+  msg="$(gate_quality "$1" "$3" "$2")"; case $? in 0) : ;; 75) echo "$msg"; return 75 ;; *) out="$msg" ;; esac
   body="$(owner_text <<<"$3")"
-  msg="$(gate_patch "$1" "$base" "$2" "$body")" || { echo "$msg"; return 1; }
-  return 0
+  msg="$(gate_proof "$1" "$3" "$body")" || out="${out:+$out
+}$(problem MUTATION_PROOF_MISSING "$msg")"
+  # The patch check needs the PR's commits only when it changes code that is already on main.
+  if jq -r '.files[]?.path' <<<"$3" | patch_code | while IFS= read -r p; do git cat-file -e "origin/main:$p" 2>/dev/null && echo "$p"; done | grep -q .; then
+    have_head "$1" "$2" || return 75
+    base="$(git merge-base origin/main "$2")" || { echo "PR #$1 has no merge base with main"; return 75; }
+    msg="$(gate_patch "$1" "$base" "$2" "$body")" || out="${out:+$out
+}$(problem PATCH_OR_REBUILD_MISSING "$msg")"
+  fi
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"; return 1
 }
 # FORMS ARE NEVER LEFT BROKEN BY A FIX (her words 23 Nov 2026: "u need to make sure the forms are not broken …
 # after theee fixes u need to test them"). A SAFETY check: no Fast PRs item cuts it, and her bypass only records it.
@@ -1591,7 +1699,7 @@ gate_forms() { # $1 PR  $2 PR body + owner comments -> rc 0 (stdout: the forms t
   [ -n "$touched" ] && { echo "$touched"; return 0; }
   none="$(grep -iE '^(none|no)[[:space:]]*(—|–|--|-|:)[[:space:]]*[^[:space:]]+([[:space:]]+[^[:space:]]+){2,}' <<<"$lines" | head -1)"
   [ -n "$none" ] && return 0
-  echo "PR #$1 says nothing about forms: add to its body 'Forms: none — <why no form page or server path is touched, 3+ words>', or 'Forms: <which form> — preview: <the marked TEST submission on the preview and what received it>' (her rule: a form is never left broken by a fix; production is proven right after the deploy)."
+  echo "PR #$1 says nothing about forms: say none with the reason, or name the form and the marked TEST submission you made on the preview (her rule: a form is never left broken by a fix; production is proven right after the deploy)."
   return 1
 }
 # NOTHING IS "DONE" UNTIL ITS REAL OUTPUT WAS SEEN LIVE, AND NOTHING CUT IS HIDDEN (her order 24 Nov 2026, after
@@ -1648,9 +1756,7 @@ PH = re.compile(r"<[A-Za-z](?:[^<>\n]{0,60}[^\s<>])?>")
 def placeholder(l):
     head, _, tail = re.split(r"(?i)(check:)", l, maxsplit=1) if re.search(r"(?i)check:", l) else (l, "", "")
     return bool(PH.search(head + re.sub(r"'[^']*'|\"[^\"]*\"", "", tail)))   # quoted text in the check is data
-add = ("add to its body ONE line, 'Outcome: none — <why nothing scheduled or produced changes, 3+ words>' or "
-       "'Outcome: <the real output> — check: <a read-only shell command> — expect: >= <N> — by: <YYYY-MM-DD | next day>' "
-       "(her order 24 Nov 2026: nothing is called working until its real output is checked live the next day)")
+add = "pr-body-template.md has both accepted forms"
 lines = []
 for l in text.replace("\r", "").splitlines():
     m = re.match(r"^[\s>]*(?:[-*]\s+)?(?:\*\*)?Outcome:(?:\*\*)?\s*(.*)$", l, re.I)
@@ -1710,8 +1816,85 @@ not_built_section() { # stdin: PR body + owner comments -> the first '## Not bui
 gate_not_built() { # $1 PR  $2 PR body + owner comments -> rc 0 stdout the section, word for word | rc 1 one plain line
   local sec; sec="$(not_built_section <<<"$2" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' | sed '/./,$!d')"
   if grep -vE '^[[:space:]]*([-*][[:space:]]*)?(<[^>]*>[[:space:]]*)*$' <<<"$sec" | grep -qE '[[:alnum:]]+[^[:alnum:]]+[[:alnum:]]+'; then printf '%s\n' "$sec"; return 0; fi
-  echo "PR #$1 has no '## Not built' section saying what was cut: add one listing each item from the plan or brief that is not built (or 'Nothing cut.'); land prints it word for word and the coordinator quotes it to her."
+  echo "PR #$1 has no '## Not built' section saying what was cut: list each item from the plan or brief that is not built (or 'Nothing cut.'); land prints it word for word and the coordinator quotes it to her."
   return 1
+}
+# The screens people operate, out of a list of changed paths (stdin, one per line): the app's client
+# code and component files. Tests, stories and content pages (.html/.md, a site's articles) are not
+# screens someone operates. Pure; prints nothing when none.
+operated_ui_files() { grep -E '(^|/)src/client/|\.(tsx|jsx|vue|svelte)$' | grep -vE '(^|/)(tests?|__tests__|e2e|playwright)/|\.(test|spec|stories)\.' || true; }
+# EVERY DESCRIPTION GATE IN ONE PASS (her words 27 Nov 2026, after #182 was bounced once per missing line: "forms line
+# in it s description is going to keep tripping you up ... give a root fix to this"). body_gates runs ALL of them
+# and collects every problem, so one run of land, or of the read-only `land --check <pr>`, lists everything a
+# description still lacks, each with the line to add (problems_print). Her bypass is never blocked by forms,
+# outcome or not-built: they are recorded UNDECLARED and their live checks are still owed.
+body_gates() { # $1 PR  $2 head sha  $3 PR view JSON  $4 "1" when this run carries --owner
+  # Called WITHOUT a subshell. Sets BODY_PROBLEMS (problem lines), BODY_NOTES (what land says on a pass), BODY_UNREAD
+  # (why it could not read), FORMS_DUE, OUTCOME_DUE and NOT_BUILT. rc 0 nothing to fix | 1 problems | 75 could not read.
+  local out rc text base bypass="" formfiles jobs today ui
+  BODY_PROBLEMS=""; BODY_NOTES=""; BODY_UNREAD=""; FORMS_DUE=""; OUTCOME_DUE=""; NOT_BUILT=""
+  body_add() { BODY_PROBLEMS="${BODY_PROBLEMS:+$BODY_PROBLEMS
+}$(problem "$1" "$2")"; }
+  body_note() { BODY_NOTES="${BODY_NOTES:+$BODY_NOTES
+}$1"; }
+  { [ -n "${4:-}" ] || jq -r '.body // ""' <<<"$3" | owner_override; } && bypass=1
+  # Review class, the reviewer's PASS, mutation proof, patch or rebuild.
+  out="$(gate_pr "$1" "$2" "$3")"; rc=$?
+  [ "$rc" -eq 75 ] && { BODY_UNREAD="$out"; [ -n "$out" ] || BODY_UNREAD="the commits of PR #$1 could not be read"; return 75; }
+  [ "$rc" -eq 0 ] || BODY_PROBLEMS="$out"
+  text="$(owner_text <<<"$3")"
+  git cat-file -e "$2^{commit}" 2>/dev/null || git fetch -q origin "pull/$1/head" 2>/dev/null
+  base="$(git merge-base origin/main "$2" 2>/dev/null || echo origin/main)"
+  # Forms (gate_forms): a safety check, read under her bypass too. NO FORMS LINE IS NOT A STOP BY ITSELF (her words
+  # 27 Nov 2026: "not eveyrhting has a fucking form and does not need a test"): a PR whose diff touches no form needs
+  # no Forms: line and no form test. Only a PR whose diff DOES touch a form and says nothing is stopped.
+  out="$(gate_forms "$1" "$text")"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -z "$out" ] || { FORMS_DUE="$out"; body_note "forms: $out — proven on the preview; production is proven right after the deploy"; }
+  else
+    formfiles="$(jq -r '.files[]?.path' <<<"$3" | form_files "$2" "$base" | paste -sd' ' -)"
+    if [ -z "$formfiles" ]; then body_note "forms: no Forms: line; the diff touches no form, so no form test runs"
+    elif [ -n "$bypass" ]; then
+      FORMS_DUE="undeclared (landed under her bypass; the diff touches $formfiles)"
+      body_note "forms: undeclared under her bypass; the diff touches $formfiles, so the form is proven on production right after the deploy"
+    else body_add FORMS_UNDECLARED "the diff touches a form ($formfiles). $out"; fi
+  fi
+  # Outcome and Not built (outcome_parse, gate_not_built): safety checks, read under her bypass too, which is never
+  # blocked by them: it records UNDECLARED, and a job PR still gets its next-day check (the checker infers it).
+  jobs="$(jq -r '.files[]?.path' <<<"$3" | job_files "$2" "$base")"
+  [ "$(jq -r '(.files | length) < (.changedFiles // 0)' <<<"$3")" = true ] && jobs="${jobs:+$jobs
+}(GitHub cut the file list short: unread files count as a job)"
+  today="${LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
+  out="$(outcome_parse "$1" "$text" "$jobs" "$today")"; rc=$?
+  if [ "$rc" -eq 0 ] && [ "$out" != none ]; then
+    OUTCOME_DUE="$out"; body_note "outcome: $(cut -f3 <<<"$out") — checked live by post-land-check from $(cut -f1 <<<"$out") (expect >= $(cut -f2 <<<"$out"))"
+  elif [ "$rc" -eq 0 ]; then body_note "outcome: none (no job, pipeline or agent changed)"
+  elif [ -n "$bypass" ]; then
+    [ "$rc" -eq 3 ] && body_note "outcome check refused, never run: $out"
+    body_note "Outcome: UNDECLARED (owner bypass)"
+    OUTCOME_DUE="$(python3 -c 'import datetime,sys; print(datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=1))' "$today")	infer	UNDECLARED (owner bypass)	infer"
+  elif [ "$rc" -eq 3 ]; then body_add OUTCOME_CHECK_NOT_READ_ONLY "$out"
+  else body_add OUTCOME_UNDECLARED "$out"; fi
+  out="$(gate_not_built "$1" "$text")"; rc=$?
+  if [ "$rc" -eq 0 ]; then NOT_BUILT="$out"
+  elif [ -n "$bypass" ]; then NOT_BUILT="UNDECLARED (owner bypass)"
+  else body_add NOT_BUILT_UNDECLARED "$out"; fi
+  # CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
+  # 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
+  # every section, and only a click would have caught it. So a PR that changes a screen people operate
+  # (operated_ui_files) lands only with a "Clicked through:" line in its body or a comment, or (Fast PRs item 4,
+  # 23 Nov 2026) a fresh reviewer's Ship-ready PASS for this head whose own line says `rendered: <screens>`
+  # (clicked_or_rendered). Her bypass (the Owner override line) skips it.
+  ui="$(jq -r '.files[]?.path' <<<"$3" | operated_ui_files)"
+  if [ -n "$ui" ] && ! jq -r '.body // ""' <<<"$3" | owner_override; then
+    out="$(clicked_or_rendered "$1" "$3" "$2")"; rc=$?
+    case "$rc" in
+      0) body_note "$out" ;;
+      75) BODY_UNREAD="PR #$1's rendered: PASS could not be checked against its head"; return 75 ;;
+      *) body_add NOT_CLICKED_THROUGH "PR #$1 changes screens people operate ($(head -3 <<<"$ui" | tr '\n' ' ')) and carries no \"Clicked through:\" line, and no fresh reviewer's Ship-ready PASS line saying rendered:. Click every changed path in a real browser at 390 px with the console open (hostile-review step 4), then comment the line (gh pr comment $1 --body '<the line>') and land again." ;;
+    esac
+  fi
+  [ -z "$BODY_PROBLEMS" ]
 }
 # --- gates end ---
 # HER BYPASS NEVER LETS DEBT SLIP BY UNSEEN (her ruling 21 Nov 2026: "the important thing is our rules
@@ -1811,12 +1994,47 @@ live_add() { # $1 owner/repo  $2 PR -> rc 0 listed (or already there) | 1 not, t
       && { echo "     $1 added to live-repos.json on $LAND_LIVE_HOME main ($(sha_name "$out")); land reads it from ~/bin's next fast-forward"; return 0; }
     why="the commit was refused: $(tail -1 <<<"$out")"
   done
-  printf '\n\033[31;1mNAMED STOP [LIVE_REPO_NOT_ADDED] #%s LANDED, but %s was NOT added to live-repos.json (%s), so its PRs still need a review. Add "%s" to live-repos.json in a seq-bin PR (review-class: its reviewer checks the Launch-ready PASS on #%s).\033[0m\n' "$2" "$1" "$why" "$1" "$2"
+  printf '\n\033[31;1mNAMED STOP [LIVE_REPO_NOT_ADDED] #%s LANDED, but %s was NOT added to live-repos.json (%s), so the list of launched repos is missing it. Add "%s" to live-repos.json in a seq-bin PR (a change to that list needs a reviewer: it checks the Launch-ready PASS on #%s).\033[0m\n' "$2" "$1" "$why" "$1" "$2"
   return 1
 }
 # --- live_add end ---
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
+
+# land --check <pr>: EVERY DESCRIPTION GATE, READ-ONLY (27 Nov 2026). The same body_gates land runs before a merge,
+# on the PR as GitHub has it now: every problem in one list, each with the line to add from pr-body-template.md.
+# It reads (one PR view, the label history, the commits) and writes nothing: no merge, comment, label, edit or
+# HANDOFF line. exit 0 = nothing to fix | 1 = the list | 75 = GitHub did not answer (never "clean" on an unread PR).
+# CI and mergeability are land's own to read; land-after runs this before it starts anything.
+if [ "$MODE" = check ]; then
+  say "land --check: reading PR #$PR's description gates (read-only: nothing is merged, commented, labeled or edited)"
+  PRMETA="$(gh_read '^\{' pr view "$PR" --json state,baseRefName,headRefOid,files,body,comments,author,commits,labels,url,changedFiles,additions,deletions)" \
+    || unverified "$(gh_kind "$(gh_err)")" "PR #$PR could not be read, so nothing about its description is known: $(gh_err)"
+  CHECK_STATE="$(jq -r '.state // ""' <<<"$PRMETA")"; HEAD="$(jq -r '.headRefOid // ""' <<<"$PRMETA")"
+  case "$CHECK_STATE" in
+    MERGED) echo "PR #$PR is already MERGED: its description gates were read when it landed; nothing is left to check."; exit 0 ;;
+    CLOSED) die "PR #$PR is closed without merging: there is nothing to land." ;;
+    OPEN) : ;;
+    *) unverified api "PR #$PR's state could not be read from GitHub's answer" ;;
+  esac
+  [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || unverified api "PR #$PR's head commit could not be read from GitHub's answer"
+  PRMETA="$(with_label_history "$PR" <<<"$PRMETA")"
+  jq -e '.label_history | type == "array"' <<<"$PRMETA" >/dev/null 2>&1 \
+    || unverified network "PR #$PR's label history (its issue events) could not be read, so whether it was ever labeled review-required is unknown"
+  body_gates "$PR" "$HEAD" "$PRMETA" ""; BODY_RC=$?
+  FORMS_DUE=""; OUTCOME_DUE=""   # a check lands nothing, so the exit trap notes nothing in HANDOFF
+  [ "$BODY_RC" -eq 75 ] && unverified network "$BODY_UNREAD"
+  CHECK_BASE="$(jq -r '.baseRefName // ""' <<<"$PRMETA")"
+  [ "$CHECK_BASE" = main ] || BODY_PROBLEMS="$(problem STACKED_PR "PR #$PR merges into ${CHECK_BASE:-an unread branch}, not main, so landing it would ship nothing: land the PR for that branch first, or retarget this one (gh pr edit $PR --base main).")${BODY_PROBLEMS:+
+$BODY_PROBLEMS}"
+  if [ -n "$BODY_PROBLEMS" ]; then
+    problems_print "$PR" "$HEAD" <<<"$BODY_PROBLEMS"
+    die "$(problems_stop "$PR" <<<"$BODY_PROBLEMS")"
+  fi
+  [ -z "$BODY_NOTES" ] || sed 's/^/    /' <<<"$BODY_NOTES"
+  echo "land --check: PR #$PR's description has everything land asks at head $(sha_name "$HEAD") (read: review class and reviewer PASS, mutation proof, patch or rebuild, forms, outcome, not built, click-through). CI and mergeability are read when it lands."
+  exit 0
+fi
 
 # ALREADY MERGED IS NOT A FAILURE. 21 Sep 2026: Porter's newsletter job landed join-west-peek-main
 # #14 on its first LAND run, the run failed on an unrelated read, and the retry ran `land 14` against
@@ -1905,57 +2123,18 @@ if [ -n "$RUNID" ]; then
 fi
 merge_clean
 echo "     green, head $HEAD, $STATE"
-# The two gates (block above): patch or rebuild, and ship-ready. Before any side effect (D1, merge).
-GATE_MSG="$(gate_pr "$PR" "$HEAD" "$PRMETA")"; GATE_RC=$?
-case "$GATE_RC" in
-  0) : ;;
-  75) unverified network "$GATE_MSG" ;;
-  *) die "$GATE_MSG" ;;
-esac
-# Forms (gate_forms, above): a safety check, read under her bypass too. Her bypass never stops on it: a PR she
-# landed that says nothing about forms is proven on production anyway ("undeclared"), so nothing is skipped.
-FORMS_DUE=""
-FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"; FORM_RC=$?
-if [ "$FORM_RC" -eq 0 ]; then
-  [ -z "$FORM_MSG" ] || { FORMS_DUE="$FORM_MSG"; say "    forms: $FORM_MSG — proven on the preview; production is proven right after the deploy"; }
-else
-  # NO FORMS LINE IS NOT A STOP BY ITSELF (her words 27 Nov 2026: "not eveyrhting has a fucking form and does not need
-  # a test"; #182, a local shell hook, was refused for the missing line). land reads the diff: a PR that touches no
-  # form needs no Forms: line and no form test. Only a PR whose diff DOES touch a form and says nothing is stopped.
-  git cat-file -e "$HEAD^{commit}" 2>/dev/null || git fetch -q origin "pull/$PR/head" 2>/dev/null
-  FORMFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | form_files "$HEAD" "$(git merge-base origin/main "$HEAD" 2>/dev/null || echo origin/main)" | paste -sd' ' -)"
-  if [ -z "$FORMFILES" ]; then
-    say "    forms: no Forms: line; the diff touches no form, so no form test runs"
-  elif [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
-    FORMS_DUE="undeclared (landed under her bypass; the diff touches $FORMFILES)"; say "    forms: undeclared under her bypass; the diff touches $FORMFILES, so the form is proven on production right after the deploy"
-  else
-    die "NAMED STOP [FORMS_UNDECLARED] the diff touches a form ($FORMFILES). $FORM_MSG"
-  fi
+# EVERY DESCRIPTION GATE IN ONE PASS (body_gates, in the block above), before any side effect (D1, merge): the review
+# class and its reviewer's PASS, mutation proof, patch or rebuild, forms, outcome, not built, click-through. A
+# description that lacks several lines is told ALL of them here, then stopped ONCE.
+body_gates "$PR" "$HEAD" "$PRMETA" "${OWNER_WORDS:+1}"; BODY_RC=$?
+[ "$BODY_RC" -eq 75 ] && unverified network "$BODY_UNREAD"
+[ -z "$BODY_NOTES" ] || while IFS= read -r BODY_NOTE; do say "    $BODY_NOTE"; done <<<"$BODY_NOTES"
+if [ "$BODY_RC" -ne 0 ]; then
+  problems_print "$PR" "$HEAD" <<<"$BODY_PROBLEMS"
+  die "$(problems_stop "$PR" <<<"$BODY_PROBLEMS")"
 fi
-# Outcome and Not built (outcome_parse, gate_not_built, above): safety checks, read under her bypass too, which is
-# never blocked by them: it records UNDECLARED, and a job PR still gets its next-day check (the checker infers it).
-OUTCOME_DUE=""; OUT_TEXT="$(owner_text <<<"$PRMETA")"
-JOBS="$(jq -r '.files[]?.path' <<<"$PRMETA" | job_files "$HEAD" "$(git merge-base origin/main "$HEAD" 2>/dev/null || echo origin/main)")"
-[ "$(jq -r '(.files | length) < (.changedFiles // 0)' <<<"$PRMETA")" = true ] && JOBS="${JOBS:+$JOBS
-}(GitHub cut the file list short: unread files count as a job)"
-LTODAY="${LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
-OUT_MSG="$(outcome_parse "$PR" "$OUT_TEXT" "$JOBS" "$LTODAY")"; OUT_RC=$?
-NB_MSG="$(gate_not_built "$PR" "$OUT_TEXT")"; NB_RC=$?
-BYPASS=""; { [ -n "$OWNER_WORDS" ] || jq -r '.body // ""' <<<"$PRMETA" | owner_override; } && BYPASS=1
-if [ "$OUT_RC" -eq 0 ] && [ "$OUT_MSG" != none ]; then OUTCOME_DUE="$OUT_MSG"; say "    outcome: $(cut -f3 <<<"$OUT_MSG") — checked live by post-land-check from $(cut -f1 <<<"$OUT_MSG") (expect >= $(cut -f2 <<<"$OUT_MSG"))"
-elif [ "$OUT_RC" -eq 0 ]; then say "    outcome: none (no job, pipeline or agent changed)"
-elif [ -n "$BYPASS" ]; then
-  [ "$OUT_RC" -eq 3 ] && say "    outcome check refused, never run: $OUT_MSG"
-  say "    Outcome: UNDECLARED (owner bypass)"
-  OUTCOME_DUE="$(python3 -c 'import datetime,sys; print(datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=1))' "$LTODAY")	infer	UNDECLARED (owner bypass)	infer"
-elif [ "$OUT_RC" -eq 3 ]; then die "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY] $OUT_MSG"
-elif [ "$NB_RC" -ne 0 ]; then die "NAMED STOP [OUTCOME_UNDECLARED] $OUT_MSG Also NOT_BUILT_UNDECLARED: $NB_MSG"
-else die "NAMED STOP [OUTCOME_UNDECLARED] $OUT_MSG"; fi
-if [ "$NB_RC" -eq 0 ]; then NOT_BUILT="$NB_MSG"
-elif [ -n "$BYPASS" ]; then NOT_BUILT="UNDECLARED (owner bypass)"
-else die "NAMED STOP [NOT_BUILT_UNDECLARED] $NB_MSG"; fi
 printf '\n--- NOT BUILT (PR #%s, word for word) ---\n%s\n--- END NOT BUILT ---\n' "$PR" "$NOT_BUILT"
-# A LANDED LAUNCH LISTS ITS REPO (new until launched, 23 Nov 2026). A PR carrying a fresh reviewer's Launch-ready
+# A LANDED LAUNCH LISTS ITS REPO (23 Nov 2026; since 27 Nov the list no longer decides who waits on a reviewer). A PR carrying a fresh reviewer's Launch-ready
 # PASS for this head (launch_pass, the launch gate's own check) in a repo not yet on live-repos.json is added to
 # the list by the exit trap once the land ends green (live_add). Never under her bypass: no review stood.
 LIVE_ADD=""
@@ -1967,20 +2146,6 @@ if ! jq -r '.body // ""' <<<"$PRMETA" | owner_override && review_text <<<"$PRMET
     if [ "$LRC" -eq 0 ]; then LIVE_ADD="$LREPO"; say "    launch: $LREPO goes on live-repos.json once this land ends green"
     else say "    launch: $LREPO stays off live-repos.json, its Launch-ready PASS does not count: $LMSG"; fi
   fi
-fi
-# CHANGED SCREENS ARE CLICKED THROUGH BEFORE THEY LAND (owner, 6 Nov 2026; loop olp_m6qyb1m4wke6h9dx).
-# 5 Nov 2026 the P&P request form shipped green with a script that never ran: every service showed
-# every section, and only a click would have caught it. So a PR that changes a screen people operate
-# (operated_ui_files) lands only with a "Clicked through: <what, 390 px, console clean>" line in its body
-# or a comment, or (Fast PRs item 4, 23 Nov 2026) a fresh reviewer's Ship-ready PASS for this head whose
-# own line says `rendered: <screens>` (clicked_or_rendered). Read after the gates, so origin/main is fetched.
-UIFILES="$(jq -r '.files[]?.path' <<<"$PRMETA" | operated_ui_files)"
-if [ -n "$UIFILES" ] && ! jq -r '.body // ""' <<<"$PRMETA" | owner_override; then
-  CLICK_MSG="$(clicked_or_rendered "$PR" "$PRMETA" "$HEAD")"; CLICK_RC=$?
-  [ "$CLICK_RC" -eq 75 ] && unverified network "PR #$PR's rendered: PASS could not be checked against its head"
-  [ "$CLICK_RC" -eq 0 ] \
-    || die "NAMED STOP [NOT_CLICKED_THROUGH] PR #$PR changes screens people operate ($(head -3 <<<"$UIFILES" | tr '\n' ' ')) and carries no \"Clicked through:\" line, and no fresh reviewer's Ship-ready PASS line saying rendered:. Click every changed path in a real browser at 390 px with the console open (hostile-review step 4), then: gh pr comment $PR --body 'Clicked through: <what, 390 px, console clean>' and land again."
-  say "    $CLICK_MSG"
 fi
 if [ -n "$D1_PREMERGE" ]; then
   pr_size "$PR"

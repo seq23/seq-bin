@@ -11,9 +11,9 @@ Review class: <money | private-data | delete | store | launch | outreach> — <w
 Forms: none — <why no form page or server path is touched, 3+ words>
 Forms: <which form(s)> — preview: <the marked TEST submission you made on the preview and what received it>
 
-<!-- land:OUTCOME_UNDECLARED,OUTCOME_CHECK_NOT_READ_ONLY — keep ONE of the two lines; never delete both. A PR touching a schedule, plist, workflow cron, sender or agent script may not say none. The check may only read; by: may be left off (the next day). -->
+<!-- land:OUTCOME_UNDECLARED,OUTCOME_CHECK_NOT_READ_ONLY — keep ONE of the two lines; never delete both. A PR touching a schedule, plist, workflow cron, sender or agent script may not say none. The check is ONE read and its pipes, run with no shell and no sign-in: first `gh api <path> [--jq <filter>]` (public, no token), `curl -fsS[L] <https url>`, `curl -s -o /dev/null -w '%{http_code}' <https url>`, or cat/grep/wc/head/tail/ls on a file under ~/Work/tasks, ~/Library/Logs, ~/bin or ~/HANDOFF.md; then after each | grep, jq, wc, head, tail, sort, uniq, cut or tr. Nothing behind a sign-in (no D1 query, admin page or script). `outcome-read --explain '<check>'` says whether yours can run. by: may be left off (the next day). -->
 Outcome: none — <why nothing scheduled or produced changes, 3+ words>
-Outcome: <the real output that proves it works> — check: <a read-only shell command> — expect: >= <N> — by: <YYYY-MM-DD | next day | N days>
+Outcome: <the real output that proves it works> — check: <one read and its pipes> — expect: >= <N> — by: <YYYY-MM-DD | next day | N days>
 
 <!-- land:PATCH_OR_REBUILD_MISSING — delete if the PR changes no function a fix commit changed in the last 30 days (pr-patch-check says so when the PR opens). -->
 Patch or rebuild: <why a patch and not a rebuild of that design, 5+ words> (<each fix ref land names, like #41>)

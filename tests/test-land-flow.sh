@@ -966,7 +966,7 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
 cp "$HERE/../open-loops.mjs" "$W/"   # the poster beside land: LAND_DIR is $W when land re-runs from its temp copy
-cp "$HERE/../post-land-check" "$W/"   # its read-only gate, which land asks about every Outcome check (same LAND_DIR)
+cp "$HERE/../outcome-read" "$W/"   # the one reader, which land asks about every Outcome check (same LAND_DIR)
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
@@ -1021,7 +1021,7 @@ check "…and land prints the line" has "ENG-CHECK DUE seq23/approvalprep#7 $MER
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/hh/ai-calls"\n' "$W" > "$W/hh/ai-stub"; chmod +x "$W/hh/ai-stub"
 export PLC_RC=0   # exported: it is read inside the eval of the check below
 PATH="$BIN:$PATH" POST_LAND_DUE_FILE="$LAND_DUE_FILE" POST_LAND_AI_RUN="$W/hh/ai-stub" POST_LAND_LOG="$W/hh/plc.log" POST_LAND_LOCKS="$W/hh/plc-locks" \
-  POST_LAND_NOTIFY=true POST_LAND_NOTICE=true POST_LAND_TASKS="$W/hh/plc-tasks" POST_LAND_SKIP="$W/hh/no-skip" POST_LAND_SANDBOX=off \
+  POST_LAND_NOTIFY=true POST_LAND_NOTICE=true POST_LAND_TASKS="$W/hh/plc-tasks" POST_LAND_SKIP="$W/hh/no-skip" \
   bash "$HERE/../post-land-check" </dev/null >"$W/hh/plc-out" 2>&1 || PLC_RC=$?
 check "…post-land-check reads land's line from the list: its engineering run names this PR and merge sha" eval 'grep -q -- "- seq23/approvalprep#7 (merge $MERGESHA): landed under her bypass" "$W/hh/ai-calls"'
 check "…with no verdict it exits 1 and the line stays DUE in the list (never DONE on silence)" eval '[ "$PLC_RC" -eq 1 ] && [ "$(due_lines)" -eq 1 ]'
@@ -1159,24 +1159,24 @@ echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Mov
 run_land approvalprep
 check "outcome: 'Outcome: none' on a PR that changes a launchd plist is refused by name, naming the plist, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "launchd/com.seq.noelle.plist" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome"
-echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "outcome: an Outcome with a check but no 'expect: >= N' is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'expect: >= <N>'"'"'" && ! merge_called'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions every night'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: an Outcome with no 'check:' command is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'check: <a read-only shell command>'"'"'" && ! merge_called'
+check "outcome: an Outcome with no 'check:' command is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'check: <one read and its pipes>'"'"'" && ! merge_called'
 handoff_fixture; fixture approvalprep
-echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log — expect: >= 3\n\n## Not built\n- the job-target lever (G1)\n- G19, the sales reader'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log — expect: >= 3\n\n## Not built\n- the job-target lever (G1)\n- G19, the sales reader'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line with the task slug, day, floor, outcome and check" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(outcome_lines)" -eq 1 ] && due_list | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:>=3 — outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log"'
+check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line with the task slug, day, floor, outcome and check" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(outcome_lines)" -eq 1 ] && due_list | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:>=3 — outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log"'
 check "…and prints the Not built section word for word between its markers" eval 'sed -n "/^--- NOT BUILT (PR #7, word for word) ---$/,/^--- END NOT BUILT ---$/p" <<<"$OUT" | sed "1d;\$d" | diff - <(printf "%s\n" "- the job-target lever (G1)" "- G19, the sales reader") >/dev/null'
 run_land approvalprep
 check "…a re-run on the merged PR adds no second OUTCOME-CHECK line" eval '[ "$(outcome_lines)" -eq 1 ]'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: echo ok && curl -s -d x=1 https://e.x/api | wc -l — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: a check that could write (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "curl -d sends data" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+check "outcome: a check that is more than one read (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "& or &&" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: gh issue create -t x -b y — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'

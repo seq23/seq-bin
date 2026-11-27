@@ -18,7 +18,6 @@
 #                                   then each OUTCOME-CHECK whose by-day has come
 #   post-land-check --now <key>     only the FORM-PROOF line for <owner/repo>#<pr> (land starts this, detached)
 #   post-land-check --dry-run       print what would run, run nothing
-#   post-land-check --read-only-gate '<cmd>'   rc 0 when the check only reads, rc 1 and why (land calls this)
 #
 # Meaning is a model's job: each check is ONE `ai-run --role brain` (a fresh Claude that never built the PR).
 # Code only checks structure: after the run, the PR must carry a NEW comment from this account whose first line
@@ -34,16 +33,18 @@
 # cannot be forgotten: the banner repeats nightly until the fix has landed.
 #
 # An OUTCOME-CHECK is decided in three steps, and nothing skips the first two. (1) CODE runs the PR's own check
-# command itself, but only once the read-only gate (readonly_gate, below) has passed it: a check that could send,
-# post, create, delete or change anything is never run, and is COULDNT-CHECK ("the check was not run"). It runs under
-# macOS sandbox-exec (no FILE writes outside temp and tool caches; the network is the gate's job) with a 5-min
-# timeout, and code reads the count it printed (an integer on its last line, else its non-empty line count). A
-# non-zero exit or no output is COULDNT-CHECK (an outage: D1 5xx, a gh rate limit, a site down), except exit 1 with
-# one bare integer line (`grep -c` finding none prints 0 and exits 1): that is a reading. A count under the floor is FAIL (NOT WORKING), posted by code
-# with no model run. (2) Only a count that meets the floor goes to ONE fresh `ai-run --role brain`, which judges
-# whether that output is the promised outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it
-# saw, with counts>`; a count below the floor never reaches it, and the model's FAIL stands. No comment, ai-run down
-# or a usage limit is COULDNT-CHECK. (3) PASS → the line DONE, the task sheet's line 1 DONE (moved to done/), a
+# through `outcome-read` (beside this file): no shell, none of her logins, only fixed read tools (a public GET with
+# no token, a file in the task or log folders, text tools on stdin). A check that needs anything else is never run
+# and is COULDNT-CHECK ("the check was not run"). 5-min timeout. Code reads the count it printed (an integer on its
+# last line, else its non-empty line count). A read that did not answer (a site down, GitHub's limit, a missing
+# file) or no output is COULDNT-CHECK, never a count; a printed 0 is a reading. A count under the floor is FAIL (NOT
+# WORKING), posted by code with no model run. (2) Only a count that meets the floor goes to ONE fresh model with NO
+# tools (`ai-run` with AI_RUN_BARE=1: no shell, no files, no connectors, none of her settings), which is given the
+# output and the PR's text and answers `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it saw, with counts>`;
+# CODE posts that as the PR comment. A count below the floor never reaches it, and the model's FAIL stands. No
+# verdict line, ai-run down or a usage limit is COULDNT-CHECK. A line with no Outcome declared (her bypass,
+# expect:infer) first asks the same no-tools model to WRITE one check in outcome-read's tools; code runs it the same
+# way. (3) PASS → the line DONE, the task sheet's line 1 DONE (moved to done/), a
 # Notices line "<repo> #<pr> <outcome>: working — <seen>". FAIL → FAIL, line 1 FAIL, a banner, "… NOT WORKING —
 # <seen>". COULDNT-CHECK → the line stays DUE, exit 1, a "… NOT CHECKED — <seen>" Notices line each day, and a
 # banner once it is 2+ days past its by-day. One try per line per night (a replay posts nothing twice). Public
@@ -53,7 +54,7 @@
 # window; an ai-run job, so it stays on the Mac: her ruling 22 Nov 2026). Exit: 0 every line got a verdict
 # (FAILs included: they are results, and they are raised) · 1 a line got no verdict · 2 the list is missing or unreadable.
 # Env (tests): POST_LAND_DUE_FILE, POST_LAND_AI_RUN, POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text),
-#   POST_LAND_TASKS (task sheets dir), POST_LAND_TODAY (YYYY-MM-DD), POST_LAND_SANDBOX=off (Linux CI and tests),
+#   POST_LAND_TASKS (task sheets dir), POST_LAND_TODAY (YYYY-MM-DD), POST_LAND_OUTCOME_READ (the reader; tests),
 #   POST_LAND_NOTICE (a command given key and text; default: boss-os scripts/ops/outcome-notice.mjs via the vault),
 #   POST_LAND_LOCKS.
 set -uo pipefail
@@ -65,12 +66,11 @@ LOG="${POST_LAND_LOG:-$HOME/Work/tasks/logs/post-land-check.log}"
 # A run on a day before the date in the skip file does nothing but say so; every DUE
 # line stays DUE and is checked on the first run after. The file expires by its own date. It covers EVERY run,
 # land's immediate `--now` form proofs too (25 Nov 2026: each land under her bypass started a model-run form proof
-# while she was out of usage); POST_LAND_FORCE=1 runs one anyway. `--read-only-gate` (land's
-# model-free safety gate) is never paused: a paused gate printing nothing must never read as a pass.
+# while she was out of usage); POST_LAND_FORCE=1 runs one anyway.
 # ONE PAUSE FILE (27 Nov 2026): the same date file ai-run reads (`ai-pause <date>`), so one pause covers every
 # scheduled AI job; this script's own skip-until file is gone.
 SKIP_FILE="${POST_LAND_SKIP:-${AI_RUN_PAUSE_FILE:-$HOME/.boss-os/ai-pause-until}}"
-if [ "${POST_LAND_FORCE:-}" != 1 ] && [ "${1:-}" != --read-only-gate ] && [ -r "$SKIP_FILE" ]; then
+if [ "${POST_LAND_FORCE:-}" != 1 ] && [ -r "$SKIP_FILE" ]; then
   skip_until="$(tr -d '[:space:]' < "$SKIP_FILE")"
   if [[ "$skip_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && [[ "$(date +%Y-%m-%d)" < "$skip_until" ]]; then
     msg="post-land-check: PAUSED by the owner until $skip_until ($SKIP_FILE); no check ran, every DUE line stays DUE"
@@ -78,415 +78,20 @@ if [ "${POST_LAND_FORCE:-}" != 1 ] && [ "${1:-}" != --read-only-gate ] && [ -r "
     exit 0
   fi
 fi
-# THE CHECK ONLY READS (the re-review's F1, 24 Nov 2026). An Outcome check runs every night with her gh and wrangler
-# logins and no one watching, and the sandbox below stops only FILE writes: a POST, a `gh api -f`, a D1 DELETE goes
-# straight out over the network. So every check passes this gate first: `land` calls it on the PR's check before it
-# writes the DUE line (`post-land-check --read-only-gate '<cmd>'`, this one function, never a copy), and the nightly
-# run calls it again just before it runs each check (a hand-edited line of the list is covered too). An allowlist by tool;
-# everything else is refused by name. Every part of the command is checked: each pipeline stage, each `;` `&&` `||`
-# segment and each $(...), `...` and <(...) body.
-#   curl            no -d/--data*/-F/--form*/-T/--upload-file/--json/-K/--config/-Q; -X/--request only GET or HEAD;
-#                   http(s) addresses only
-#   gh api          GET only (-X/--method GET); -f/-F/--field/--raw-field only on `gh api graphql` whose query has no
-#                   `mutation`; --input and @file fields refused (the gate cannot see them)
-#   gh <group>      only list|view|status|search|diff|checks (`gh search …` and `gh status` are reads); built-in groups only
-#   wrangler        (or npx wrangler) only `d1 execute <db> --command '<one SELECT or WITH>'` (no write word in it, no
-#                   --file), `kv key get|list`, `r2 object get`
-#   text tools      grep, jq, wc, head, tail, cut, tr, cat, echo, printf, date, ls, test, cd …; sed without -i/-f/w/e,
-#                   awk without system/|, sort without -o, uniq without an output file, find without -exec/-delete
-#   repo scripts    only those on READ_ONLY_SCRIPTS below, with the argument named there
-# Refused anywhere: a variable set before a command, a command or flag built from an expansion, a redirect to any file
-# but /dev/null, a heredoc, loops and if-blocks, eval/bash/xargs/python and every tool not named here.
-# rc 0: it only reads. rc 1: one plain line naming the part refused and why.
-readonly_gate() { # $1 a check command
-  python3 - "$1" <<'PY'
-import os, re, sys
-
-class Refuse(Exception):
-    pass
-
-EXP = "\x00"   # stands in for an expansion's (unknown) text
-
-class Word:
-    def __init__(self):
-        self.text = ""; self.quoted = False; self.exp = False; self.bare_exp = False; self.lead_exp = None
-    def lit(self, c):
-        if self.lead_exp is None: self.lead_exp = False
-        self.text += c
-    def expn(self, in_dq):
-        if self.lead_exp is None: self.lead_exp = True
-        self.exp = True; self.bare_exp = self.bare_exp or not in_dq; self.text += EXP
-
-def close_paren(s, i):  # s[i] is just past "(" -> index of the matching ")" (quotes and nesting aware)
-    depth, n = 1, len(s)
-    while i < n:
-        c = s[i]
-        if c == "\\": i += 2; continue
-        if c == "'":
-            j = s.find("'", i + 1)
-            if j < 0: raise Refuse("a quote is never closed")
-            i = j + 1; continue
-        if c == '"':
-            i += 1
-            while i < n and s[i] != '"':
-                i += 2 if s[i] == "\\" else 1
-            if i >= n: raise Refuse("a quote is never closed")
-            i += 1; continue
-        if c == "(": depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0: return i
-        i += 1
-    raise Refuse("a bracket is never closed")
-
-def dollar(s, i, w, in_dq, subs):  # s[i] == "$" -> index after the expansion
-    nxt = s[i + 1] if i + 1 < len(s) else ""
-    if s.startswith("$((", i): raise Refuse("it uses $((...)) arithmetic")
-    if nxt == "(":
-        j = close_paren(s, i + 2); subs.append(s[i + 2:j]); w.expn(in_dq); return j + 1
-    if nxt == "{":
-        m = re.match(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", s[i:])
-        if not m: raise Refuse("it uses a ${...} form other than ${NAME}")
-        w.expn(in_dq); return i + len(m.group())
-    if nxt in ("'", '"') and not in_dq: raise Refuse("it uses $'...' or $\"...\" quoting")
-    m = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])", s[i:])
-    if m: w.expn(in_dq); return i + len(m.group())
-    w.lit("$"); return i + 1
-
-def lex(s, subs):
-    """Shell text -> segments: each a list of Words plus its redirections. Operators split segments;
-    $(...), `...` and <(...) bodies go to subs, each checked as a whole command of its own."""
-    segs, cur, redirs, w, i, n = [], [], [], None, 0, len(s)
-    def end_word():
-        nonlocal w
-        if w is not None: cur.append(w); w = None
-    def end_seg():
-        nonlocal cur, redirs
-        end_word(); segs.append((cur, redirs)); cur, redirs = [], []
-    while i < n:
-        c = s[i]
-        if c in " \t":
-            end_word(); i += 1; continue
-        if c == "#" and w is None:
-            j = s.find("\n", i); i = n if j < 0 else j; continue
-        if c in "<>" and s.startswith("(", i + 1):
-            j = close_paren(s, i + 2); subs.append(s[i + 2:j])
-            if w is None: w = Word()
-            w.expn(False); i = j + 1; continue
-        if c in "<>" or (c == "&" and s.startswith(">", i + 1)):
-            fd = ""
-            if w is not None and not w.quoted and not w.exp and re.fullmatch(r"\d+", w.text): fd, w = w.text, None
-            end_word()
-            m = re.match(r"&>>|&>|>>|>\||>&|>|<<<|<<-|<<|<&|<>|<", s[i:]); op = m.group(); i += len(op)
-            if op in ("<<", "<<-"): raise Refuse("it uses a heredoc (<<)")
-            if op in (">&", "<&"):
-                m2 = re.match(r"\s*(\d+|-)(?=[\s;|&)]|$)", s[i:])
-                if not m2: raise Refuse("it redirects output to a file")
-                i += len(m2.group()); continue
-            while i < n and s[i] in " \t": i += 1
-            m2 = re.match(r"[^\s;|&()<>]+", s[i:]); target = m2.group() if m2 else ""
-            i += len(target)
-            if op in ("<", "<<<"):
-                if any(ch in target for ch in "$`"): raise Refuse("it reads input from an expansion")
-                continue
-            if target != "/dev/null": raise Refuse(f"it writes to a file ({fd}{op} {target or 'nothing'}): only /dev/null is allowed")
-            continue
-        if c in "|;&\n()":
-            end_seg()
-            i += 2 if s[i:i + 2] in ("||", "&&", ";;", "|&") else 1; continue
-        if w is None: w = Word()
-        if c == "\\":
-            if i + 1 < n and s[i + 1] != "\n": w.lit(s[i + 1])
-            i += 2; continue
-        if c == "'":
-            j = s.find("'", i + 1)
-            if j < 0: raise Refuse("a quote is never closed")
-            w.quoted = True
-            for ch in s[i + 1:j]: w.lit(ch)
-            if i + 1 == j: w.lit("")
-            i = j + 1; continue
-        if c == '"':
-            w.quoted = True; i += 1
-            if i < n and s[i] == '"': w.lit("")
-            while i < n and s[i] != '"':
-                if s[i] == "\\" and i + 1 < n and s[i + 1] in '$`"\\\n':
-                    w.lit(s[i + 1]); i += 2
-                elif s[i] == "$": i = dollar(s, i, w, True, subs)
-                elif s[i] == "`":
-                    j = s.find("`", i + 1)
-                    if j < 0: raise Refuse("a backtick is never closed")
-                    subs.append(s[i + 1:j]); w.expn(True); i = j + 1
-                else: w.lit(s[i]); i += 1
-            if i >= n: raise Refuse("a quote is never closed")
-            i += 1; continue
-        if c == "$": i = dollar(s, i, w, False, subs); continue
-        if c == "`":
-            j = s.find("`", i + 1)
-            if j < 0: raise Refuse("a backtick is never closed")
-            subs.append(s[i + 1:j]); w.expn(False); i = j + 1; continue
-        w.lit(c); i += 1
-    end_seg()
-    return segs
-
-# Text tools whose every argument only shapes what is read or printed.
-FILTERS = {"grep", "egrep", "fgrep", "wc", "head", "tail", "cut", "tr", "jq", "cat", "echo", "printf", "date", "ls",
-           "test", "[", "true", "false", "exit", "basename", "dirname", "nl", "paste", "column", "comm", "seq", "expr",
-           "rev", "fold", "cd"}
-SYSTEM_DIRS = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/")
-# Repo scripts that only read, each with the argument it must start with. Add one only after reading the
-# script end to end; anything not here is refused.
-READ_ONLY_SCRIPTS = {
-    "land-after": ["--holds"],   # rc 0 and a pid while a live land holds that PR (reads a lock dir)
-}
-GH_GROUPS = {"pr", "issue", "run", "workflow", "repo", "release", "gist", "label", "secret", "variable", "cache",
-             "ruleset", "project", "org", "auth"}
-GH_READ_SUBS = {"list", "view", "status", "search", "diff", "checks"}
-WRITE_SQL = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|detach|pragma|vacuum|reindex|analyze|begin|"
-                       r"commit|rollback|savepoint|release|truncate|grant|upsert)\b|\breplace\s+into\b", re.I)
-
-def args_safe(name, words):
-    for w in words:
-        if w.exp and (w.bare_exp or w.lead_exp or w.text.startswith("-")):
-            raise Refuse(f"{name} is given an argument built from an expansion ({shown(w)}), which could become any flag")
-
-def shown(w): return w.text.replace(EXP, "$…")[:60]
-
-def check_curl(a):
-    i, urls = 0, []
-    takes = set("AbcCdDeEFHKmoPQrtTuUwxXyYz")
-    while i < len(a):
-        t = a[i]
-        if t.startswith("--"):
-            o = t.split("=", 1)[0]
-            if re.match(r"--(data|form|json|upload|mail|config|quote|post)", o): raise Refuse(f"curl {o} sends data")
-            if o == "--request":
-                if "=" in t: raise Refuse("curl --request=… is not a form curl reads")
-                v = a[i + 1] if i + 1 < len(a) else ""
-                if v.upper() not in ("GET", "HEAD"): raise Refuse(f"curl --request {v} is not GET or HEAD")
-                i += 2; continue
-            if o == "--url":
-                urls.append(a[i + 1] if i + 1 < len(a) else ""); i += 2; continue
-            i += 1; continue
-        if t.startswith("-") and len(t) > 1:
-            for k, ch in enumerate(t[1:], 1):
-                if ch in "dFT": raise Refuse(f"curl -{ch} sends data")
-                if ch in "KQ": raise Refuse(f"curl -{ch} reads its options from a file or sends server commands")
-                if ch in takes:
-                    rest = t[k + 1:]; v = rest if rest else (a[i + 1] if i + 1 < len(a) else "")
-                    if not rest: i += 1
-                    if ch == "X" and v.upper() not in ("GET", "HEAD"): raise Refuse(f"curl -X {v} is not GET or HEAD")
-                    break
-            i += 1; continue
-        urls.append(t); i += 1
-    for u in urls:
-        m = re.match(r"([A-Za-z][A-Za-z0-9+.-]*)://", u)
-        if m and m.group(1).lower() not in ("http", "https"): raise Refuse(f"curl to a {m.group(1)}:// address (only http and https are read)")
-
-def check_gh_api(a):
-    VAL = {"-X": "m", "--method": "m", "-f": "f", "-F": "f", "--field": "f", "--raw-field": "f", "--input": "i",
-           "-H": "", "--header": "", "-q": "", "--jq": "", "-t": "", "--template": "", "--hostname": "", "-p": "",
-           "--preview": "", "--cache": ""}
-    BOOL = {"--paginate", "--slurp", "-i", "--include", "--silent", "--verbose"}
-    method, fields, endpoint, i = None, [], None, 0
-    while i < len(a):
-        t = a[i]
-        if t.startswith("-"):
-            o, v = t, None
-            if t.startswith("--") and "=" in t: o, v = t.split("=", 1)
-            elif not t.startswith("--") and len(t) > 2: o, v = t[:2], t[2:]
-            if o in BOOL and v is None: i += 1; continue
-            if o not in VAL: raise Refuse(f"gh api {o} is not a flag the read-only gate knows")
-            if v is None:
-                if i + 1 >= len(a): raise Refuse(f"gh api {o} has no value")
-                v = a[i + 1]; i += 1
-            kind = VAL[o]
-            if kind == "m": method = v.upper()
-            elif kind == "f": fields.append(v)
-            elif kind == "i": raise Refuse("gh api --input sends a file the gate cannot see")
-            i += 1; continue
-        if endpoint is None: endpoint = t
-        i += 1
-    graphql = endpoint == "graphql"
-    if fields and not graphql: raise Refuse(f"gh api {endpoint} with -f/-F fields sends a write (fields are only for a graphql query)")
-    if graphql:
-        if method not in (None, "POST", "GET"): raise Refuse(f"gh api graphql -X {method}")
-        q = [f for f in fields if f.split("=", 1)[0] == "query"]
-        if not q: raise Refuse("gh api graphql has no query the gate can read")
-        for f in fields:
-            if "=" in f and f.split("=", 1)[1].startswith("@"): raise Refuse("gh api graphql reads a field from a file the gate cannot see")
-            if re.search(r"\bmutation\b", f, re.I): raise Refuse("gh api graphql runs a mutation")
-        return
-    if method not in (None, "GET"): raise Refuse(f"gh api -X {method} is not GET")
-
-def check_gh(a):
-    if not a: raise Refuse("gh with no command")
-    g = a[0]
-    if g == "api": return check_gh_api(a[1:])
-    if g in ("search", "status"): return
-    if g not in GH_GROUPS: raise Refuse(f"gh {g} is not a gh command the read-only gate knows")
-    sub = next((t for t in a[1:] if not t.startswith("-")), "")
-    if sub not in GH_READ_SUBS: raise Refuse(f"gh {g} {sub or '(none)'} is not list, view, status, search, diff or checks")
-
-def check_sql(q):
-    s = re.sub(r"--[^\n]*|/\*.*?\*/", " ", q, flags=re.S)
-    s = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`[^`]*`|\[[^\]]*\]", "''", s)
-    stmts = [x for x in s.split(";") if x.strip()]
-    if len(stmts) != 1: raise Refuse(f"the D1 command has {len(stmts)} statements (one SELECT or WITH only)")
-    if not re.match(r"\s*(select|with)\b", stmts[0], re.I): raise Refuse("the D1 command does not start with SELECT or WITH")
-    m = WRITE_SQL.search(stmts[0])
-    if m: raise Refuse(f"the D1 command contains {m.group().upper()}")
-
-def check_wrangler(a):
-    VALS = {"--config", "-c", "--env", "-e", "--command", "--file", "--binding", "--namespace-id", "--persist-to",
-            "--prefix", "--jurisdiction", "--cwd"}
-    BOOLS = {"--remote", "--local", "--json", "--yes", "-y", "--preview", "--text", "--pipe"}
-    pos, opts, i = [], {}, 0
-    while i < len(a):
-        t = a[i]
-        if t.startswith("-"):
-            o, v = (t.split("=", 1) + [None])[:2] if t.startswith("--") else (t, None)
-            if o in BOOLS and v is None: i += 1; continue
-            if o not in VALS: raise Refuse(f"wrangler {o} is not a flag the read-only gate knows")
-            if v is None:
-                if i + 1 >= len(a): raise Refuse(f"wrangler {o} has no value")
-                v = a[i + 1]; i += 1
-            opts.setdefault(o, []).append(v); i += 1; continue
-        pos.append(t); i += 1
-    p = [x for x in pos]
-    if p[:1] == ["kv:key"]: p = ["kv", "key"] + p[1:]
-    if p[:2] == ["d1", "execute"] and len(p) == 3:
-        if "--file" in opts: raise Refuse("wrangler d1 execute --file runs SQL the gate cannot see")
-        cmds = opts.get("--command", [])
-        if len(cmds) != 1: raise Refuse("wrangler d1 execute needs exactly one --command")
-        return check_sql(cmds[0])
-    if p[:3] in (["kv", "key", "get"], ["kv", "key", "list"]) or p[:3] == ["r2", "object", "get"]:
-        return
-    raise Refuse(f"wrangler {' '.join(p[:3]) or '(nothing)'} is not d1 execute SELECT, kv key get/list or r2 object get")
-
-def check_sed(a):
-    scripts, i, have_e = [], 0, False
-    while i < len(a):
-        t = a[i]
-        if t.startswith("--"):
-            if t.startswith(("--in-place", "--file")): raise Refuse(f"sed {t.split('=')[0]}")
-            if t.startswith("--expression"):
-                if "=" in t: scripts.append(t.split("=", 1)[1])
-                else: scripts.append(a[i + 1] if i + 1 < len(a) else ""); i += 1
-                have_e = True
-            i += 1; continue
-        if t.startswith("-") and len(t) > 1:
-            for k, ch in enumerate(t[1:], 1):
-                if ch in "if": raise Refuse(f"sed -{ch} edits a file in place or reads its script from one")
-                if ch in "el":
-                    rest = t[k + 1:]; v = rest if rest else (a[i + 1] if i + 1 < len(a) else "")
-                    if not rest: i += 1
-                    if ch == "e": scripts.append(v); have_e = True
-                    break
-            i += 1; continue
-        if not have_e and not scripts: scripts.append(t)
-        i += 1
-    for sc in scripts:
-        s_cmd = re.compile(r"s(.)((?:\\.|(?!\1).)*)\1((?:\\.|(?!\1).)*)\1([^;}\n]*)")
-        rest = sc
-        for m in s_cmd.finditer(sc):
-            if re.search(r"[ewW]", m.group(4)): raise Refuse("sed s///w or s///e writes a file or runs a command")
-        rest = s_cmd.sub(";", sc)
-        if re.search(r"(^|[;{}\n])\s*(\d+|\$|/(\\.|[^/])*/)?\s*(,\s*(\d+|\$|/(\\.|[^/])*/))?\s*!?\s*[ewW]", rest):
-            raise Refuse("sed w/e writes a file or runs a command")
-
-def check_awk(a):
-    prog = None; i = 0
-    while i < len(a):
-        t = a[i]
-        if t in ("-f", "--file") or t.startswith("-f"): raise Refuse("awk -f reads its program from a file")
-        if t == "-v" or t == "-F": i += 2; continue
-        if t.startswith("-"): i += 1; continue
-        prog = t; break
-    if prog is None: raise Refuse("awk with no program")
-    if re.search(r"system|\||@", prog): raise Refuse("awk runs a command (system, | or @load): not read-only")
-
-def check_find(a):
-    for t in a:
-        if t in ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"):
-            raise Refuse(f"find {t} runs a command or changes files")
-
-def check_sort_uniq(name, a):
-    if name == "sort":
-        for t in a:
-            if t.startswith("--output") or t.startswith("--compress-program") or (re.match(r"-[^-]", t) and "o" in t):
-                raise Refuse("sort -o writes a file")
-    else:
-        pos = [t for t in a if not t.startswith("-")]
-        if len(pos) > 1: raise Refuse("uniq with an output file writes it")
-
-def check_segment(words):
-    while words and words[0].text == "!" and not words[0].quoted: words = words[1:]
-    if not words: return
-    w0 = words[0]
-    if not w0.quoted and not w0.exp and re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", w0.text):
-        raise Refuse(f"it sets a variable ({w0.text.split('=')[0]}=…), which can change what a tool does")
-    if w0.exp: raise Refuse("the command's name comes from an expansion")
-    name = w0.text
-    if not w0.quoted and name in ("if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
-                                  "function", "select", "{", "}", "[[", "]]", "time", "coproc"):
-        raise Refuse(f"shell '{name}' is not allowed in a check (one plain command, pipes, ; && ||)")
-    home = os.path.expanduser("~")
-    if name.startswith("~/"): name = home + name[1:]
-    if "/" in name:
-        base = name.rsplit("/", 1)[1]
-        if name.rsplit("/", 1)[0] + "/" in SYSTEM_DIRS: name = base
-        elif name == f"{home}/bin/{base}" and base in READ_ONLY_SCRIPTS: name = base
-        else: raise Refuse(f"{w0.text} is not a tool or script on the read-only list")
-    args = words[1:]; a = [x.text for x in args]
-    if name in FILTERS: return
-    if name in READ_ONLY_SCRIPTS:
-        need = READ_ONLY_SCRIPTS[name]
-        if a[:len(need)] != need: raise Refuse(f"{name} is read-only only as '{name} {' '.join(need)} …'")
-        return args_safe(name, args)
-    args_safe(name, args)
-    if name == "npx":
-        k = 0
-        while k < len(a) and a[k] in ("-y", "--yes"): k += 1
-        if k < len(a) and re.fullmatch(r"wrangler(@[\w.^~-]+)?", a[k]): return check_wrangler(a[k + 1:])
-        raise Refuse(f"npx {a[k] if k < len(a) else ''} is not wrangler")
-    if name == "wrangler": return check_wrangler(a)
-    if name == "curl": return check_curl(a)
-    if name == "gh": return check_gh(a)
-    if name == "sed": return check_sed(a)
-    if name in ("awk", "gawk", "mawk", "nawk"): return check_awk(a)
-    if name == "find": return check_find(a)
-    if name in ("sort", "uniq"): return check_sort_uniq(name, a)
-    raise Refuse(f"{name} is not a tool the read-only gate knows (curl GET, gh reads, wrangler reads, text filters)")
-
-def gate(cmd, depth=0):
-    if depth > 8: raise Refuse("expansions nested too deep")
-    subs = []
-    segs = lex(cmd, subs)
-    for words, _ in segs:
-        try: check_segment(words)
-        except Refuse as e:
-            raise Refuse(f"`{' '.join(shown(w) for w in words)[:100]}`: {e}")
-    for sub in subs: gate(sub, depth + 1)
-
-cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-try:
-    if not cmd.strip(): raise Refuse("there is no check command")
-    gate(cmd)
-except Refuse as e:
-    print(" ".join(str(e).split())); sys.exit(1)
-except Exception as e:   # the gate itself failed: nothing proves the check only reads
-    print(f"the read-only gate could not read the command ({type(e).__name__})"); sys.exit(1)
-sys.exit(0)
-PY
-}
+# THE CHECK HAS NO SHELL AND NO LOGINS (rebuilt 27 Nov 2026; her finish line: "runs every night with no shell, only
+# allowed read tools, and no access to her logins"). The first design handed the check to `bash -c` with her gh and
+# wrangler logins and tried to SPOT a write with a hand-built shell parser; it failed review twice. Now the check's
+# text never reaches a shell: `outcome-read` (beside this file) splits it into words itself and does each read with
+# a fixed tool that can only read (a public GET with no token, a file in the task/log folders, a text tool on stdin
+# in a no-network, no-write sandbox). Anything else is refused, never run. `land` asks the same file
+# (`outcome-read --explain`) when the PR is opened, so a check that cannot run is caught before it lands.
+OUTCOME_READ="${POST_LAND_OUTCOME_READ:-$(cd "$(dirname "$0")" && pwd)/outcome-read}"
 TASKS="${POST_LAND_TASKS:-$HOME/Work/tasks}"
 NOW_KEY=""; DRY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --now) NOW_KEY="${2:-}"; shift ;;
     --dry-run) DRY=1 ;;
-    --read-only-gate) [ $# -ge 2 ] || { echo "post-land-check: --read-only-gate needs the check command" >&2; exit 64; }
-      readonly_gate "$2"; exit $? ;;
     -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "post-land-check: unknown argument $1" >&2; exit 64 ;;
   esac
@@ -680,13 +285,13 @@ fi
 
 # 3. OUTCOME-CHECK lines (her order 24 Nov 2026: "nothing is called working until its real output is seen live").
 #    land writes: - OUTCOME-CHECK DUE <key> <sha> — task:<slug> by:<YYYY-MM-DD> expect:>=<N>|infer — outcome: <o> — check: <cmd>
-#    On or after its by-day (Central): the read-only gate passes the check or it is never run (COULDNT-CHECK); CODE runs
-#    it (file-write sandbox, 5 min), counts its output, and alone decides COULDNT-CHECK (the command failed or printed
-#    nothing; exit 1 with one bare integer is a count) and FAIL (count below the floor); a PASS is then
-#    impossible. Only a count at or over the floor goes to ONE fresh `ai-run --role brain`, which judges whether that
-#    output really is the outcome and posts `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it saw, with counts>`.
-#    Its FAIL stands; its PASS counts only with the floor met. No comment, a model outage or a usage limit is
-#    COULDNT-CHECK: the line stays DUE, the Notices line says NOT CHECKED, the exit is 1.
+#    On or after its by-day (Central): CODE runs it through outcome-read (no shell, no logins; 5 min) or it is never
+#    run (COULDNT-CHECK), counts its output, and alone decides COULDNT-CHECK (a read did not answer, or it printed
+#    nothing) and FAIL (count below the floor); a PASS is then impossible. Only a count at or over the floor goes to
+#    ONE fresh model with no tools, which judges whether that output really is the outcome; code posts its
+#    `Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what it saw, with counts>`. Its FAIL stands; its PASS counts
+#    only with the floor met. No verdict line, a model outage or a usage limit is COULDNT-CHECK: the line stays DUE,
+#    the Notices line says NOT CHECKED, the exit is 1.
 TODAY="${POST_LAND_TODAY:-$(TZ=America/Chicago date +%F)}"
 outcome_lines() { # key <TAB> sha <TAB> task <TAB> by <TAB> expect <TAB> outcome <TAB> check
   sed -nE 's/^- OUTCOME-CHECK DUE ([^ ]+#[0-9]+) ([^ ]+) — task:([^ ]*) by:([0-9]{4}-[0-9]{2}-[0-9]{2}) expect:(>=[0-9]+|infer) — outcome: (.*) — check: (.*)$/\1\t\2\t\3\t\4\t\5\t\6\t\7/p' "$DUE_FILE" \
@@ -695,34 +300,40 @@ outcome_lines() { # key <TAB> sha <TAB> task <TAB> by <TAB> expect <TAB> outcome
 days_since() { python3 -c 'import sys,datetime as d; print((d.date.fromisoformat(sys.argv[2])-d.date.fromisoformat(sys.argv[1])).days)' "$1" "$2"; }
 mask() { sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[email]/g'; }   # public comments: counts, never an address
 one_line() { tr '\n\t' '  ' | sed -E 's/\. +/; /g; s/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c1-220; }
-# The sandbox the check runs in: file reads allowed, FILE writes only to temp and tool caches. It does not stop the
-# network: a POST or a D1 write is stopped by readonly_gate before this is ever reached. No sandbox, no run.
-SANDBOX_PROFILE="(version 1)(allow default)(deny file-write*)(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (subpath \"$HOME/Library/Caches\") (subpath \"$HOME/.cache\") (subpath \"$HOME/.npm\") (subpath \"$HOME/.wrangler\") (subpath \"$HOME/Library/Preferences/.wrangler\") (subpath \"$HOME/.config/gh\") (subpath \"$HOME/.config/.wrangler\"))"
-run_check() { # $1 command -> stdout its output; rc its exit (124 timed out, 126 no sandbox)
-  if [ "${POST_LAND_SANDBOX:-on}" = off ]; then (cd "$HOME" && timeout 300 bash -c "$1" </dev/null 2>&1); return; fi
-  [ -x /usr/bin/sandbox-exec ] || { echo "no sandbox-exec on this machine: the check is not run unsandboxed"; return 126; }
-  (cd "$HOME" && timeout 300 /usr/bin/sandbox-exec -p "$SANDBOX_PROFILE" bash -c "$1" </dev/null 2>&1)
+run_check() { # $1 check -> stdout its output; rc 0 it ran · 3 refused, never run · 4 could not read · 124 timed out
+  [ -x "$OUTCOME_READ" ] || { echo "could not read: outcome-read is missing at $OUTCOME_READ, so no check is run"; return 4; }
+  timeout 300 "$OUTCOME_READ" "$1" </dev/null 2>&1
 }
 count_of() { # stdin output -> the bare integer on its last non-empty line, else its number of non-empty lines
   awk 'NF { n++; last=$0 } END { gsub(/^[ \t]+|[ \t]+$/, "", last); if (last ~ /^[0-9]+$/) print last+0; else print n+0 }'
 }
-outcome_comment() { # $1 key  $2 ISO start -> "PASS|FAIL|COULDNT<TAB>url<TAB>what it saw<TAB>Ran: line"; rc 1 none
-  local repo="${1%#*}" pr="${1##*#}" me
-  me="$(gh api user --jq .login 2>/dev/null)" || return 1
-  gh api --paginate "repos/$repo/issues/$pr/comments" 2>/dev/null \
-    | jq -rs --arg me "$me" --arg since "$2" '
-        add // [] | map(select(.user.login == $me and .created_at >= $since))
-        | map(. + {first: ((.body // "") | split("\n")[0] | gsub("^[#*> ]+"; "") | gsub("[*]+$"; ""))})
-        | map(select(.first | ascii_downcase | startswith("outcome check (live)")))
-        | last // empty
-        | (.first | ltrimstr(.[0:20]) | gsub("^[ :]+"; "")) as $r
-        | ($r | ascii_upcase) as $u
-        | (if ($u | startswith("PASS")) then "PASS" elif ($u | startswith("FAIL")) then "FAIL"
-           elif ($u | test("^COULDN.?T")) then "COULDNT" else "?" end) as $v
-        | ($r | sub("^[A-Za-z'"'"'’-]+[ ]*(—|–|-)*[ ]*"; "")) as $seen
-        | ([(.body // "") | split("\n")[] | select(test("^[ *>-]*Ran:"; "i"))][0] // "") as $ran
-        | $v + "\t" + .html_url + "\t" + ($seen | gsub("\t"; " ")) + "\t" + ($ran | gsub("\t"; " "))' \
-    | grep -E '^(PASS|FAIL|COULDNT)	' | tail -1 | grep . || return 1
+ask_model() { # $1 prompt -> stdout the model's whole answer; rc of ai-run
+  # A model with NO tools (AI_RUN_BARE=1): it reads its prompt and answers in text. No shell, no files, no
+  # connectors, none of her settings or logins. Everything it needs is in the prompt; code does every read and post.
+  local o rc; o="$(mktemp)"
+  AI_RUN_CALLER=post-land-check AI_RUN_CLAUDE_MODEL="${POST_LAND_MODEL:-sonnet}" AI_RUN_BARE=1 \
+    AI_RUN_MAX_SECS="${POST_LAND_MAX_SECS:-900}" AI_RUN_MAX_RUNS="${POST_LAND_MAX_RUNS:-200}" AI_RUN_IGNORE_PAUSE=1 \
+    "$AI_RUN" --role brain --cwd "$LOCKS" --out "$o" -- "$1" </dev/null >/dev/null 2>&1; rc=$?
+  cat "$o" >> "$LOG" 2>/dev/null; cat "$o"; rm -f "$o"; return "$rc"
+}
+answer_line() { # $1 label (e.g. "Check")  stdin the model's answer -> the text after the first "<label>:" line; rc 1 none
+  sed -nE "s/^[[:space:]#*>\`-]*$1:[[:space:]]*//p" | sed -E 's/[[:space:]*`]+$//; s/^`+//' | grep -m1 .
+}
+verdict_of() { # stdin the model's answer -> "PASS|FAIL|COULDNT<TAB>what it saw"; rc 1 no verdict line
+  sed -nE 's/^[[:space:]#*>-]*[Oo]utcome check \(live\):[[:space:]*]*//p' | head -1 | awk '
+    { u = toupper($0)
+      if (u ~ /^PASS/) v = "PASS"; else if (u ~ /^FAIL/) v = "FAIL"; else if (u ~ /^COULDN.?T/) v = "COULDNT"; else exit 1
+      sub(/^[A-Za-z\047’-]+[ *]*(—|–|-)*[ ]*/, ""); gsub(/\t/, " "); if ($0 == "") exit 1
+      print v "\t" $0; found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+pr_text() { # $1 key  $2 "diff" to add the changed files and the diff's first 20,000 characters -> the PR as text; rc 1 unread
+  local repo="${1%#*}" pr="${1##*#}" body
+  body="$(gh pr view "$pr" --repo "$repo" --json title,body --jq '.title + "\n\n" + .body' </dev/null 2>/dev/null | head -c 6000)" || return 1
+  [ -n "$body" ] || return 1
+  printf '%s\n' "$body"
+  [ "${2:-}" = diff ] || return 0
+  printf '\n--- the diff (first 20,000 characters) ---\n'; gh pr diff "$pr" --repo "$repo" </dev/null 2>/dev/null | head -c 20000
 }
 post_comment() { # $1 key  $2 body -> stdout the comment's url (rc 1 not posted)
   local f; f="$(mktemp)"; printf '%s\n' "$2" > "$f"
@@ -751,38 +362,58 @@ notice() { # $1 key  $2 text -> rc 0 written (or already written)
   fi >>"$LOG" 2>&1 || { say "  NAMED STOP [NOTICE_UNWRITTEN] the Notices line for $1 could not be written (see $LOG); the line in the list and the PR comment stand"; return 1; }
   : > "$m"
 }
-outcome_prompt() { # $1 key $2 sha $3 outcome $4 check $5 expect $6 count $7 output(path) $8 task
-  if [ "$5" = infer ]; then cat <<EOF
-You are a FRESH, independent checker (~/.claude/agents/reviewer.md). You did not build PR $1 (merge $2). It landed under her
-bypass with no Outcome declared. Her order (24 Nov 2026): nothing is called working until its real output is seen live.
-1. Read the PR (gh pr view ${1##*#} --repo ${1%#*}; gh pr diff ${1##*#} --repo ${1%#*}) and its task sheet ~/Work/tasks/$8.md
-   if one exists. Decide what real output it should have produced by now (rows, emails, posts, pages, log lines).
-2. Run ONE read-only command that counts that output on the live system (never write, send, post, deploy or delete).
-3. Post ONE comment (gh pr comment ${1##*#} --repo ${1%#*} --body-file <file>) whose FIRST line is exactly
-     Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what you saw, with counts, one sentence>
-   and whose SECOND line is
-     Ran: <the exact command you ran>
-   COULDNT-CHECK when you could not read the live system. Never PASS on a guess.
-Every repo is public: counts only, never names, LP names, deal terms, children's names, owner emails or secrets.
+READ_TOOLS='A check is ONE read and its pipes. No shell runs it, so no variables, no $(…), no ; && ||, no redirects.
+  first, one of:  gh api <path> [--jq <filter>]      a GET of the public GitHub API, with no sign-in (every repo is public)
+                  curl -fsS[L] [-A <agent>] <https url>      a GET of a public page
+                  curl -s -o /dev/null -w '"'"'%{http_code}'"'"' <https url>      a public page'"'"'s status code
+                  cat|grep|wc|head|tail <file>, ls <folder>      only under ~/Work/tasks, ~/Library/Logs, ~/bin, ~/HANDOFF.md
+  then, after each |:  grep (-c -E -F -i -v -o -w -x), jq (-r -c -s), wc, head, tail, sort, uniq, cut, tr
+Nothing behind a sign-in can be read: no D1 or database query, no admin page, no private API, no script.'
+infer_prompt() { # $1 key $2 sha $3 the PR as text (with diff) $4 task sheet text
+  cat <<EOF
+PR $1 (merge $2) landed under the owner's bypass with no Outcome declared. Her order (24 Nov 2026): nothing is called
+working until its real output is seen live. You have no tools: answer in text only. Read the PR below and decide what
+real output it should have produced on the live system by now (a page, a post, a file in a repo, a scheduled run, a
+log line), then write ONE check that counts that output. Code will run your check; you will not.
+
+$READ_TOOLS
+
+Answer with exactly these three lines and nothing else:
+Outcome: <the real output, one sentence>
+Check: <the check>
+Expect: >= <the smallest count that means it is really happening, at least 1>
+If no check built from those tools can see this PR's output, answer instead with the one line:
+Check: none — <why, in plain words, one sentence>
+Never count a test run, a merged PR or green CI as the outcome. Every repo is public: no names, emails or secrets.
+
+--- the PR ---
+$3
+--- its task sheet ---
+${4:-(none)}
 EOF
-  else cat <<EOF
-You are a FRESH, independent checker (~/.claude/agents/reviewer.md). You did not build PR $1 (merge $2).
+}
+outcome_prompt() { # $1 key $2 sha $3 outcome $4 check $5 expect $6 count $7 output(path) $8 the PR as text $9 task sheet text
+  cat <<EOF
+You are a FRESH, independent checker. You did not build PR $1 (merge $2). You have no tools: answer in text only.
 Her order (24 Nov 2026): nothing is called working until its real output is seen live. The PR promised:
   Outcome: $3
   check: $4   (must count >= ${5#>=})
-post-land-check ran that check itself just now (it passed the read-only gate). It counted $6. Its output (the first 80 lines):
+Code ran that check just now, with no shell and no sign-in. It counted $6. Its output (the first 80 lines):
 ----
-$(head -80 "$7")
+$(head -80 "$7" | cut -c1-600)
 ----
 Judge the MEANING: does this output show the promised outcome really happening (not a header row, an error message, a
-test fixture or the old behaviour counted as the new)? Read the PR (gh pr view ${1##*#} --repo ${1%#*}) and its task sheet
-~/Work/tasks/$8.md if one exists; you may run your own read-only commands. Never write, send, post, deploy or delete.
-Post ONE comment (gh pr comment ${1##*#} --repo ${1%#*} --body-file <file>) whose FIRST line is exactly
-  Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what you saw, with counts, one sentence>
-then the evidence. Every repo is public: counts only, never names, LP names, deal terms, children's names, owner emails or
-secrets in the comment.
+test fixture or the old behaviour counted as the new)? If the output cannot tell you, say COULDNT-CHECK; never PASS on
+a guess. Your FIRST line must be exactly
+  Outcome check (live): PASS|FAIL|COULDNT-CHECK — <what the output shows, with counts, one sentence>
+then up to five lines of evidence. Every repo is public: counts only, never names, LP names, deal terms, children's
+names, owner emails or secrets.
+
+--- the PR ---
+${8:-(its text could not be read)}
+--- its task sheet ---
+${9:-(none)}
 EOF
-  fi
 }
 
 oruns=0; ofails=0; ounproved=0
@@ -800,47 +431,69 @@ while IFS=$'\t' read -r key sha task by expect outc cmd; do
     ounproved=$((ounproved + 1)); say "outcome: $key already tried today and still NOT CHECKED; no second comment"; continue
   fi
   say "outcome: $key ($outc; check: $cmd; expect $expect; by $by)"
-  verdict=""; seen=""; url=""; outf="$(mktemp)"
-  if [ "$expect" = infer ]; then n=""
-  elif ! why="$(readonly_gate "$cmd")"; then   # never run: it could change something (F1). Code's own verdict.
-    printf '=== outcome check %s: NOT RUN, not read-only: %s (%s)\n' "$key" "$cmd" "$why" >> "$LOG"
-    if [ -n "$DRY" ]; then say "[dry-run] the check would not be run: $why"; rm -f "$outf"; continue; fi
-    verdict=COULDNT; seen="the check was not run, because it could change something instead of only reading"
-    url="$(post_comment "$key" "Outcome check (live): COULDNT-CHECK — $seen
-Refused by post-land-check's read-only gate: $(printf '%s' "$why" | mask)
-Outcome: $(printf '%s' "$outc" | mask)
-Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), on $TODAY; decided by code, never run, no model.")" || url="(comment not posted)"
-  else
+  verdict=""; seen=""; url=""; outf="$(mktemp)"; ranline=""
+  sheet_text=""; [ -n "$task" ] && [ -r "$TASKS/$task.md" ] && sheet_text="$(head -40 "$TASKS/$task.md")"
+  if [ "$expect" = infer ]; then   # her bypass: no Outcome was declared, so a model with no tools writes the check; code runs it
+    if [ -n "$DRY" ]; then say "[dry-run] would ask the model to write a check for $key"; rm -f "$outf"; continue; fi
+    if ! prt="$(pr_text "$key" diff)"; then verdict=COULDNT; seen="the PR could not be read from GitHub"
+    else
+      ians="$(ask_model "$(infer_prompt "$key" "$sha" "$prt" "$sheet_text")")"
+      icmd="$(printf '%s\n' "$ians" | answer_line Check)" || icmd=""
+      ifloor="$(printf '%s\n' "$ians" | answer_line Expect | grep -oE '[0-9]+' | head -1)"
+      if [ -z "$icmd" ]; then verdict=COULDNT; seen="the checker gave no check (it was down, out of its usage limit, or answered nothing)"
+      elif printf '%s' "$icmd" | grep -qiE '^none\b'; then
+        verdict=COULDNT; seen="no check can see its output without a sign-in: $(printf '%s' "$icmd" | sed -E 's/^[Nn]one[[:space:]]*(—|–|-)*[[:space:]]*//')"
+      elif [ -z "$ifloor" ] || [ "$ifloor" -lt 1 ]; then verdict=COULDNT; seen="the checker gave no count to expect, so nothing it saw is proven"
+      else
+        cmd="$icmd"; expect=">=$ifloor"; ranline="Ran: \`$(printf '%s' "$cmd" | mask)\`"
+        io="$(printf '%s\n' "$ians" | answer_line Outcome)" && outc="$io" && shortout="$(printf '%s' "$outc" | one_line | cut -c1-90)"
+      fi
+    fi
+    if [ -n "$verdict" ]; then
+      url="$(post_comment "$key" "Outcome check (live): COULDNT-CHECK — $(printf '%s' "$seen" | mask | one_line)
+No Outcome was declared (owner bypass); post-land-check on $TODAY asked a model with no tools to write a check. Decided by code.")" || url="(comment not posted)"
+    fi
+  fi
+  if [ -z "$verdict" ]; then
     run_check "$cmd" > "$outf"; crc=$?
     printf '=== outcome check %s: %s (exit %s)\n' "$key" "$cmd" "$crc" >> "$LOG"; head -200 "$outf" >> "$LOG"   # raw output: the local log only
     n="$(count_of < "$outf")"; lines_out="$(grep -c . "$outf")"
-    if [ -n "$DRY" ]; then say "[dry-run] the check printed $n (exit $crc)"; rm -f "$outf"; continue; fi
-    # A count that exits 1 is still a reading (N1): `grep -c` prints 0 and exits 1 when nothing matches, which is
-    # the Noelle case (0 done) and must be NOT WORKING, not NOT CHECKED. Only exit 1 with exactly one bare integer line.
-    reading=""; [ "$crc" -eq 1 ] && [ "$lines_out" -eq 1 ] && grep -qE '^[[:space:]]*[0-9]+[[:space:]]*$' "$outf" && reading=1
-    if { [ "$crc" -ne 0 ] && [ -z "$reading" ]; } || [ "$lines_out" -eq 0 ]; then   # failed or silent: unknown. A printed 0 is a reading (below).
-      verdict=COULDNT; seen="the check failed to run"   # plain words: her Notices line carries no exit codes (N6)
+    if [ -n "$DRY" ]; then
+      if [ "$crc" -eq 3 ]; then say "[dry-run] the check would not be run: $(head -1 "$outf")"; else say "[dry-run] the check printed $n (exit $crc)"; fi
+      rm -f "$outf"; continue
+    fi
+    why=""
+    if [ "$crc" -eq 3 ]; then   # refused: outside the allowed read tools. Nothing was read. Code's own verdict.
+      verdict=COULDNT; seen="the check was not run, because it needs something outside the allowed read tools"
+      why="Refused by outcome-read: $(head -1 "$outf" | mask)"
+    elif [ "$crc" -ne 0 ] || [ "$lines_out" -eq 0 ]; then   # could not read, or silent: unknown, never a count. A printed 0 is a reading (below).
+      verdict=COULDNT; seen="the check could not read the live system"   # plain words: her Notices line carries no exit codes (N6)
       [ "$crc" -eq 124 ] && seen="the check took longer than 5 minutes and was stopped"
-      [ "$crc" -eq 126 ] && seen="the check could not be run safely on this Mac"
       [ "$crc" -eq 0 ] && seen="the check printed nothing"
+      [ "$crc" -eq 4 ] && why="outcome-read: $(head -1 "$outf" | mask | cut -c1-200)"
     elif [ "$n" -lt "${expect#>=}" ]; then
       verdict=FAIL; seen="saw $n, needed at least ${expect#>=}"
     fi
     if [ -n "$verdict" ]; then   # code's own verdict: no model run, no PASS possible
       url="$(post_comment "$key" "Outcome check (live): $([ "$verdict" = COULDNT ] && echo COULDNT-CHECK || echo FAIL) — $seen
-Outcome: $(printf '%s' "$outc" | mask)
-Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), run by post-land-check on $TODAY; decided by code, no model.")" || url="(comment not posted)"
+${why:+$why
+}Outcome: $(printf '%s' "$outc" | mask)
+Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), on $TODAY; no shell, no sign-in; decided by code, no model.")" || url="(comment not posted)"
     fi
   fi
-  if [ -z "$verdict" ]; then
-    start="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    run_ai "outcome $key" "$(outcome_prompt "$key" "$sha" "$outc" "$cmd" "$expect" "${n:-?}" "$outf" "$task")"; arc=$?
-    if v="$(outcome_comment "$key" "$start")"; then
-      IFS=$'\t' read -r verdict url seen ranline <<<"$v"
-      if [ "$expect" = infer ] && [ -z "$ranline" ]; then verdict=COULDNT; seen="the checker did not say what it ran, so nothing it saw is proven"; fi
+  if [ -z "$verdict" ]; then   # the floor is met: ONE model with no tools judges what the output means; code posts its verdict
+    ans="$(ask_model "$(outcome_prompt "$key" "$sha" "$outc" "$cmd" "$expect" "$n" "$outf" "$(pr_text "$key")" "$sheet_text")")"; arc=$?
+    if v="$(printf '%s\n' "$ans" | verdict_of)"; then
+      IFS=$'\t' read -r verdict seen <<<"$v"
+      seen="$(printf '%s' "$seen" | mask | one_line)"
+      url="$(post_comment "$key" "Outcome check (live): $([ "$verdict" = COULDNT ] && echo COULDNT-CHECK || echo "$verdict") — $seen
+${ranline:+$ranline
+}Outcome: $(printf '%s' "$outc" | mask)
+Check: \`$(printf '%s' "$cmd" | mask)\` (expect ${expect}), run by post-land-check on $TODAY with no shell and no sign-in; it counted $n.
+Judged by a model with no tools, from that output alone.")" || { url="(comment not posted)"; [ "$verdict" = COULDNT ] || { verdict=COULDNT; seen="the verdict could not be posted to the PR"; }; }
     else
-      printf '=== outcome check %s: no verdict comment (ai-run exit %s)\n' "$key" "$arc" >> "$LOG"
-      verdict=COULDNT; seen="the checker gave no verdict (it was down, out of its usage limit, or posted nothing)"; url="(no comment)"
+      printf '=== outcome check %s: no verdict line (ai-run exit %s)\n' "$key" "$arc" >> "$LOG"
+      verdict=COULDNT; seen="the checker gave no verdict (it was down, out of its usage limit, or answered nothing)"; url="(no comment)"
     fi
   fi
   rm -f "$outf"

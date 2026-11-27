@@ -53,6 +53,9 @@
 #   AI_RUN_LOG             usage log (default ~/Library/Logs/ai-run.log).
 #   AI_RUN_MCP=none        Claude starts with NO connectors or MCP servers (a checker that only reads a diff or a
 #                          command's output needs none; each one loaded is start-up tokens paid on every run).
+#   AI_RUN_BARE=1          Claude answers from its prompt alone: NO tools (no shell, no file reads), no connectors
+#                          and none of her settings, hooks or rules files. For a judge that is handed everything it
+#                          needs in the prompt (post-land-check's outcome check). AI_RUN_CLAUDE_ARGS is ignored.
 #   AI_RUN_MAX_SECS        Claude runs only: wall-clock cap in seconds (default 3600; 0 = none). At the cap the run is
 #                          stopped: exit 124 and NAMED STOP [TIME_CAP]. Codex runs have no cap here (her ChatGPT plan).
 #   AI_RUN_MAX_RUNS        Claude runs only: most runs one caller may make in a day (default 100; 0 = none), counted
@@ -307,6 +310,11 @@ else
   else
     EXTRA=(--dangerously-skip-permissions)
   fi
+  case "${AI_RUN_BARE:-}" in
+    "") ;;
+    1) EXTRA=(--tools "" --setting-sources ""); AI_RUN_MCP=none ;;
+    *) echo "ai-run: AI_RUN_BARE must be unset or 1 (got '$AI_RUN_BARE')" >&2; exit 64 ;;
+  esac
   CMD=("$CLAUDE" -p --model "${AI_RUN_CLAUDE_MODEL:-opus}" ${EXTRA[@]+"${EXTRA[@]}"})
   case "${AI_RUN_MCP:-}" in
     "") ;;

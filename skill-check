@@ -1,0 +1,269 @@
+#!/usr/bin/env node
+// skill-check — each week, proves the right skill loads for real asks (her item 3, 27 Nov 2026: "test whether
+// each skill actually fires and helps").
+//
+//   skill-check                  run every ask in skill-check-asks.json, write the week's report
+//   skill-check --only a,b       run only these skills' asks (the re-run after a description fix): <date>-only.md
+//   skill-check --rank           print the 20 most-loaded skills in ~/.claude/skills; no model runs
+//
+// HOW. CODE ranks the skills by counting Skill tool calls in the session transcripts (~/.claude/projects), keeps the
+// 20 most-loaded ones that are still in ~/.claude/skills, and names any of them with no asks as NOT COVERED. Each
+// ask goes through the ONE runner (`ai-run --role brain`) as a fresh `claude -p` on her plan, with her real skill
+// listing and rules but ONLY the Skill tool (`--tools Skill`: nothing else can run, so "update the handoff" writes
+// nothing), no connectors (AI_RUN_MCP=none), two turns at most, no saved session (so test runs never count as
+// usage next week), and never the API key (AI_RUN_NO_CREDIT=1: no money). CODE reads the event stream and records
+// every skill that loaded. An ask that must load a skill is right when ANY name in its "expect" loaded (two skills
+// that both fit are both listed; both loading is fine); an ask that must not load a skill is right when it did not.
+//
+// RULE 0. The day's report is deleted before the run. 0 asks checked is never a pass: the report says FAIL and the
+// exit is 2 (no asks) or 75 (none could be checked). A usage limit, the pause, a sign-in error, a runner that is
+// missing or gives no answer is COULDNT-CHECK for that ask, never PASS; a limit or pause stops the run at once (the
+// rest are COULDNT-CHECK, not run) so it never spends the plan into a wall. The report ends with
+// SKILL-CHECK-COMPLETE only when every ask was checked.
+//
+// FAILURE PATH. Any wrong, not-covered or unchecked ask files (or comments on) ONE GitHub issue on seq23/seq-bin
+// titled "skill-check <date>: …", carrying skill names and counts only (the repo is public), so GitHub emails her.
+// The job never edits a skill itself (her 25 Nov 2026 rejection of automatic rule and skill edits stands).
+//
+// Exit: 0 every ask right · 1 wrong or not-covered asks, listed · 2 nothing to run (asks file missing, empty or
+//   malformed; no skills dir) · 64 usage · 75 one or more asks could not be checked.
+// Scheduled by launchd/com.seq.skill-check.plist: Sunday 23:00 Central.
+// Env (tests): SKILL_CHECK_ASKS, SKILL_CHECK_OUT, SKILL_CHECK_AI_RUN, SKILL_CHECK_PROJECTS, SKILL_CHECK_SKILLS,
+//   SKILL_CHECK_GH, SKILL_CHECK_NOW (ISO time), SKILL_CHECK_CWD.
+"use strict";
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+
+const HOME = os.homedir();
+const HERE = __dirname;
+const ASKS = process.env.SKILL_CHECK_ASKS || path.join(HERE, "skill-check-asks.json");
+const OUT = process.env.SKILL_CHECK_OUT || path.join(HOME, "Work/tasks/logs/skill-check");
+const AI_RUN = process.env.SKILL_CHECK_AI_RUN || path.join(HOME, "bin/ai-run");
+const PROJECTS = process.env.SKILL_CHECK_PROJECTS || path.join(HOME, ".claude/projects");
+const SKILLS = process.env.SKILL_CHECK_SKILLS || path.join(HOME, ".claude/skills");
+const GH = process.env.SKILL_CHECK_GH || "gh";
+const CWD = process.env.SKILL_CHECK_CWD || HOME;
+const REPO = "seq23/seq-bin";
+const TOP_N = 20;
+const CLAUDE_ARGS = "--tools Skill --max-turns 2 --output-format stream-json --verbose --no-session-persistence";
+// Her clock: the report is named by the Central date (23:00 Sunday Central is already Monday on an Eastern Mac).
+const now = process.env.SKILL_CHECK_NOW ? new Date(process.env.SKILL_CHECK_NOW) : new Date();
+const DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+
+class Stop extends Error { constructor(code, reason, msg) { super(`NAMED STOP [${reason}] ${msg}`); this.code = code; } }
+
+// ---------- usage ----------
+const argv = process.argv.slice(2);
+let only = null, rankOnly = false;
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === "--rank") rankOnly = true;
+  else if (argv[i] === "--only" && argv[i + 1]) only = new Set(argv[++i].split(",").map((s) => s.trim()).filter(Boolean));
+  else { console.error("usage: skill-check [--only skill,skill] | --rank"); process.exit(64); }
+}
+
+// ---------- ranking: Skill tool calls in the transcripts ----------
+function installedSkills(dir) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch (e) { throw new Stop(2, "NO_SKILLS_DIR", `${dir} cannot be read (${e.code}); nothing to check.`); }
+  return new Set(names.filter((n) => fs.existsSync(path.join(dir, n, "SKILL.md"))));
+}
+function rank(installed) {
+  const r = spawnSync("grep", ["-rhoE", "--include=*.jsonl", '"name":"Skill","input":\\{"skill":"[^"]+"', PROJECTS],
+    { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (r.status === 2 || r.error) return { error: `the transcripts under ${PROJECTS} could not be read (${r.error?.code || (r.stderr || "").trim().slice(0, 120)})` };
+  const counts = new Map();
+  for (const m of (r.stdout || "").matchAll(/"skill":"([^"]+)"/g)) {
+    if (installed.has(m[1])) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+  }
+  if (counts.size === 0) return { error: `no Skill tool call for an installed skill was found under ${PROJECTS}` };
+  const top = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, TOP_N);
+  return { top };
+}
+
+// ---------- asks ----------
+function loadAsks() {
+  let j;
+  try { j = JSON.parse(fs.readFileSync(ASKS, "utf8")); } catch (e) { throw new Stop(2, "ASKS_UNREADABLE", `${ASKS}: ${e.message}. Nothing was checked.`); }
+  const skills = j && typeof j.skills === "object" ? j.skills : null;
+  if (!skills) throw new Stop(2, "ASKS_INVALID", `${ASKS} has no "skills" object. Nothing was checked.`);
+  const list = [];
+  for (const [skill, e] of Object.entries(skills)) {
+    const asks = Array.isArray(e?.asks) ? e.asks : [];
+    const bad = asks.length < 3 || asks.some((a) => typeof a?.ask !== "string" || !a.ask.trim() || !Array.isArray(a.expect) || !a.expect.includes(skill))
+      || typeof e.not !== "string" || !e.not.trim();
+    if (bad) throw new Stop(2, "ASKS_INVALID", `${ASKS}: "${skill}" needs 3+ asks whose "expect" includes "${skill}", and one "not" ask. Nothing was checked.`);
+    for (const a of asks) list.push({ skill, kind: "load", ask: a.ask.trim(), expect: a.expect });
+    list.push({ skill, kind: "not", ask: e.not.trim(), expect: [] });
+  }
+  return list;
+}
+
+// ---------- one ask ----------
+const LIMIT_RE = /(hit|reached) your ([a-z0-9-]+ ){0,2}limit|usage limit|(5-hour|weekly|session|daily|opus) limit/i;
+const AUTH_RE = /not logged in|please run \/login|invalid api key|authentication_error|unauthori[sz]ed|oauth token (has )?expired/i;
+// Stops that end the whole run: every later ask would hit the same wall.
+const WALL = new Set(["LIMIT", "PAUSED", "SIGNED_OUT", "RUN_CAP", "NO_RUNNER"]);
+
+// The event stream of one `claude -p --output-format stream-json` run -> what loaded and how the run ended.
+// `plain` is everything that is not an ordinary event: stray text, the result text of a failed run, and the
+// synthetic assistant message Claude Code writes for a usage-limit or sign-in notice.
+function readStream(text) {
+  const loaded = new Set(), plain = []; let listing = null, real = 0, result = null, rejected = false, cost = 0, tokIn = 0, tokOut = 0;
+  for (const raw of String(text).split("\n")) {
+    const line = raw.trim(); if (!line) continue;
+    let d = null; if (line.startsWith("{")) { try { d = JSON.parse(line); } catch { d = null; } }
+    if (!d) { plain.push(line); continue; }
+    if (d.type === "system" && d.subtype === "init" && Array.isArray(d.skills)) listing = new Set(d.skills.map(String));
+    else if (d.type === "assistant") {
+      const synthetic = d.message?.model === "<synthetic>";
+      if (!synthetic) real++;
+      for (const b of d.message?.content || []) {
+        if (synthetic && b?.type === "text") plain.push(String(b.text));
+        if (b?.type === "tool_use" && b.name === "Skill" && b.input?.skill) loaded.add(String(b.input.skill));
+      }
+    } else if (d.type === "rate_limit_event" && d.rate_limit_info?.status === "rejected") rejected = true;
+    else if (d.type === "result") {
+      result = d; cost += Number(d.total_cost_usd) || 0;
+      tokIn += (d.usage?.input_tokens || 0) + (d.usage?.cache_read_input_tokens || 0) + (d.usage?.cache_creation_input_tokens || 0);
+      tokOut += d.usage?.output_tokens || 0;
+      if (d.is_error && typeof d.result === "string") plain.push(d.result);
+    }
+  }
+  const finished = !!result && (!result.is_error || result.subtype === "error_max_turns");
+  return { loaded, listing, real, finished, rejected, cost, tokIn, tokOut, plain: plain.join("\n") };
+}
+
+// One ask's verdict. Anything short of a finished run that said which skills loaded is COULDNT-CHECK, never PASS.
+function judge(item, run) { // run: { rc, stdout, stderr, error }
+  const s = readStream(run.stdout || "");
+  const plain = `${s.plain}\n${run.stderr || ""}`;
+  const named = plain.match(/NAMED STOP \[([A-Z_]+)\]/)?.[1];
+  const none = s.loaded.size === 0;
+  let unsure = null;
+  if (run.error) unsure = run.error.code === "ENOENT" ? ["NO_RUNNER", `the runner ${AI_RUN} is missing`] : ["NO_ANSWER", `the runner did not finish (${run.error.code || run.error.message})`];
+  else if (named === "PAUSED") unsure = ["PAUSED", "ai-pause is on"];
+  else if (named === "RUN_CAP") unsure = ["RUN_CAP", "ai-run's runs-a-day cap was reached"];
+  else if (named === "CLAUDE_LIMIT" || s.rejected || (none && LIMIT_RE.test(plain))) unsure = ["LIMIT", "her plan's usage limit was reached"];
+  else if (none && AUTH_RE.test(plain)) unsure = ["SIGNED_OUT", "claude is not signed in (run: claude, then /login)"];
+  else if (none && named) unsure = [named, `ai-run stopped: ${named}`];
+  else if (s.real === 0 || (none && !s.finished)) unsure = ["NO_ANSWER", `no finished answer came back (exit ${run.rc})`];
+  const loaded = [...s.loaded].sort();
+  const base = { ...item, loaded, cost: s.cost, tokIn: s.tokIn, tokOut: s.tokOut };
+  if (unsure) return { ...base, verdict: "COULDNT-CHECK", stop: unsure[0], why: unsure[1] };
+  if (item.kind === "load") {
+    if (s.listing && !s.listing.has(item.skill)) return { ...base, verdict: "FAIL", why: `${item.skill} is not in the skill listing Claude was given` };
+    const hit = item.expect.some((e) => s.loaded.has(e));
+    return { ...base, verdict: hit ? "PASS" : "FAIL", why: hit ? "" : `expected ${item.expect.join(" or ")}` };
+  }
+  const bad = s.loaded.has(item.skill);
+  return { ...base, verdict: bad ? "FAIL" : "PASS", why: bad ? `${item.skill} loaded for an ask it does not cover` : "" };
+}
+
+function runOne(item, maxRuns) {
+  const env = { ...process.env, AI_RUN_CALLER: "skill-check", AI_RUN_NO_CREDIT: "1", AI_RUN_MCP: "none",
+    AI_RUN_MAX_SECS: "240", AI_RUN_MAX_RUNS: String(maxRuns), AI_RUN_CLAUDE_ARGS: CLAUDE_ARGS };
+  delete env.AI_RUN_BARE; delete env.ANTHROPIC_API_KEY; delete env.AI_RUN_WORKER;
+  const r = spawnSync(AI_RUN, ["--role", "brain", "--", item.ask], { cwd: CWD, env, encoding: "utf8", timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
+  return { rc: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error };
+}
+
+// ---------- report ----------
+const q = (s) => `"${s.replace(/"/g, "'")}"`;
+function line(r) {
+  const what = r.kind === "load" ? "should load" : "must not load";
+  const got = r.verdict === "COULDNT-CHECK" ? r.why : `loaded: ${r.loaded.length ? r.loaded.join(", ") : "nothing"}${r.why ? ` (${r.why})` : ""}`;
+  return `- ${r.verdict} · ${r.skill} · ${what} · ${q(r.ask)} → ${got}`;
+}
+
+function issue(title, body) {
+  const list = spawnSync(GH, ["issue", "list", "-R", REPO, "--state", "open", "--search", `"${title}" in:title`, "--json", "number,title", "-q", `.[] | select(.title == "${title}") | .number`], { encoding: "utf8" });
+  if (list.status !== 0) return `NAMED STOP [ISSUE_UNFILED] gh could not list issues (${(list.stderr || "").trim().slice(0, 120)}); the report stands`;
+  const n = (list.stdout || "").trim().split("\n")[0];
+  const r = n ? spawnSync(GH, ["issue", "comment", n, "-R", REPO, "--body", body], { encoding: "utf8" })
+    : spawnSync(GH, ["issue", "create", "-R", REPO, "--title", title, "--body", body], { encoding: "utf8" });
+  return r.status === 0 ? `issue ${n ? `#${n} commented` : "filed"}: ${title}` : `NAMED STOP [ISSUE_UNFILED] gh could not write the issue (${(r.stderr || "").trim().slice(0, 120)}); the report stands`;
+}
+
+async function main() {
+  const installed = installedSkills(SKILLS);
+  const ranked = only ? {} : rank(installed);
+  if (rankOnly) {
+    if (ranked.error) throw new Stop(2, "RANK_UNREAD", ranked.error);
+    ranked.top.forEach(([s, n], i) => console.log(`${String(i + 1).padStart(2)} ${String(n).padStart(5)}  ${s}`));
+    return 0;
+  }
+  const file = path.join(OUT, `${DAY}${only ? "-only" : ""}.md`);
+  fs.mkdirSync(OUT, { recursive: true });
+  fs.rmSync(file, { force: true }); // an old report can never pass for this run's
+  let items;
+  try { items = loadAsks(); } catch (e) { writeReport(file, { fatal: e.message }); throw e; }
+  if (only) items = items.filter((i) => only.has(i.skill));
+  if (items.length === 0) {
+    const e = new Stop(2, "NO_ASKS_RAN", `0 asks to run${only ? ` for --only ${[...only].join(",")}` : ""}; 0 checked is a FAIL, never a pass.`);
+    writeReport(file, { fatal: e.message }); throw e;
+  }
+  const covered = new Set(items.map((i) => i.skill));
+  const notCovered = only ? [] : (ranked.top || []).filter(([s]) => !covered.has(s));
+  const t0 = Date.now(), results = [], maxRuns = items.length * 2 + 10;
+  let wall = null;
+  for (const item of items) {
+    if (!installed.has(item.skill)) { results.push({ ...item, loaded: [], verdict: "FAIL", why: `${item.skill} is not in ${SKILLS}` }); continue; }
+    if (wall) { results.push({ ...item, loaded: [], verdict: "COULDNT-CHECK", why: `not run: ${wall}` }); continue; }
+    const r = judge(item, runOne(item, maxRuns));
+    results.push(r);
+    process.stdout.write(`${line(r)}\n`);
+    if (r.verdict === "COULDNT-CHECK" && WALL.has(r.stop)) wall = r.why;
+  }
+  const secs = Math.round((Date.now() - t0) / 1000);
+  const summary = writeReport(file, { results, ranked, notCovered, secs, only });
+  console.log(summary.census);
+  console.log(`report: ${file}`);
+  const problems = summary.wrong + summary.unchecked + notCovered.length;
+  if (problems) {
+    const parts = [summary.wrong && `${summary.wrong} wrong`, notCovered.length && `${notCovered.length} not covered`, summary.unchecked && `${summary.unchecked} not checked`].filter(Boolean).join(", ");
+    console.log(issue(`skill-check ${DAY}${only ? " (re-run)" : ""}: ${parts}`,
+      `${summary.census}\n\nWrong: ${summary.wrongSkills.join(", ") || "none"}\nNot covered: ${notCovered.map(([s]) => s).join(", ") || "none"}\nNot checked: ${summary.unchecked}${wall ? ` (${wall})` : ""}\n\nReport (on the Mac): ${file}\nFix: a one-line description edit to each wrong skill, then \`skill-check --only <skills>\`.`));
+  }
+  if (summary.checked === 0) { console.error(`NAMED STOP [NOTHING_CHECKED] 0 of ${items.length} asks could be checked${wall ? `: ${wall}` : ""}; see ${file}`); return 75; }
+  if (summary.unchecked) { console.error(`NAMED STOP [COULDNT_CHECK] ${summary.unchecked} of ${items.length} asks could not be checked${wall ? `: ${wall}` : ""}; the next run retries them`); return 75; }
+  return problems ? 1 : 0;
+}
+
+function writeReport(file, { fatal, results = [], ranked = {}, notCovered = [], secs = 0, only = null }) {
+  const checked = results.filter((r) => r.verdict !== "COULDNT-CHECK").length;
+  const right = results.filter((r) => r.verdict === "PASS").length;
+  const wrong = results.filter((r) => r.verdict === "FAIL").length;
+  const unchecked = results.length - checked;
+  const wrongSkills = [...new Set(results.filter((r) => r.verdict === "FAIL").map((r) => r.skill))];
+  const cost = results.reduce((a, r) => a + (r.cost || 0), 0);
+  const tokIn = results.reduce((a, r) => a + (r.tokIn || 0), 0), tokOut = results.reduce((a, r) => a + (r.tokOut || 0), 0);
+  const pct = checked ? Math.round((100 * right) / checked) : 0;
+  const ok = !fatal && checked > 0 && wrong === 0 && unchecked === 0 && notCovered.length === 0;
+  const census = fatal ? `OUTPUT 0 asks checked — ${fatal}`
+    : `OUTPUT ${checked} asks checked: ${right} right, ${wrong} wrong, ${unchecked} not checked (${pct}% right)`;
+  const L = [`# Skill check — ${DAY}${only ? ` (re-run: ${[...only].join(", ")})` : ""}`, ""];
+  L.push(fatal ? `Result: FAIL — ${fatal}`
+    : checked === 0 ? `Result: FAIL — 0 of ${results.length} asks could be checked, so nothing is proven.`
+      : `Result: ${ok ? "all right" : "FAIL"} — ${right} of ${checked} checked asks right (${pct}%), ${wrong} wrong, ${unchecked} not checked${notCovered.length ? `, ${notCovered.length} top skill(s) not covered` : ""}.`);
+  if (!fatal) {
+    L.push("", "## Wrong", wrongSkills.length ? wrongSkills.map((s) => `- ${s}: ${results.filter((r) => r.skill === s && r.verdict === "FAIL").length} wrong`).join("\n") : "- none");
+    if (!only) {
+      L.push("", `## Top ${TOP_N} skills by loads (Skill tool calls in ${PROJECTS})`);
+      L.push(ranked.error ? `- not read: ${ranked.error}` : ranked.top.map(([s, n], i) => `${i + 1}. ${s} (${n})`).join("\n"));
+      L.push("", "## Not covered (top skills with no asks)", notCovered.length ? notCovered.map(([s, n]) => `- NOT COVERED ${s} (${n} loads)`).join("\n") : "- none");
+    }
+    L.push("", "## Each ask", ...results.map(line));
+    L.push("", "## Usage", `- ${results.filter((r) => r.cost !== undefined).length} runs of \`claude -p\` through ai-run on her plan (AI_RUN_NO_CREDIT=1: never the API key, no money), ${secs}s.`,
+      `- Tokens: ${tokIn} in (mostly cache reads), ${tokOut} out; $${cost.toFixed(2)} at API prices as claude reports it, billed to nothing.`);
+  }
+  L.push("", census, unchecked || fatal || checked === 0 ? `SKILL-CHECK-INCOMPLETE: ${checked} of ${results.length} asks checked` : `SKILL-CHECK-COMPLETE: ${checked} asks checked`, "");
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, L.join("\n")); fs.renameSync(tmp, file);
+  return { checked, right, wrong, unchecked, wrongSkills, census };
+}
+
+if (require.main === module) {
+  main().then((c) => process.exit(c), (e) => { console.error(e.message); process.exit(e.code ?? 1); });
+}

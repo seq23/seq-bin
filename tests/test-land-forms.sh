@@ -31,7 +31,7 @@ touched "* Forms: lead + RSVP — preview: two TEST posts, both 200 and stored" 
 
 # Wiring, read from land itself (the flow tests run land end to end).
 ok grep -q 'FORM_MSG="$(gate_forms "$PR" "$(owner_text <<<"$PRMETA")")"' "$LAND"
-ok grep -q 'die "NAMED STOP \[FORMS_UNDECLARED\] $FORM_MSG"' "$LAND"
+ok grep -q 'die "NAMED STOP \[FORMS_UNDECLARED\] the diff touches a form ($FORMFILES). $FORM_MSG"' "$LAND"
 ok grep -q 'FORMS_DUE="undeclared (landed under her bypass; the diff touches $FORMFILES)"' "$LAND"
 ok grep -q 'then note_form_proof "$FORMS_DUE"' "$LAND"
 ok grep -q '"$runner" --now "$slug#$PR"' "$LAND"

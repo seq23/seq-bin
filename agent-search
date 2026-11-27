@@ -1,0 +1,219 @@
+#!/bin/bash
+# agent-search — Cloudflare "Search for Agents" on ONE trial site, with a money guard.
+#
+#   agent-search status [<zone>|--all]   state of each zone: answering | enabled-indexing | blocked | off | COULDNT-CHECK
+#   agent-search enable <zone>           only the trial zone; refuses unless the guard job is loaded and usage reads under the limit
+#   agent-search disable <zone>          only the trial zone
+#   agent-search guard                   the daily money guard (launchd com.seq.agent-search-guard, 10:30 CT)
+#
+# WHY (27 Nov 2026). Her answer on Search for Agents: "Try one site only". The switch is the zone setting
+# `search_for_agents`; turning it on makes an AI Search instance that indexes the site and answers
+# https://<zone>/.well-known/search for anyone. AI Search billing begins 1 Dec 2026 and the main account is
+# on Workers Paid, so use past the free monthly allowance (1,000 semantic + 1,000 full-text queries,
+# 5M ingestion tokens per account) is billed. The guard reads the account's AI Search usage each morning and
+# switches the trial zone off at 80% of any allowance, or when it has not been able to read the usage on
+# two days running. A guard that cannot read never says "under the limit".
+#
+# Usage is summed over the trailing 31 days, not the calendar month: the account's billing month starts on
+# its own day, and 31 trailing days always hold at least the current billing month's usage.
+#
+# Secrets: CLOUDFLARE_AI_SEARCH_TOKEN and CLOUDFLARE_ACCOUNT_ID from the Boss OS vault. Run bare, the script
+# runs itself again under `npm run vault:run`. A missing token is NAMED STOP [ACCOUNT], exit 2.
+#
+# Exit codes: 0 done / under the limit; 1 COULDNT-CHECK or refused; 2 NAMED STOP; 3 guard switched the zone off.
+# Test seams (tests/test-agent-search.sh only): AGENT_SEARCH_CURL, AGENT_SEARCH_LAUNCHCTL, AGENT_SEARCH_NOTICE,
+# AGENT_SEARCH_STATE, AGENT_SEARCH_SITES, AGENT_SEARCH_TODAY, AGENT_SEARCH_NO_VAULT.
+set -uo pipefail
+
+TRIAL_ZONE="weddingseatingchartmaker.com"   # the one zone (least traffic of the grid sites with real pages, 27 Nov 2026)
+TRIAL_TOPIC="seating chart"
+EXTRA_ZONES=("whisperalmanac.com")            # in the grid as a channel (sites.json _groups.gaps), not in grid_repos
+FREE_QUERIES=1000; QUERY_LIMIT=800            # 80% of each free monthly query allowance
+FREE_TOKENS=5000000; TOKEN_LIMIT=4000000      # 80% of the free monthly ingestion tokens
+GUARD_LABEL="com.seq.agent-search-guard"
+API="https://api.cloudflare.com/client/v4"
+
+CURL="${AGENT_SEARCH_CURL:-curl}"
+LCTL="${AGENT_SEARCH_LAUNCHCTL:-launchctl}"
+STATE="${AGENT_SEARCH_STATE:-$HOME/Library/Application Support/agent-search}"
+BOSS="$HOME/.boss-os/runtime"; [ -d "$BOSS/scripts" ] || BOSS="$HOME/GitHub/boss-os"
+
+say() { printf '%s\n' "$*"; }
+die_stop() { say "NAMED STOP [$1] $2" >&2; exit 2; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in status|enable|disable|guard) ;; *)
+  say "usage: agent-search status [<zone>|--all] | enable <zone> | disable <zone> | guard" >&2; exit 1 ;;
+esac
+
+# Secrets come from the vault; never on a command line, never printed.
+if [ -z "${CLOUDFLARE_AI_SEARCH_TOKEN:-}" ] && [ -z "${AGENT_SEARCH_NO_VAULT:-}" ] && [ -z "${AGENT_SEARCH_VAULTED:-}" ] && [ -d "$BOSS" ]; then
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  cd "$BOSS" && AGENT_SEARCH_VAULTED=1 exec npm run -s vault:run -- "$self" "$cmd" "$@"
+fi
+TOKEN="${CLOUDFLARE_AI_SEARCH_TOKEN:-}"
+ACCOUNT="${CLOUDFLARE_ACCOUNT_ID:-}"
+mkdir -p "$STATE"
+today="${AGENT_SEARCH_TODAY:-$(date -u +%Y-%m-%d)}"
+
+need_token() {
+  [ -n "$TOKEN" ] || die_stop ACCOUNT "vault CLOUDFLARE_AI_SEARCH_TOKEN is missing: nothing was read or changed."
+  [ -n "$ACCOUNT" ] || die_stop ACCOUNT "vault CLOUDFLARE_ACCOUNT_ID is missing: nothing was read or changed."
+}
+
+# One Cloudflare API call. Prints the body; rc 0 only for HTTP 2xx with "success": true.
+cf() { # $1 method $2 path [$3 json body]
+  local out code body data=()
+  [ -n "${3:-}" ] && data=(--data "$3")
+  out=$("$CURL" -sS -m 30 -X "$1" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        ${data[@]+"${data[@]}"} -w $'\n%{http_code}' "$API$2" 2>/dev/null) || return 1
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  printf '%s' "$body"
+  case "$code" in 2??) ;; *) return 1 ;; esac
+  printf '%s' "$body" | jq -e '.success == true' >/dev/null 2>&1
+}
+
+zone_id() { # $1 zone -> id, rc 1 when the token cannot see it
+  local b; b=$(cf GET "/zones?name=$1") || return 1
+  printf '%s' "$b" | jq -er '.result[0].id // empty'
+}
+
+setting() { # $1 zone id -> on|off, rc 1 unknown
+  local b; b=$(cf GET "/zones/$1/settings/search_for_agents") || return 1
+  printf '%s' "$b" | jq -er '.result.value | select(. == "on" or . == "off")'
+}
+
+set_setting() { # $1 zone id $2 on|off -> rc 0 only when a read-back shows the new value
+  cf PATCH "/zones/$1/settings/search_for_agents" "{\"value\":\"$2\"}" >/dev/null || return 1
+  [ "$(setting "$1")" = "$2" ]
+}
+
+# Account AI Search usage over the trailing 31 days. Prints "semantic fulltext tokens"; rc 1 when unreadable.
+usage() {
+  local since q body out
+  since=$(date -u -j -v-30d -f %Y-%m-%d "$today" +%Y-%m-%d 2>/dev/null || date -u -d "$today -30 days" +%Y-%m-%d) || return 1
+  q='query($a:String!,$s:Date!,$e:Date!){viewer{accounts(filter:{accountTag:$a}){sem:aiSearchSemanticQueriesAdaptiveGroups(limit:10000,filter:{date_geq:$s,date_leq:$e}){count} ft:aiSearchFulltextQueriesAdaptiveGroups(limit:10000,filter:{date_geq:$s,date_leq:$e}){count} ing:aiSearchIngestionTokensAdaptiveGroups(limit:10000,filter:{date_geq:$s,date_leq:$e}){sum{tokens}}}}}'
+  body=$(jq -nc --arg q "$q" --arg a "$ACCOUNT" --arg s "$since" --arg e "$today" '{query:$q,variables:{a:$a,s:$s,e:$e}}')
+  out=$("$CURL" -sS -m 30 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        --data "$body" "$API/graphql" 2>/dev/null) || return 1
+  # Readable only when there are no errors and exactly one account came back with all three datasets present
+  # (an empty dataset is a real zero; a missing one is not).
+  printf '%s' "$out" | jq -er '
+    if ((.errors // []) | length) > 0 then error("errors") else . end
+    | .data.viewer.accounts
+    | if (type != "array" or length != 1) then error("account") else .[0] end
+    | if ((.sem|type) != "array" or (.ft|type) != "array" or (.ing|type) != "array") then error("dataset") else . end
+    | "\([.sem[].count] | add // 0) \([.ft[].count] | add // 0) \([.ing[].sum.tokens] | add // 0)"' 2>/dev/null
+}
+
+home_title() { # $1 zone -> "<code> <title>"
+  local f; f=$(mktemp)
+  local code; code=$("$CURL" -sSL -m 20 -o "$f" -w '%{http_code}' "https://$1/" 2>/dev/null) || code=000
+  printf '%s %s' "$code" "$(grep -o '<title>[^<]*' "$f" | head -1 | sed 's/<title>//')"
+  rm -f "$f"
+}
+
+search_live() { # $1 zone $2 topic -> "<code> <hits of the host in the body>"
+  local f code hits; f=$(mktemp)
+  code=$("$CURL" -sS -m 20 -o "$f" -w '%{http_code}' -G --data-urlencode "q=$2" "https://$1/.well-known/search" 2>/dev/null) || code=000
+  hits=$(grep -c "$1" "$f" 2>/dev/null); hits=${hits:-0}
+  rm -f "$f"; printf '%s %s' "$code" "$hits"
+}
+
+notice() { # $1 key $2 text -> rc 0 written
+  local m; m="$STATE/notice-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+  [ -e "$m" ] && return 0
+  if [ -n "${AGENT_SEARCH_NOTICE:-}" ]; then "$AGENT_SEARCH_NOTICE" "$1" "$2" </dev/null
+  else (cd "$BOSS" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$2" </dev/null)
+  fi >/dev/null 2>&1 || { say "NAMED STOP [NOTICE_UNWRITTEN] the Notices line $1 could not be written: $2"; return 1; }
+  : > "$m"; say "Notices: $2"
+}
+
+only_trial() {
+  [ "${1:-}" = "$TRIAL_ZONE" ] || { say "REFUSED [ONE_ZONE_ONLY] agent-search changes only $TRIAL_ZONE (her answer: \"Try one site only\"); got '${1:-}'." >&2; exit 1; }
+}
+
+all_zones() {
+  local f="${AGENT_SEARCH_SITES:-$BOSS/src/shared/boss/searchReadiness/sites.json}"
+  [ -f "$f" ] || { say "NAMED STOP [NO_SITES] $f not found" >&2; return 1; }
+  { jq -r '.grid_repos[].domain' "$f" && printf '%s\n' "${EXTRA_ZONES[@]}"; } | awk 'NF && !seen[$0]++'
+}
+
+status_one() { # $1 zone -> one line; rc 1 when COULDNT-CHECK
+  local z="$1" topic="guide" id s live code hits ht
+  [ "$z" = "$TRIAL_ZONE" ] && topic="$TRIAL_TOPIC"
+  live=$(search_live "$z" "$topic"); code="${live% *}"; hits="${live#* }"
+  ht=$(home_title "$z")
+  if [ -z "$TOKEN" ] || ! id=$(zone_id "$z") || [ -z "$id" ] || ! s=$(setting "$id"); then
+    say "$z COULDNT-CHECK setting unreadable with this token (live: search $code, home ${ht%% *})"; return 1
+  fi
+  if [ "$s" = off ]; then say "$z off (home ${ht%% *})"; return 0; fi
+  case "$code" in
+    200) if [ "$hits" -ge 1 ]; then say "$z answering ($hits hits for '$topic'; home $ht)"
+         else say "$z enabled-indexing (search 200, no results yet; home $ht)"; fi ;;
+    401|403|429) say "$z blocked (search $code: bot or WAF rules refuse the route; home $ht)" ;;
+    *) say "$z enabled-indexing (search $code; home $ht)" ;;
+  esac
+}
+
+case "$cmd" in
+status)
+  need_token; zones=()
+  if [ "${1:-}" = "--all" ]; then while IFS= read -r z; do zones+=("$z"); done < <(all_zones) || exit 2
+  else zones=("${1:-$TRIAL_ZONE}"); fi
+  [ ${#zones[@]} -gt 0 ] || { say "NAMED STOP [NO_ZONES] the zone list is empty" >&2; exit 2; }
+  unk=0; for z in "${zones[@]}"; do status_one "$z" || unk=$((unk + 1)); done
+  say "OUTPUT ${#zones[@]} zones, $unk COULDNT-CHECK"
+  [ "$unk" -eq 0 ] || exit 1 ;;
+
+enable)
+  only_trial "${1:-}"; need_token
+  "$LCTL" list "$GUARD_LABEL" >/dev/null 2>&1 || { say "REFUSED [GUARD_NOT_LOADED] $GUARD_LABEL is not loaded: run ~/bin/install-launchd.sh $GUARD_LABEL first." >&2; exit 1; }
+  u=$(usage) || { say "REFUSED [COULDNT-CHECK] AI Search usage is unreadable, so it is not known to be under the limit: nothing enabled." >&2; exit 1; }
+  read -r sem ft tok <<<"$u"
+  if [ "$sem" -ge "$QUERY_LIMIT" ] || [ "$ft" -ge "$QUERY_LIMIT" ] || [ "$tok" -ge "$TOKEN_LIMIT" ]; then
+    say "REFUSED [OVER_LIMIT] usage $sem semantic / $ft full-text queries, $tok tokens is at or past 80% of the free allowance." >&2; exit 1
+  fi
+  id=$(zone_id "$1") && [ -n "$id" ] || die_stop ACCOUNT "the token cannot see zone $1 (needs Zone Read and Zone Settings Edit on it)."
+  setting "$id" >/dev/null || die_stop ACCOUNT "the token cannot read $1's search_for_agents setting (needs Zone Settings Read/Edit), so the guard could not switch it off either: nothing enabled."
+  home_title "$1" > "$STATE/title-before"
+  set_setting "$id" on || die_stop ENABLE_FAILED "the switch on $1 did not read back 'on' (see the API refusal; the token needs Zone Settings Edit and AI Search Edit)."
+  say "$1 enabled, indexing (usage $sem/$FREE_QUERIES semantic, $ft/$FREE_QUERIES full-text, $tok/$FREE_TOKENS tokens). Home before: $(cat "$STATE/title-before")"
+  say "OUTPUT 1 zone enabled" ;;
+
+disable)
+  only_trial "${1:-}"; need_token
+  id=$(zone_id "$1") && [ -n "$id" ] || die_stop ACCOUNT "the token cannot see zone $1."
+  set_setting "$id" off || die_stop DISABLE_FAILED "the switch on $1 did not read back 'off'."
+  say "$1 off"; say "OUTPUT 1 zone disabled" ;;
+
+guard)
+  fails="$STATE/guard-fails"     # one line per UTC day the read failed, since the last good read
+  switch_off() { # $1 why -> exit 3 when off, 2 when it could not be switched off
+    local id=""
+    if [ -n "$TOKEN" ] && id=$(zone_id "$TRIAL_ZONE") && [ -n "$id" ] && set_setting "$id" off; then
+      say "GUARD SWITCHED-OFF $TRIAL_ZONE: $1"
+      notice "agent-search:off:$today" "Search for Agents switched OFF on $TRIAL_ZONE by its money guard: $1. Turn it back on only after a look: agent-search enable $TRIAL_ZONE."
+      exit 3
+    fi
+    say "NAMED STOP [GUARD_COULDNT_SWITCH_OFF] $TRIAL_ZONE: $1, and the switch-off failed"
+    notice "agent-search:stuck:$today" "Search for Agents money guard could NOT switch off $TRIAL_ZONE ($1). Turn it off by hand: Cloudflare dashboard, $TRIAL_ZONE, Overview, Search for Agents."
+    exit 2
+  }
+  if [ -n "$TOKEN" ] && [ -n "$ACCOUNT" ] && u=$(usage); then
+    read -r sem ft tok <<<"$u"; rm -f "$fails"
+    say "OUTPUT 1 usage read: $sem semantic, $ft full-text queries, $tok ingestion tokens (trailing 31 days to $today)"
+    if [ "$sem" -ge "$QUERY_LIMIT" ] || [ "$ft" -ge "$QUERY_LIMIT" ] || [ "$tok" -ge "$TOKEN_LIMIT" ]; then
+      switch_off "usage $sem semantic / $ft full-text queries (limit $QUERY_LIMIT of $FREE_QUERIES free), $tok tokens (limit $TOKEN_LIMIT)"
+    fi
+    say "GUARD UNDER $TRIAL_ZONE: $sem/$QUERY_LIMIT semantic, $ft/$QUERY_LIMIT full-text, $tok/$TOKEN_LIMIT tokens"
+    exit 0
+  fi
+  grep -qx "$today" "$fails" 2>/dev/null || echo "$today" >> "$fails"
+  days=$(wc -l < "$fails" | tr -d ' ')
+  why="the AI Search usage could not be read"; [ -n "$TOKEN" ] || why="vault CLOUDFLARE_AI_SEARCH_TOKEN is missing (NAMED STOP [ACCOUNT])"
+  say "OUTPUT 0 usage read: COULDNT-CHECK ($why; day $days running)"
+  [ "$days" -ge 2 ] && switch_off "$why on $days days running"
+  notice "agent-search:unread:$today" "Search for Agents money guard could not check usage today ($why). It switches $TRIAL_ZONE off if it still cannot tomorrow."
+  exit 1 ;;
+esac

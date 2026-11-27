@@ -1,0 +1,58 @@
+#!/bin/bash
+# Fake curl for tests/test-agent-search.sh: no network. State lives in $FAKE_DIR.
+#   $FAKE_DIR/setting   the zone's search_for_agents value (on|off), written by PATCH
+#   FAKE_API=down       api.cloudflare.com is unreachable (curl exit 7)
+#   FAKE_PATCH=denied   PATCH answers 403 Authentication error
+#   FAKE_PATCH=ignored  PATCH answers success but the value does not change
+#   FAKE_SETTING_READ=denied  GET of the setting answers 403 (a token without Zone Settings)
+#   FAKE_USAGE          "<semantic> <fulltext> <tokens>" | errors | errors_with_data | partial | noaccount
+#   FAKE_SEARCH         the code /.well-known/search answers once on (default 200)
+out=""; fmt=""; method=GET; data=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -w) fmt="$2"; shift ;;
+    -X) method="$2"; shift ;;
+    --data|--data-urlencode) data="$2"; shift ;;
+    -H|-m) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+echo "$method $url" >> "$FAKE_DIR/calls"
+setting=$(cat "$FAKE_DIR/setting" 2>/dev/null || echo off)
+code=200; body=""
+case "$url" in
+  https://api.cloudflare.com/*)
+    [ "${FAKE_API:-}" = down ] && exit 7
+    case "$url" in
+      */zones\?name=*) body='{"success":true,"result":[{"id":"zid1"}]}' ;;
+      */zones/zid1/settings/search_for_agents)
+        if [ "$method" = PATCH ]; then
+          if [ "${FAKE_PATCH:-}" = denied ]; then code=403; body='{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'
+          elif [ "${FAKE_PATCH:-}" = ignored ]; then body="{\"success\":true,\"result\":{\"id\":\"search_for_agents\",\"value\":\"$setting\"}}"
+          else v=$(printf '%s' "$data" | jq -r .value); echo "$v" > "$FAKE_DIR/setting"; body="{\"success\":true,\"result\":{\"id\":\"search_for_agents\",\"value\":\"$v\"}}"; fi
+        elif [ "${FAKE_SETTING_READ:-}" = denied ]; then code=403; body='{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'
+        else body="{\"success\":true,\"result\":{\"id\":\"search_for_agents\",\"value\":\"$setting\"}}"; fi ;;
+      */graphql)
+        case "${FAKE_USAGE:-0 0 0}" in
+          errors) body='{"data":null,"errors":[{"message":"not authorized for that account"}]}' ;;
+          partial) body='{"data":{"viewer":{"accounts":[{"sem":[{"count":1}],"ft":[],"ing":{}}]}},"errors":null}' ;;
+          errors_with_data) body='{"data":{"viewer":{"accounts":[{"sem":[],"ft":[],"ing":[]}]}},"errors":[{"message":"dataset aiSearchSemanticQueriesAdaptiveGroups: not authorized"}]}' ;;
+          noaccount) body='{"data":{"viewer":{"accounts":[]}},"errors":null}' ;;
+          *) read -r s f t <<<"${FAKE_USAGE:-0 0 0}"
+             body="{\"data\":{\"viewer\":{\"accounts\":[{\"sem\":[{\"count\":$((s - s / 2))},{\"count\":$((s / 2))}],\"ft\":[{\"count\":$f}],\"ing\":[{\"sum\":{\"tokens\":$t}}]}]}},\"errors\":null}" ;;
+        esac ;;
+      *) code=404; body='{"success":false}' ;;
+    esac ;;
+  https://*/.well-known/search)
+    host=${url#https://}; host=${host%%/*}
+    if [ "$setting" = on ]; then code=${FAKE_SEARCH:-200}; body="## Result: https://$host/wedding-seating-chart (score 0.8)"
+    else code=404; body="not found"; fi ;;
+  https://*)
+    body="<html><head><title>Fake Home</title></head></html>" ;;
+esac
+if [ -n "$out" ]; then printf '%s' "$body" > "$out"; else printf '%s' "$body"; fi
+[ -n "$fmt" ] && printf '%s' "${fmt//%\{http_code\}/$code}"
+exit 0

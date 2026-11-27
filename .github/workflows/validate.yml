@@ -56,6 +56,11 @@ jobs:
       - name: tz-watch keeps launchd on Central times when the Mac changes zone
         run: ./tests/test-tz-watch.sh
 
+      # 27 Nov 2026, her "Try one site only": Search for Agents on one zone, and a money guard that
+      # switches it off at 80% of the free AI Search allowance or after two days unable to read it.
+      - name: agent-search changes one zone only and its money guard never says "under" when it could not read
+        run: ./tests/test-agent-search.sh
+
       # Two workflows on one push to main (west-peek-os, 21 Sep 2026): land must watch the
       # gate run, never the journeys. Evals the pick_run block out of land against a fixture.
       - name: land must watch the gate run on a two-workflow main

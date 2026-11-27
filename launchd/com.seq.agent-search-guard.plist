@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Hours here are CENTRAL. install-launchd.sh moves them to the Mac's zone (boss-os scripts/ops/plist-central.mjs). -->
+<!-- Daily 10:30 CT (27 Nov 2026, her "Try one site only"): the Search for Agents money guard. Reads the account's AI Search usage; at 80% of a free allowance, or unreadable two days running, it switches the trial zone off and writes a Notices line. agent-search enable refuses unless this job is loaded. -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.agent-search-guard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/agent-search guard</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/agent-search-guard.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/agent-search-guard.log</string>
+	<key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
+</dict>
+</plist>

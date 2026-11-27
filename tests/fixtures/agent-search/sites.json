@@ -1,0 +1,7 @@
+{
+  "_why": "Fixture for tests/test-agent-search.sh: the grid list shape of boss-os src/shared/boss/searchReadiness/sites.json.",
+  "grid_repos": [
+    { "domain": "weddingseatingchartmaker.com", "repo": "dream-wedding-builder" },
+    { "domain": "approvalprep.com", "repo": "approvalprep" }
+  ]
+}

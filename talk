@@ -1,7 +1,8 @@
 #!/bin/bash
 # talk — keep working with Claude on the free $200/month API credit when her Claude plan runs out.
 #
-#   talk "<message>"         carries on the most recent Claude conversation started in her home folder
+#   talk "<message>"         carries on talk's own conversation (its last turn within 12 hours, by its session
+#                            id), else the most recent Claude conversation in her home folder
 #   talk --new "<message>"   starts a fresh conversation
 #   echo "<message>" | talk  the message from stdin
 #
@@ -31,8 +32,9 @@ set -uo pipefail
 
 usage() {
   cat <<'TXT'
-talk "<message>"        keep working with Claude on the free $200/month API credit (carries on your last
-                        conversation in your home folder; same rules file, tools and permission mode)
+talk "<message>"        keep working with Claude on the free $200/month API credit: carries on talk's own
+                        conversation (last turn within 12 hours), else your most recent one in your home
+                        folder; same rules file, tools and permission mode
 talk --new "<message>"  start a fresh conversation      echo "<message>" | talk   message from stdin
 Before each turn it counts the credit used this month from ~/Library/Logs/ai-run.log; at $200 (or under $1
 left) it stops without calling Claude. After each turn: "this turn ~$X.XX · used this month $Y.YY of $200".
@@ -65,6 +67,14 @@ for v in "$ALLOWANCE" "$FLOOR"; do [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "
 [ -x "$AI_RUN" ] || { echo "NAMED STOP [NO_AI_RUN] talk needs ai-run at $AI_RUN; nothing was sent."; exit 69; }
 
 # --- the credit month: from the last renewal day (inclusive) to the next ---------------------------------
+# talk's own conversation: "<session id> <epoch>" of its last turn, so a later turn never lands in another
+# session that happens to be the newest in her home folder (an agent working there, say).
+STATE="${TALK_STATE:-$HOME/.boss-os/talk-session}" RESUME=""
+if [ "$NEW" -eq 0 ] && [ -r "$STATE" ] && read -r SID SAT < "$STATE" 2>/dev/null &&
+   [[ "$SID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [[ "$SAT" =~ ^[0-9]+$ ]] &&
+   [ $(( $(date +%s) - SAT )) -lt 43200 ]; then
+  RESUME="$SID"
+fi
 TODAY="${TALK_TODAY:-$(date +%Y-%m-%d)}"
 [[ "$TODAY" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || { echo "talk: TALK_TODAY must be YYYY-MM-DD" >&2; exit 64; }
 Y=$((10#${BASH_REMATCH[1]})) M=$((10#${BASH_REMATCH[2]})) D=$((10#${BASH_REMATCH[3]}))
@@ -138,7 +148,8 @@ const tick = () => {
   if (!end) return setTimeout(tick, 200);
   if (buf) line(buf);
   const c = res && typeof res.total_cost_usd === "number" && Number.isFinite(res.total_cost_usd) ? res.total_cost_usd.toFixed(6) : "unknown";
-  fs.writeFileSync(result, `cost=${c}\nsubtype=${res ? String(res.subtype).replace(/[^a-z_]/g, "") : "none"}\n`);
+  const sid = res && /^[0-9a-f-]{36}$/.test(String(res.session_id)) ? res.session_id : "";
+  fs.writeFileSync(result, `cost=${c}\nsubtype=${res ? String(res.subtype).replace(/[^a-z_]/g, "") : "none"}\nsession=${sid}\n`);
   process.exit(shown ? 0 : 3);
 };
 tick();
@@ -148,7 +159,7 @@ NODE="$(command -v node || echo /opt/homebrew/bin/node)"
 RPID=$!
 
 ARGS="--max-budget-usd $LEFT"
-[ "$NEW" -eq 1 ] || ARGS="--continue $ARGS"
+if [ -n "$RESUME" ]; then ARGS="--resume $RESUME $ARGS"; elif [ "$NEW" -eq 0 ]; then ARGS="--continue $ARGS"; fi
 [ -n "${TALK_MODEL:-}" ] && export AI_RUN_CLAUDE_MODEL="$TALK_MODEL"
 printf '%s' "$MSG" | AI_RUN_CREDIT_NOW=1 AI_RUN_CALLER=talk AI_RUN_IGNORE_PAUSE=1 AI_RUN_LIVE="$LIVE" AI_RUN_CLAUDE_ARGS="$ARGS" \
   "$AI_RUN" --role brain --cwd "$HOME" > "$TMPD/out" 2>&1 &
@@ -160,6 +171,8 @@ wait "$RPID"; SHOWN=$?
 trap - INT TERM HUP
 
 TURN="$(sed -n 's/^cost=//p' "$TMPD/result" 2>/dev/null)"; SUB="$(sed -n 's/^subtype=//p' "$TMPD/result" 2>/dev/null)"
+NEWSID="$(sed -n 's/^session=//p' "$TMPD/result" 2>/dev/null)"
+if [ -n "$NEWSID" ]; then mkdir -p "$(dirname "$STATE")" 2>/dev/null && printf '%s %s\n' "$NEWSID" "$(date +%s)" > "$STATE" 2>/dev/null; fi
 STOPLINE="$(grep -m1 '^NAMED STOP \[' "$TMPD/out" 2>/dev/null)"
 cost_line() {
   local u

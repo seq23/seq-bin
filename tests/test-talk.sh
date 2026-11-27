@@ -34,7 +34,7 @@ cat > "$FAKE/claude-stdin"; pwd > "$FAKE/claude-pwd"
 [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "PLAN-RAN"; exit 0; }
 init() { printf '{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY","model":"m"}\n'; }
 say()  { printf '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"%s"}]}}\n' "$1"; }
-res()  { printf '{"type":"result","subtype":"%s","is_error":%s,"result":"%s","total_cost_usd":%s,"api_error_status":%s}\n' "$1" "$2" "$3" "$4" "${5:-null}"; }
+res()  { printf '{"type":"result","subtype":"%s","is_error":%s,"result":"%s","total_cost_usd":%s,"api_error_status":%s,"session_id":"%s"}\n' "$1" "$2" "$3" "$4" "${5:-null}" "${FAKE_SID:-11111111-2222-3333-4444-555555555555}"; }
 init
 case "$(cat "$FAKE/mode" 2>/dev/null)" in
   slow)    say "FIRST-PART"; echo started > "$FAKE/started"
@@ -68,7 +68,7 @@ mkdir -p "$TMP/home" "$TMP/boss-os" "$TMP/tmp"
 LOG="$TMP/ai-run.log"
 export FAKE="$TMP" AI_RUN_LOG="$LOG" AI_RUN_VAULT_REPO="$TMP/boss-os" AI_RUN_PAUSE_FILE="$TMP/no-pause" TMPDIR="$TMP/tmp"
 NOW="$(date +%Y-%m-%d)"   # ai-run stamps each turn with the real date, so a test that runs a turn spends on today
-reset() { rm -f "$TMP"/claude-* "$TMP"/npm-* "$TMP/mode" "$TMP/vault-mode" "$TMP/started" "$TMP/go" "$TMP/so"; : > "$LOG"; }
+reset() { rm -f "$TMP/home/.boss-os/talk-session" "$TMP"/claude-* "$TMP"/npm-* "$TMP/mode" "$TMP/vault-mode" "$TMP/started" "$TMP/go" "$TMP/so"; : > "$LOG"; }
 run() { env PATH="$BIN:$PATH" HOME="$TMP/home" "$@"; }
 spent() { # spent <date> <cost> [caller]: one credit run in the usage log
   printf '%sT10:00:00-0600\trole=brain\tengine=claude-credit\tcaller=%s\texit=0\tcost_usd=%s\tkey_source=ANTHROPIC_API_KEY\n' "$1" "${3:-ship-review}" "$2" >> "$LOG"
@@ -133,9 +133,21 @@ check "with -p and --continue" grep -qE -- '^-p .*--continue' "$TMP/claude-args.
 check "…and the message on stdin" [ "$(cat "$TMP/claude-stdin")" = "what did I say" ]
 absent "with no permission flag of its own (her settings decide)" grep -qE -- '--dangerously-skip-permissions|--permission-mode' "$TMP/claude-args.log"
 check "the usage log has the turn as caller=talk with its cost" grep -qE $'engine=claude-credit\tcaller=talk\texit=0\tcost_usd=0.012300' "$LOG"
-reset; spent "$NOW" 1
+echo "--- talk's own conversation"
+: > "$TMP/claude-args.log"
+FAKE_SID=99999999-8888-7777-6666-555555555555 run "$TALK" "turn two" > "$TMP/so" 2>&1
+check "turn 2 resumes turn 1's session by its id, never the newest in HOME" grep -qE -- '--resume 11111111-2222-3333-4444-555555555555 ' "$TMP/claude-args.log"
+absent "…with no --continue" grep -qF -- "--continue" "$TMP/claude-args.log"
+check "…and the id kept is now turn 2's" grep -qE '^99999999-8888-7777-6666-555555555555 [0-9]+$' "$TMP/home/.boss-os/talk-session"
+printf '11111111-2222-3333-4444-555555555555 %s\n' "$(( $(date +%s) - 43300 ))" > "$TMP/home/.boss-os/talk-session"; : > "$TMP/claude-args.log"
+run "$TALK" "next day" > "$TMP/so" 2>&1
+check "a talk session older than 12 hours is left: --continue her latest" grep -qF -- "--continue" "$TMP/claude-args.log"
+printf 'not-an-id; rm -rf / 1\n' > "$TMP/home/.boss-os/talk-session"; : > "$TMP/claude-args.log"
+run "$TALK" "bad state" > "$TMP/so" 2>&1
+absent "a state file that is not a session id is never passed on" grep -qF -- "--resume" "$TMP/claude-args.log"
+reset; spent "$NOW" 1; mkdir -p "$TMP/home/.boss-os"; printf '11111111-2222-3333-4444-555555555555 %s\n' "$(date +%s)" > "$TMP/home/.boss-os/talk-session"
 run "$TALK" --new "fresh" > "$TMP/so" 2>&1
-absent "--new starts fresh: no --continue" grep -qF -- "--continue" "$TMP/claude-args.log"
+absent "--new starts fresh: no --continue and no --resume" grep -qE -- "--continue|--resume" "$TMP/claude-args.log"
 reset; spent "$NOW" 1
 printf 'from a pipe\n' | run "$TALK" > "$TMP/so" 2>&1; rc=$?
 check "the message from stdin: exit 0 (rc=$rc)" [ "$rc" -eq 0 ]

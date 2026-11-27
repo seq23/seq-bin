@@ -67,4 +67,9 @@ rm -rf $T/Work/claude-work/new
 out=$(DRIVE_BACKUP_MAX_SECS=0 zsh "$S" 2>&1); rc=$?
 [ $rc -eq 3 ] || bad "time limit exit $rc (want 3)"
 print -r -- "$out" | grep -q DRIVE_BACKUP_TOO_SLOW || bad "no named stop for time limit"
+# the run leaves its own result for housekeeping (27 Nov 2026), not just a log named for its start day
+grep -q "^TOO_SLOW $(date +%Y-%m-%d) [0-9]" "$T/Library/Application Support/drive-backup/last-run.txt" || bad "time-limit run left no TOO_SLOW result: $(cat "$T/Library/Application Support/drive-backup/last-run.txt" 2>&1)"
+zsh "$S" >/dev/null 2>&1; rc=$?
+[ $rc -eq 0 ] || bad "clean rerun exit $rc"
+grep -q "^OK $(date +%Y-%m-%d) [0-9]" "$T/Library/Application Support/drive-backup/last-run.txt" || bad "clean run left no OK result"
 rm -rf "$T"; [ $ok -eq 0 ] && echo "test-drive-backup-guards: ok"; exit $ok

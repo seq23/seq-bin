@@ -430,7 +430,10 @@ case "$NAME" in
   # Site workflow (site.yml) on a push to main that touches site/**; content/ (the app library) is data
   # the app build reads, so a content-only merge deploys nothing. Added 18 Nov 2026 when #6 could not land.
   peace-be-still)       DEPLOY="" ; SELF="deploys itself through its own Site workflow (site.yml) on push to main when site/ changes; content/ is app data with nothing to deploy" ;;
-  dream-wedding-builder) DEPLOY="" ; SELF="deploys itself through Workers Builds on push to main" ;;
+  # D1_PREMERGE (27 Nov 2026, #275): Workers Builds has no migration step, so nothing applied this
+  # repo's migrations/ and wrangler listed all 17 as pending; 0016_trend_ideas was never recorded.
+  # Every file there is CREATE ... IF NOT EXISTS / INSERT OR IGNORE, so land applies them like p-n-p's.
+  dream-wedding-builder) DEPLOY="" ; SELF="deploys itself through Workers Builds on push to main" ; D1_PREMERGE="dream-wedding-builder" ;;
   # The three publications moved to their own Cloudflare account (7-8 Nov 2026). The old account's
   # Git-connected projects are paused (kept for rollback, so they post no check-runs); production is
   # a direct upload by .github/workflows/deploy-publications.yml on every push to main.

@@ -1,0 +1,61 @@
+#!/usr/bin/env node
+// A stand-in for ~/bin/ai-run in tests/test-chatgpt-searches.sh. It answers the three prompts chatgpt-searches
+// sends (questions, the Chrome session, seeds) the way the real ones do, steered by FAKE_CSQ:
+//   ok · signedout · limit2 (LIMIT after 2 answers) · nochrome · zero (no tool call at all) · badinstall · offscript
+//   · nottemp · claudelimit · brand (questions name us) · ours (our domain read in every chat) · ours1 (only in Q1)
+"use strict";
+const fs = require("fs");
+const prompt = fs.readFileSync(0, "utf8");
+const mode = process.env.FAKE_CSQ || "ok";
+const log = process.env.FAKE_LOG; if (log) fs.appendFileSync(log, `${process.env.AI_RUN_BARE ? "bare" : "chrome"} ${process.env.AI_RUN_CLAUDE_MODEL} ${prompt.length}\n`);
+if (mode === "claudelimit") { console.log("NAMED STOP [CLAUDE_LIMIT] her Claude usage limit is reached"); process.exit(75); }
+if (/Write exactly 5 questions/.test(prompt)) {
+  const n = (process.env.FAKE_WEEK || "a");
+  const qs = mode === "brand" ? ["Is KeepMyProof the best app for custody evidence?", "b2 question here for a buyer?", "b3 question here for a buyer?", "b4 question here for a buyer?", "b5 question here for a buyer?"]
+    : [1, 2, 3, 4, 5].map((i) => `What is the best app for buyer need number ${i} (${n})?`);
+  console.log(JSON.stringify({ questions: qs })); process.exit(0);
+}
+if (/ChatGPT's own web searches/.test(prompt)) {
+  const qs = [...prompt.matchAll(/^Q(\d+): /gm)].map((m) => Number(m[1]));
+  console.log(JSON.stringify({ seeds: qs.map((q) => ({ q, query: `app for buyer need ${q} with no account`, wants: ["no account"] })) })); process.exit(0);
+}
+// The Chrome session: stream-json events.
+const script = prompt.split("-----BEGIN SCRIPT-----\n")[1].split("\n-----END SCRIPT-----")[0];
+const cfg = JSON.parse(script.match(/const CFG = (\{.*\});/)[1]);
+const numbers = prompt.match(/QUESTION NUMBERS TO ASK, IN THIS ORDER: ([\d, ]+)/)[1].split(",").map((s) => Number(s.trim()));
+let id = 0; const out = [];
+const call = (name, input, result, isError) => { const tid = `t${++id}`;
+  out.push({ type: "assistant", message: { content: [{ type: "tool_use", id: tid, name, input }] } });
+  out.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: tid, content: [{ type: "text", text: result }], is_error: !!isError }] } }); };
+const js = (text, result) => call("mcp__claude-in-chrome__javascript_tool", { action: "javascript_exec", tabId: 1, text }, result);
+const esc = (o) => JSON.stringify(o).replace(/[=&?<>]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+if (mode === "zero") { out.push({ type: "assistant", message: { content: [{ type: "text", text: "I will not do this." }] } }); }
+else if (mode === "nochrome") { call("mcp__claude-in-chrome__tabs_context_mcp", {}, "Browser extension is not connected", true); out.push({ type: "assistant", message: { content: [{ type: "text", text: "CSQ-STOP|0|NO_CHROME" }] } }); }
+else {
+  call("mcp__claude-in-chrome__tabs_context_mcp", { createIfEmpty: true }, "tabs: 1");
+  let answered = 0;
+  for (const n of numbers) {
+    call("mcp__claude-in-chrome__navigate", { tabId: 1, url: "https://chatgpt.com/?temporary-chat=true&hints=search" }, "ok");
+    js(mode === "badinstall" ? script.replace("temporary limit", "temp limit") : script, `CSQ-READY|${cfg.site}|5|READY`);
+    if (mode === "offscript") js("document.querySelector('button').click()", "undefined");
+    if (mode === "signedout") { js(`await window.__csq.ask(${n})`, `CSQA|${n}|SIGNED_OUT`); out.push({ type: "assistant", message: { content: [{ type: "text", text: `CSQ-STOP|${n}|SIGNED_OUT` }] } }); break; }
+    if (mode === "limit2" && answered === 2) { js(`await window.__csq.ask(${n})`, `CSQA|${n}|SENT`); js(`await window.__csq.wait(${n})`, `CSQW|${n}|LIMIT`); break; }
+    js(`await window.__csq.ask(${n})`, `CSQA|${n}|SENT`);
+    js(`await window.__csq.wait(${n})`, `CSQW|${n}|RUNNING`);
+    js(`await window.__csq.wait(${n})`, `CSQW|${n}|DONE`);
+    const q = cfg.qs[n - 1];
+    const ours = mode === "ours" || (mode === "ours1" && n === 1);
+    const cap = { q: n, site: cfg.site, sent: `@Web search ${q}`, asked: q, cid: `00000000-0000-0000-0000-00000000000${n}`, status: 200, complete: true,
+      temporary: mode !== "nottemp", memory: "empty", search_on: true, model: "gpt-test", queries: [`buyer need ${n} app search one`, `buyer need ${n} app search two site:apps.apple.com`],
+      read_pages: 12, read_domains: ["apps.apple.com", "reddit.com", ...(ours ? [cfg.ours.domains[0]] : [])], read_domains_total: ours ? 3 : 2, cited: [`rivalapp${n}.com/page`], cited_total: 1,
+      ours_read: ours ? [`${cfg.ours.domains[0]}/questions/x`] : [], ours_cited: [], ours_named: [], answer_chars: 2400 };
+    const s = esc(cap); const of = Math.ceil(s.length / 700);
+    for (let i = 0; i < of; i++) js(`window.__csq.out(${n},${i})`, `CSQ1|${n}|${i}|${of}|${s.slice(i * 700, (i + 1) * 700)}`);
+    call("mcp__claude-in-chrome__get_page_text", { tabId: 1 }, "page text");
+    js(`window.__csq.names(${n}, ["RivalApp ${n}", "Invented App"])`, `CSQN|${n}|${esc({ named: [`RivalApp ${n}`], rejected: ["Invented App"], answer_chars: 2400 })}`);
+    answered++;
+  }
+  out.push({ type: "assistant", message: { content: [{ type: "text", text: `CSQ-END|${answered}` }] } });
+}
+out.push({ type: "result", subtype: "success", is_error: false, result: "done" });
+for (const e of out) console.log(JSON.stringify(e));

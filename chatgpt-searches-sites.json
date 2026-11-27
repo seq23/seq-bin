@@ -1,0 +1,119 @@
+{
+  "_what": "The sites chatgpt-searches checks each week (her ask 27 Nov 2026: every repo where she is trying to make money, incl. Porch & Party and WPP-llm for Scooter's production clients, Hicks and Horse for her friends; her change: add the guide sites, take away Spry Ventures). night: 1 Monday ... 7 Sunday (Central), at most 3 a night. about: what the site sells, from its brain and its search-loop config, for the question writer. brain + brain_headings: the brain sections the questions are written from. domains + names: what counts as ours in an answer, and what a question or seed may never contain. seeds: the search-loop config that takes this site's gaps (repo, config path), or null with why.",
+  "sites": [
+    {
+      "id": "keepmyproof", "label": "KeepMyProof", "night": 1,
+      "about": "a private phone app that keeps dated copies of papers, photos and notes as proof (custody and divorce, tenant move-in and move-out, home inventory for insurance, workplace incidents, VA claims, IEP binders)",
+      "brain": "spry", "brain_headings": ["KeepMyProof"],
+      "domains": ["keepmyproof.com"], "names": ["KeepMyProof", "Keep My Proof"],
+      "seeds": { "repo": "seq23/keepmyproof", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "dentistryguides", "label": "Dentistry guide (Industry Guides)", "night": 1,
+      "about": "city guides that help people find and compare dentists and dental care (implants, root canals, emergency dentists) and request to hear from a provider",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["dentistryguides.com", "theindustryguides.com"], "names": ["Dentistry Guides", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "dream-wedding", "label": "Dream Wedding", "night": 2,
+      "about": "free wedding planning tools and a planning app: a dated wedding checklist, budget spreadsheet, seating chart maker and day-of timeline, plus paid planning kits",
+      "brain": "spry", "brain_headings": ["Dream Wedding"],
+      "domains": ["weddingchecklistpdf.com", "weddingbudgetspreadsheet.com", "weddingseatingchartmaker.com", "weddingtimelinetemplate.com"],
+      "names": ["Dream Wedding", "Dream Wedding Builder"],
+      "seeds": { "repo": "seq23/dream-wedding-builder", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "theaccidentguides", "label": "Accident guide (Industry Guides)", "night": 2,
+      "about": "guides for accident victims on what to do after a car or injury accident and how to find a personal injury lawyer (research, not legal advice; never endorses a lawyer)",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["theaccidentguides.com", "theindustryguides.com"], "names": ["The Accident Guides", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "approvalprep", "label": "ApprovalPrep", "night": 3,
+      "about": "credit and approval preparation: credit dispute letters, debt validation letters and checklists for people getting ready for a rental application, car loan or mortgage, with no subscription",
+      "brain": "spry", "brain_headings": ["ApprovalPrep"],
+      "domains": ["approvalprep.com"], "names": ["ApprovalPrep", "Approval Prep"],
+      "seeds": { "repo": "seq23/approvalprep", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "neuroevalguides", "label": "Neuro evaluation guide (Industry Guides)", "night": 3,
+      "about": "city guides to ADHD, autism and neuropsychological evaluations for adults and children, therapy first, and how to find a provider",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["neuroevalguides.com", "theindustryguides.com"], "names": ["Neuro Eval Guides", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "a-player-mode", "label": "A Player Mode", "night": 4,
+      "about": "an AI executive team app (an AI chief of staff) that plans and runs your day, for founders and busy parents, on subscription",
+      "brain": "spry", "brain_headings": ["A Player Mode"],
+      "domains": ["aplayermode.com"], "names": ["A Player Mode", "APlayerMode"],
+      "seeds": null,
+      "seeds_why": "aplayermode.com has no search-loop config yet (sprylabs-hpc-site serves it; the engine there runs on billionairehighperformancecoach.com)"
+    },
+    {
+      "id": "hormonesivhair", "label": "Hormones, IV and hair guide (Industry Guides)", "night": 4,
+      "about": "city guides to hormone therapy, testosterone replacement, IV therapy and hair restoration clinics, and how to compare providers",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["hormonesivhair.com", "theindustryguides.com"], "names": ["Hormones IV Hair", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "porch-and-party", "label": "Porch & Party", "night": 5,
+      "about": "a Memphis-area party decor and seasonal porch decorating service (birthdays, showers, holiday porches, office holiday decor) for Memphis, Germantown, Collierville, Lakeland, Southaven and Olive Branch",
+      "brain": "porch-and-party", "brain_headings": ["Company", "Standing facts", "Services, prices and booking"],
+      "domains": ["porchandparty901.com"], "names": ["Porch & Party", "Porch and Party", "PorchandParty901"],
+      "seeds": { "repo": "seq23/p-n-p", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "memphisseniorcarehomes", "label": "Memphis Senior Care Homes (Industry Guides)", "night": 5,
+      "about": "a Memphis directory and guide to assisted living, senior care homes and memory care, and how families choose one",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["memphisseniorcarehomes.com", "theindustryguides.com"], "names": ["Memphis Senior Care Homes", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "horse", "label": "Horse Legal Guide", "night": 5,
+      "about": "plain-English guides for US horse owners, buyers, sellers, boarders and trainers on horse-world legal questions (sale contracts, boarding agreements, leases, liability waivers), from an equine law firm",
+      "brain": "friends", "brain_headings": ["Horse"],
+      "domains": ["horselegalguide.com", "wisecovington.com"], "names": ["Horse Legal Guide", "Wise Covington"],
+      "seeds": { "repo": "seq23/horse-legal-guide-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "bhpc", "label": "Billionaire High Performance Coach", "night": 6,
+      "about": "a high performance coaching system (digital program) for ambitious founders and executives: an executive operating rhythm, focus and decision habits",
+      "brain": "spry", "brain_headings": ["A Player Mode and BHPC"],
+      "domains": ["billionairehighperformancecoach.com", "aplayermode.com"], "names": ["Billionaire High Performance Coach", "BHPC", "A Player Mode"],
+      "seeds": { "repo": "seq23/sprylabs-hpc-site", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "wpp-llm", "label": "VirtualAgency OS (WPP-llm)", "night": 6,
+      "about": "an answer library for companies choosing a virtual, hybrid or live-stream event production company (webinars, summits, town halls) or a community management agency; inquiries go to West Peek Productions",
+      "brain": "west-peek", "brain_headings": ["WPP-llm"],
+      "domains": ["virtualagency-os.com", "westpeekproductions.com"], "names": ["VirtualAgency OS", "Virtual Agency OS", "West Peek Productions", "West Peek"],
+      "seeds": { "repo": "seq23/WPP-llm", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "peace-be-still", "label": "Peace Be Still", "night": 7,
+      "about": "a Christian sleep, scripture and mindset app: KJV scripture read softly, bedtime Bible stories for adults, prayer and calm for anxious nights",
+      "brain": "spry", "brain_headings": ["Peace Be Still"],
+      "domains": ["peacebestillapp.com"], "names": ["Peace Be Still", "Every Tongue"],
+      "seeds": { "repo": "seq23/peace-be-still", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "uscisexam", "label": "USCIS civil surgeon guide (Industry Guides)", "night": 7,
+      "about": "city guides to the USCIS immigration medical exam (Form I-693): finding a civil surgeon, cost, vaccines and what to bring",
+      "brain": "spry", "brain_headings": ["Industry Guides"],
+      "domains": ["uscisexam.com", "theindustryguides.com"], "names": ["USCIS Exam", "uscisexam", "The Industry Guides"],
+      "seeds": { "repo": "seq23/local-guides-citation-velocity", "config": "search-loop.config.json" }
+    },
+    {
+      "id": "hicks", "label": "Hicks Consulting", "night": 7,
+      "about": "a Memphis licensed clinical social worker's therapy and coaching practice (in person and virtual across Tennessee) for adults, Black women in particular, carrying stress, burnout, anxiety or life transitions, with a faith-integrated approach when a client wants it, plus workplace mental health training",
+      "brain": "friends", "brain_headings": ["Hicks"],
+      "domains": ["hicksconsulting.org"], "names": ["Hicks Consulting"],
+      "seeds": { "repo": "seq23/hicks-consulting-canonical", "config": "search-loop.config.json" }
+    }
+  ]
+}

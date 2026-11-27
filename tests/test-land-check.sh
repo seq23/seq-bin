@@ -84,7 +84,7 @@ FULL=$'Changes alpha.\n\nReview class: none — a small local tool fix\nForms: n
 echo "=== one run lists everything (the review you will face, 1 and 2) ==="
 reset ""; chk
 check "a README-only PR with an EMPTY body, in a repo not on live-repos.json: exit 1" [ "$RC" -eq 1 ]
-check "…both missing lines in ONE run (Outcome, Not built), each with the line to add" eval '[ "$(codes)" = "OUTCOME_UNDECLARED NOT_BUILT_UNDECLARED" ] && has "       add: Outcome: none — <why nothing scheduled or produced changes, 3+ words>" && has "       add: Outcome: <the real output that proves it works> — check: <a read-only shell command> — expect: >= <N>" && has "       add: ## Not built"'
+check "…both missing lines in ONE run (Outcome, Not built), each with the line to add" eval '[ "$(codes)" = "OUTCOME_UNDECLARED NOT_BUILT_UNDECLARED" ] && has "       add: Outcome: none — <why nothing scheduled or produced changes, 3+ words>" && has "       add: Outcome: <the real output that proves it works> — check: <one read and its pipes> — expect: >= <N>" && has "       add: ## Not built"'
 check "…and no reviewer is asked for (a repo not yet launched is no class; docs touch no class path)" eval '! grep -qiE "review|PASS" <<<"$(grep -E "^  [0-9]+\. |add: " <<<"$OUT")"'
 check "…ending in ONE named stop that counts the rest" eval '[ "$(grep -c "STOPPED:" <<<"$OUT")" -eq 1 ] && has "STOPPED: NAMED STOP [OUTCOME_UNDECLARED]" && has "And 1 more (NOT_BUILT_UNDECLARED)"'
 reset "$DOCS"; chk

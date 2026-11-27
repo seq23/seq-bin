@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""outcome-read — runs a PR's Outcome check with NO shell and NONE of her logins.
+
+  outcome-read '<check>'            run it; stdout is its output
+  outcome-read --explain '<check>'  say whether it could be run; nothing is read
+
+Why (her finish line for this job, 24 Nov 2026): the nightly outcome check "runs every night with no shell, only
+allowed read tools, and no access to her logins". The first design handed the check's text to `bash -c` with her gh
+and wrangler logins and tried to SPOT a write in it with a hand-built shell parser; it failed review twice. This file
+takes the access away instead, so there is nothing to spot:
+
+  * No shell ever sees the check. This program splits it into words itself and each word is only ever data.
+  * Every read is done HERE, by a fixed tool that can only read:
+      gh api <path> [--jq <filter>]   one GET of https://api.github.com/<path>, sent with NO token. Every repo is
+                                      public, so the public API answers; a private thing answers 404 (could not read).
+      curl [-fsSL] [-A <agent>] <https url>…          one GET each, no cookies, no sign-in, public hosts only.
+      curl -s -o /dev/null -w '%{http_code}' <url>    the status code only (a 401 or 429 is then a reading).
+      cat|grep|wc|head|tail <file>, ls <folder>       only inside the folders in ROOTS below (task sheets, job logs,
+                                                      ~/bin, ~/HANDOFF.md): never a config, key or vault folder.
+  * After a `|`, a text tool reads the output so far: grep, jq, wc, head, tail, sort, uniq, cut, tr. Each is the real
+    program, started by exact path with an exact list of flags, given no file to open, an empty environment, and (on
+    the Mac) a sandbox with no network, no file writes and no reads of anything under /Users.
+  * Nothing here holds, reads or passes on a login: no gh token, no wrangler, no vault, no cookies, no ~/.netrc.
+
+A check that needs anything else (a D1 count, a private page, a script) is REFUSED, never run: `land --check` says so
+when the PR is opened, so the builder writes one this tool can run.
+
+Exit: 0 it ran (stdout is the output; `grep -c` finding nothing prints 0 and is still exit 0)
+      3 refused: not one of the tools above (one plain line why; nothing was read)
+      4 could not read: a site, GitHub or a file did not answer (one plain line why). An outage, never a count.
+"""
+import ipaddress, json, os, re, socket, subprocess, sys, urllib.error, urllib.parse, urllib.request
+
+HOME = os.path.expanduser("~")
+# The only places a check may read a local file from. Paths are resolved (symlinks followed) before this is asked.
+ROOTS = [os.path.join(HOME, p) for p in ("Work/tasks", "Library/Logs", "bin", "HANDOFF.md", ".cache/post-land-check")]
+BIN_DIRS = ("/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin")   # exact places a text tool is started from; PATH is never used
+MAX_BYTES = 5_000_000
+NET_TIMEOUT = 60
+# The text tools' sandbox on the Mac: they get the output so far on stdin and need nothing else.
+SANDBOX = '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (literal "/dev/null"))(deny file-read* (subpath "/Users"))'
+TOOLS = "gh api, curl, cat, ls, grep, jq, wc, head, tail, sort, uniq, cut, tr"
+
+
+class Refuse(Exception):   # exit 3: outside the allowed read tools; nothing was read
+    pass
+
+
+class CouldNot(Exception):   # exit 4: an allowed read that did not answer
+    pass
+
+
+def words(text):
+    """Split the check into pipeline stages of plain words. Nothing is expanded or run: anything bash would have
+    treated specially (a variable, $(…), a redirect, ; && ||) is refused, so the check never means one thing to its
+    author and another thing here. This is about meaning, not safety: the tools below are what keep it read-only."""
+    stages, cur, w, have, i, n = [], [], "", False, 0, len(text)
+
+    def end_word():
+        nonlocal w, have
+        if have: cur.append(w)
+        w, have = "", False
+    while i < n:
+        c = text[i]
+        if c == "'":
+            j = text.find("'", i + 1)
+            if j < 0: raise Refuse("a quote is never closed")
+            w += text[i + 1:j]; have = True; i = j + 1; continue
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] in "$`": raise Refuse(f"it uses {text[i]} inside double quotes, which a shell would expand; use single quotes")
+                if text[i] == "\\" and i + 1 < n and text[i + 1] in '"\\': i += 1
+                w += text[i]; i += 1
+            if i >= n: raise Refuse("a quote is never closed")
+            have = True; i += 1; continue
+        if c == "\\":
+            if i + 1 >= n: raise Refuse("it ends with a backslash")
+            w += text[i + 1]; have = True; i += 2; continue
+        if c in " \t":
+            end_word(); i += 1; continue
+        if c == "|":
+            if text[i + 1:i + 2] == "|": raise Refuse("it uses ||; a check is one read and its pipes, nothing else")
+            end_word()
+            if not cur: raise Refuse("a pipe has nothing before it")
+            stages.append(cur); cur = []; i += 1; continue
+        if c in ";&<>()`$\n\r":
+            what = {"$": "a variable or $(…)", "`": "backticks", ";": "a second command (;)", "&": "& or &&", "<": "a redirect (<)",
+                    ">": "a redirect (>)", "\n": "a second line", "\r": "a second line"}.get(c, "brackets")
+            raise Refuse(f"it uses {what}; a check is one read and its pipes, nothing else (no shell runs it)")
+        if c == "~" and not have and text[i + 1:i + 2] in ("/", "", " ", "|"):
+            w += HOME; have = True; i += 1; continue
+        w += c; have = True; i += 1
+    end_word()
+    if not cur: raise Refuse("it is empty" if not stages else "a pipe has nothing after it")
+    stages.append(cur)
+    return stages
+
+
+def local_path(p):
+    """A file or folder a check may read: inside ROOTS after symlinks are followed, or refused."""
+    if not p.startswith("/"): raise Refuse(f"'{p}' is not a full path; local files are named from ~/ (only {', '.join('~' + r[len(HOME):] for r in ROOTS)})")
+    real = os.path.realpath(p)
+    for root in ROOTS:
+        r = os.path.realpath(root)
+        if real == r or real.startswith(r + os.sep): return real
+    raise Refuse(f"'{p}' is outside the folders a check may read ({', '.join('~' + r[len(HOME):] for r in ROOTS)})")
+
+
+def read_file(p, run):
+    real = local_path(p)
+    if not run: return b""
+    try:
+        with open(real, "rb") as f: return f.read(MAX_BYTES)
+    except OSError as e:
+        raise CouldNot(f"could not read {p} ({e.strerror or type(e).__name__})")
+
+
+def public_host(host):
+    """Only a public address is ever fetched: never this Mac, the home network or a cloud metadata address."""
+    try: infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError: raise CouldNot(f"could not find {host}")
+    for info in infos:
+        if not ipaddress.ip_address(info[4][0]).is_global: raise Refuse(f"{host} is not a public address")
+
+
+class Redirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        u = urllib.parse.urlsplit(newurl)
+        if u.scheme != "https" or not u.hostname or u.username: raise CouldNot("it redirected somewhere that is not a plain https address")
+        public_host(u.hostname)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a): return None
+
+
+def get(url, agent, follow=True, status_only=False):
+    """ONE GET. No token, no cookies, no proxy settings from the environment."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme != "https" or not u.hostname: raise Refuse(f"'{url}' is not an https address")
+    if u.username or u.password: raise Refuse("the address carries a sign-in (user@host)")
+    public_host(u.hostname)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), Redirects() if follow else NoRedirects())
+    req = urllib.request.Request(url, method="GET", headers={"User-Agent": agent, "Accept": "*/*"})
+    try:
+        with opener.open(req, timeout=NET_TIMEOUT) as r:
+            return str(r.status).encode() if status_only else r.read(MAX_BYTES)
+    except urllib.error.HTTPError as e:
+        if status_only: return str(e.code).encode()
+        extra = ""
+        if u.hostname == "api.github.com" and e.code in (403, 429) and e.headers.get("x-ratelimit-remaining") == "0":
+            extra = " (GitHub's limit for reads without a sign-in is used up for this hour)"
+        raise CouldNot(f"{u.hostname} answered {e.code}{extra}")
+    except (Refuse, CouldNot): raise
+    except Exception as e:
+        raise CouldNot(f"could not reach {u.hostname} ({type(e).__name__})")
+
+
+def take(args, i, flag):
+    if i + 1 >= len(args): raise Refuse(f"{flag} needs a value")
+    return args[i + 1]
+
+
+def src_gh(args, run):
+    if args[:1] != ["api"]:
+        raise Refuse("only `gh api <path> [--jq <filter>]` is allowed, read without a sign-in; write a run or PR lookup as its API path "
+                     "(e.g. gh api 'repos/<owner>/<repo>/actions/runs?branch=main&per_page=1' --jq '.workflow_runs[0].conclusion')")
+    path, jq, i = None, None, 1
+    while i < len(args):
+        a = args[i]
+        if a in ("--jq", "-q"): jq = take(args, i, a); i += 2
+        elif a.startswith("--jq="): jq = a[5:]; i += 1
+        elif a.startswith("-"): raise Refuse(f"gh api {a} is not allowed: a check is one GET with --jq at most")
+        elif path is None: path = a; i += 1
+        else: raise Refuse("gh api takes one path")
+    if not path: raise Refuse("gh api has no path")
+    if "://" in path or path.startswith("//") or "{" in path: raise Refuse("gh api takes a plain API path such as repos/<owner>/<repo>/…")
+    out = get("https://api.github.com/" + path.lstrip("/"), "outcome-read") if run else b""
+    if run and jq is not None and b'"encoding"' in out[:MAX_BYTES]:
+        # A file read through the contents API arrives as base64 broken into lines; `gh api --jq '… @base64d'` reads
+        # that, plain jq does not. Join the lines so the same filter means the same thing here.
+        try:
+            j = json.loads(out)
+            if isinstance(j, dict) and j.get("encoding") == "base64" and isinstance(j.get("content"), str):
+                j["content"] = j["content"].replace("\n", ""); out = json.dumps(j).encode()
+        except ValueError: pass
+    return text_tool("jq", ["-r", jq], out, run) if jq is not None else out
+
+
+def src_curl(args, run):
+    agent, urls, follow, status, devnull, i = "outcome-read", [], False, False, False, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-A", "--user-agent"): agent = take(args, i, a); i += 2
+        elif a in ("-o", "--output"):
+            if take(args, i, a) != "/dev/null": raise Refuse("curl -o is allowed only as -o /dev/null")
+            devnull = True; i += 2
+        elif a in ("-w", "--write-out"):
+            if take(args, i, a) != "%{http_code}": raise Refuse("curl -w is allowed only as -w '%{http_code}'")
+            status = True; i += 2
+        elif a in ("-m", "--max-time"): take(args, i, a); i += 2
+        elif a in ("--fail", "--silent", "--show-error", "--location"): follow = follow or a == "--location"; i += 1
+        elif re.fullmatch(r"-[fsSL]+", a): follow = follow or "L" in a; i += 1
+        elif a.startswith("-"): raise Refuse(f"curl {a} is not allowed: a check is a plain GET (-f -s -S -L -A, or -o /dev/null -w '%{{http_code}}')")
+        else: urls.append(a); i += 1
+    if not urls: raise Refuse("curl has no address")
+    if status != devnull: raise Refuse("curl's status form is -o /dev/null -w '%{http_code}', both together")
+    if status and len(urls) != 1: raise Refuse("curl's status form takes one address")
+    for u in urls:   # every address is judged before any is fetched
+        s = urllib.parse.urlsplit(u)
+        if s.scheme != "https" or not s.hostname or s.username: raise Refuse(f"'{u}' is not a plain https address")
+    return b"".join(get(u, agent, follow, status) for u in urls) if run else b""
+
+
+def src_ls(args, run):
+    paths = [a for a in args if not a.startswith("-")]
+    if [a for a in args if a.startswith("-") and a not in ("-1", "-a")] or len(paths) != 1: raise Refuse("ls takes one folder (and -1 or -a)")
+    real = local_path(paths[0])
+    if not run: return b""
+    try: names = sorted(n for n in os.listdir(real) if "-a" in args or not n.startswith("."))
+    except OSError as e: raise CouldNot(f"could not list {paths[0]} ({e.strerror or type(e).__name__})")
+    return "".join(n + "\n" for n in names).encode()
+
+
+# Each text tool: its allowed single-letter flags, the flags that take a value, and how many plain words it takes.
+TEXT = {
+    "grep": ("cEFivowxnh", {"-e": None, "-m": r"\d+"}, (1, 1)),
+    "jq":   ("rcsR",        {},                          (1, 1)),
+    "wc":   ("lcw",        {},                          (0, 0)),
+    "head": ("",           {"-n": r"\d+", "-c": r"\d+"}, (0, 0)),
+    "tail": ("",           {"-n": r"\+?\d+", "-c": r"\d+"}, (0, 0)),
+    "sort": ("unr",        {},                          (0, 0)),
+    "uniq": ("cd",         {},                          (0, 0)),
+    "cut":  ("",           {"-d": r".", "-f": r"[\d,-]+", "-c": r"[\d,-]+"}, (0, 0)),
+    "tr":   ("ds",         {},                          (1, 2)),
+}
+
+
+def text_args(name, args, allow_file):
+    """-> (argv flags and words, file or None). Every flag is on the tool's own list or the check is refused."""
+    letters, valued, (lo, hi) = TEXT[name]
+    out, plain, i, only_plain = [], [], 0, False
+    while i < len(args):
+        a = args[i]
+        if only_plain or not a.startswith("-") or a == "-": plain.append(a); i += 1
+        elif a == "--": only_plain = True; i += 1
+        elif a in valued:
+            v = take(args, i, a)
+            if valued[a] and not re.fullmatch(valued[a], v): raise Refuse(f"{name} {a} {v} is not allowed")
+            if name == "grep" and a == "-e": plain.append(v)
+            else: out += [a, v]
+            i += 2
+        elif name in ("head", "tail") and re.fullmatch(r"-\d+", a): out.append(a); i += 1
+        elif len(a) > 1 and not a.startswith("--") and all(ch in letters for ch in a[1:]): out.append(a); i += 1
+        else: raise Refuse(f"{name} {a} is not allowed (allowed: {' '.join('-' + ch for ch in letters) or 'no letter flags'}"
+                           f"{' ' + ' '.join(valued) if valued else ''})")
+    file = None
+    if allow_file and len(plain) == hi + 1: file = plain.pop()
+    if not lo <= len(plain) <= hi:
+        want = {"grep": "one pattern", "jq": "one filter", "tr": "one or two sets"}.get(name, "no plain words")
+        if len(plain) > hi and not allow_file: raise Refuse(f"{name} takes {want} and no file after a pipe (it reads the output so far)")
+        raise Refuse(f"{name} takes {want}{' and one file' if allow_file else ''}; it got {len(plain) + (1 if file else 0)} plain word(s)")
+    return out + ["--"] * (name in ("grep", "sort", "uniq", "wc")) + plain if name != "jq" else out + plain, file
+
+
+def text_tool(name, argv, data, run):
+    exe = next((os.path.join(d, name) for d in BIN_DIRS if os.access(os.path.join(d, name), os.X_OK)), None)
+    if not run: return b""
+    if exe is None: raise CouldNot(f"this machine has no {name}")
+    cmd = [exe] + argv
+    if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+        cmd = ["/usr/bin/sandbox-exec", "-p", SANDBOX] + cmd
+    elif os.environ.get("OUTCOME_READ_NO_SANDBOX_OK") != "1":   # no sandbox, no run (Linux CI's tests set this)
+        raise CouldNot("this machine has no sandbox for the text tools, so none is run")
+    try:
+        r = subprocess.run(cmd, input=data, capture_output=True, timeout=120, cwd="/", env={"LC_ALL": "en_US.UTF-8"})
+    except subprocess.TimeoutExpired:
+        raise CouldNot(f"{name} took longer than 2 minutes")
+    # grep's exit 1 is "no line matched": a reading (grep -c prints 0), not a failure.
+    if r.returncode != 0 and not (name == "grep" and r.returncode == 1):
+        raise CouldNot(f"{name} could not read the output ({' '.join(r.stderr.decode('utf-8', 'replace').split())[:160] or 'exit ' + str(r.returncode)})")
+    return r.stdout[:MAX_BYTES]
+
+
+def run_stage(stage, data, first, run):
+    name, args = stage[0], stage[1:]
+    if "/" in name: raise Refuse(f"'{name}': tools are named plainly ({TOOLS}); no script or path is run")
+    if first:
+        if name == "gh": return src_gh(args, run)
+        if name == "curl": return src_curl(args, run)
+        if name == "ls": return src_ls(args, run)
+        if name == "cat":
+            if not args or [a for a in args if a.startswith("-")]: raise Refuse("cat takes file names only")
+            return b"".join(read_file(a, run) for a in args)
+        if name in TEXT:
+            argv, file = text_args(name, args, allow_file=True)
+            if file is None: raise Refuse(f"{name} comes first, so it needs the file to read (or put a read before it: gh api, curl, cat, ls)")
+            return text_tool(name, argv, read_file(file, run), run)
+        raise Refuse(f"'{name}' is not an allowed read ({TOOLS})")
+    if name in TEXT:
+        argv, _ = text_args(name, args, allow_file=False)
+        return text_tool(name, argv, data, run)
+    if name in ("gh", "curl", "cat", "ls"): raise Refuse(f"{name} can only come first; after a pipe only text tools read the output")
+    raise Refuse(f"'{name}' is not an allowed text tool ({TOOLS})")
+
+
+def main(argv):
+    explain = argv[:1] == ["--explain"]
+    if explain: argv = argv[1:]
+    if len(argv) != 1 or argv[0] in ("-h", "--help"):
+        print(__doc__.strip()); return 0 if argv[:1] in (["-h"], ["--help"]) else 64
+    try:
+        stages = words(argv[0])
+        for run in ([False] if explain else [False, True]):   # the whole check is judged before any part of it reads
+            data = b""
+            for k, stage in enumerate(stages): data = run_stage(stage, data, k == 0, run)
+    except Refuse as e:
+        print(f"not run: {e}"); return 3
+    except CouldNot as e:
+        print(f"could not read: {e}"); return 4
+    if not explain:
+        sys.stdout.buffer.write(data); sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -360,6 +360,15 @@ reset
 out="$(AI_RUN_MCP=some run "$AI" --role brain -- "x" 2>&1)"; rc=$?
 check "an unknown AI_RUN_MCP value is refused, never guessed (rc=$rc)" eval '[ "$rc" -eq 64 ] && no_claude'
 
+echo "=== AI_RUN_BARE=1: a judge with no tools, no connectors and none of her settings (post-land-check, 27 Nov 2026) ==="
+reset
+AI_RUN_BARE=1 AI_RUN_CLAUDE_ARGS="--dangerously-skip-permissions --chrome" run "$AI" --role brain -- "judge this output" >/dev/null
+check "claude is started with no tools, no settings and no connectors" grep -qxE -- '-p --model opus --tools +--setting-sources +--strict-mcp-config --mcp-config \{"mcpServers":\{\}\}' "$TMP/claude-args.log"
+absent "…and never with skipped permissions or Chrome, even if a caller asked (AI_RUN_CLAUDE_ARGS is ignored)" grep -qE -- '--dangerously-skip-permissions|--chrome' "$TMP/claude-args.log"
+reset
+out="$(AI_RUN_BARE=yes run "$AI" --role brain -- "x" 2>&1)"; rc=$?
+check "an unknown AI_RUN_BARE value is refused, never guessed (rc=$rc)" eval '[ "$rc" -eq 64 ] && no_claude'
+
 # From here on the day's run cap is off (it is proven above, and with the credit below): these sections make
 # more Claude runs under one caller name than a real job may in a day.
 export AI_RUN_MAX_RUNS=0

@@ -124,11 +124,13 @@ jobs:
       # --check makes no write call.
       - name: land --check lists every missing line at once, from the one template; only her list waits on a reviewer
         run: ./tests/test-land-check.sh
-      # post-land-check RUNS each due outcome check itself, only after its read-only gate passes it (a check that could
-      # write is never run) and in a file-write sandbox on the Mac; it refuses a PASS below the
-      # floor, and an outage, no comment or ai-run down stays DUE, NOT CHECKED, exit non-zero. ENG-CHECK and FORM-PROOF too.
+      # post-land-check RUNS each due outcome check itself through outcome-read (rebuilt 27 Nov 2026): no shell, none of
+      # her logins, only fixed read tools; a model with NO tools judges the output and code posts its verdict. It
+      # refuses a PASS below the floor, and an outage, no verdict or ai-run down stays DUE, NOT CHECKED, exit non-zero.
       - name: post-land-check never calls an unchecked outcome working
         run: ./tests/test-post-land-check.sh
+      - name: outcome-read runs a check with no shell and no logins, and refuses everything but its read tools
+        run: ./tests/test-outcome-read.sh
       # Tests found with no CI step on 24 Nov 2026 (they guarded nothing): now each has one.
       - name: land names the repo from its GitHub remote
         run: ./tests/test-land-name.sh

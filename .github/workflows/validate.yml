@@ -180,6 +180,9 @@ jobs:
       # 27 Nov 2026 (her row #17): the nightly lessons pass only DRAFTS check lines; a model down is never "no failures".
       - name: lessons-pass sorts the day's failures with a no-tools model, counts repeats in code and never touches a rule
         run: shellcheck lessons-pass && ./tests/test-lessons-pass.sh
+      # 27 Nov 2026 (her item 3): the weekly skill check. A limit, sign-out or empty answer is never a pass; 0 asks is exit 2.
+      - name: skill-check passes only a right load, and an outage or 0 asks is never a pass
+        run: ./tests/test-skill-check.sh
       - name: the agent launch gate refuses general agents and full re-reviews of a failed PR, and never caps agents
         run: ./tests/test-brief-gate.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the

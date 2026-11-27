@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- skill-check (her item 3, 27 Nov 2026): each ask in skill-check-asks.json through a Skill-only `claude -p` on her
+     plan, report at ~/Work/tasks/logs/skill-check/<Central date>.md. Sunday 23:00 Central (Weekday 0), inside the
+     Mac's 22:00-07:00 window; an ai-run job, so it stays on the Mac. install-launchd.sh moves the Hour (and the
+     Weekday across midnight) to the Mac's zone. A Mac asleep at 23:00 runs it on wake. -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.skill-check</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/skill-check</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>0</integer></dict>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/skill-check.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/skill-check.log</string>
+</dict>
+</plist>

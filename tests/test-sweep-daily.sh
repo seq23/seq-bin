@@ -219,7 +219,7 @@ sweep() { # sweep <run-id> [ENV=VAL ...]
   env PATH="$BIN:$PATH" CI_SWEEP_LOG_DIR="$LOGS" CI_SWEEP_PROMPT="$TMP/prompt.md" \
       CI_SWEEP_PROBE_BIN="$TMP/probe.sh" CI_SWEEP_AUDIT_BIN="$TMP/audit.sh" \
       CI_SWEEP_NOTIFY_BIN="$ROOT/ci-sweep-notify.sh" CI_SWEEP_NOTIFY_DRY=1 \
-      CI_SWEEP_AI_RUN_BIN="$ROOT/ai-run" AI_RUN_LOG="$TMP/ai-run.log" \
+      CI_SWEEP_AI_RUN_BIN="$ROOT/ai-run" AI_RUN_LOG="$TMP/ai-run.log" AI_RUN_VAULT_REPO="$TMP/no-boss-os" \
       CI_SWEEP_LAND_BIN="$TMP/land" CI_SWEEP_POLL_SECS=1 CI_SWEEP_LAND_AGAIN_SECS=0 \
       CI_SWEEP_GITHUB_DIR="$TMP/github" CI_SWEEP_RUN_ID="$id" \
       "$@" "$SWEEP" >"$TMP/$id.out" 2>&1

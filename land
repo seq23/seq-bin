@@ -115,7 +115,41 @@ if [ -z "${LAND_RUNNING_FROM_COPY:-}" ]; then
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-die() { printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"; exit 1; }
+# EVERY STOP SAYS THREE THINGS (her yes 25 Nov 2026, the 5 lines; built 27 Nov 2026): what was expected, what
+# happened, and where to look; it tells a test that failed apart from a check that never ran; and when the same PR
+# stopped before, it says what was tried then, so a second attempt does not repeat the first. Each stage of land
+# says what it expects by setting EXPECT="<what>" (and LOOK="<where to look>" when it knows better); `die "<what happened>"` prints all three, so no
+# stop can leave a part out (tests/test-land-stop-shape.sh reads every stop in tests/test-land-flow.sh's runs).
+EXPECT="land to read its arguments and the repo it was started in"; LOOK=""
+look_here() { # where to look, most specific first: the stage's own pointer, the run land watched, the PR's checks
+  if [ -n "$LOOK" ]; then printf '%s' "$LOOK"; return; fi
+  local rid="${DRID:-${RID:-}}"
+  if [ -n "$rid" ]; then printf 'gh run view %s --log-failed' "$rid"
+  elif [ -n "${PR:-}" ]; then printf 'gh pr checks %s; gh pr view %s' "$PR" "$PR"
+  else printf 'the output above'; fi
+  [ -z "${LAND_TASK:-}" ] || printf '; the land log ~/Work/tasks/logs/%s-%s.log' "$LAND_TASK" "${PR:-}"
+}
+STOPS_DIR="${LAND_STOPS_DIR:-$HOME/.cache/land/stops}"
+tried_before() { # $1 what happened now -> prints the last stop of this PR (if any), then records this one
+  [ -n "${PR:-}" ] || return 0
+  local f; f="$STOPS_DIR/$(printf '%s' "${LAND_REPO_KEY:-$(git config --get remote.origin.url 2>/dev/null || pwd)}#$PR" | tr -c 'A-Za-z0-9._-' '_')"
+  if [ -s "$f" ]; then
+    local when was; IFS=$'\t' read -r when was < "$f"
+    if [ "$was" = "$(printf '%s' "$1" | tr '\t\n' '  ' | cut -c1-400)" ]; then
+      printf '  tried before:  %s, and it stopped the SAME way. Running land again unchanged will stop here again: change what is named above first.\n' "$when"
+    else
+      printf '  tried before:  %s, it stopped with: %s\n' "$when" "$(printf '%s' "$was" | cut -c1-240)"
+    fi
+  fi
+  mkdir -p "$STOPS_DIR" 2>/dev/null && printf '%s\t%s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$(printf '%s' "$1" | tr '\t\n' '  ' | cut -c1-400)" > "$f" 2>/dev/null
+  return 0
+}
+die() {
+  printf '\n\033[31mSTOPPED: %s\033[0m\n' "$*"
+  printf '  expected:      %s\n  what happened: %s\n  where to look: %s\n' "$EXPECT" "$(printf '%s' "$*" | sed -E 's/^NAMED STOP \[[A-Z_]+\] //' | cut -c1-300)" "$(look_here)"
+  tried_before "$*"
+  exit 1
+}
 
 MODE="land"; PR=""; TARGET=""; RUN_E2E=""; OWNER_WORDS=""
 for a in "$@"; do
@@ -177,7 +211,14 @@ export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-8d147e242033699dd37c6f5a4
 # attempts, 2s then 4s), and a read that never answers stops with exit 75 (EX_TEMPFAIL) and the
 # words "could not verify", distinct from a real refusal (exit 1), so a caller can try again.
 LAND_RC_UNVERIFIED=75
-unverified() { printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing was merged by this step; land again when GitHub answers.\033[0m\n' "$1" "$2"; exit "$LAND_RC_UNVERIFIED"; }
+unverified() {
+  printf '\n\033[31mSTOPPED: could not verify (%s) — %s. Nothing was merged by this step; land again when GitHub answers.\033[0m\n' "$1" "$2"
+  unanswered_parts "$1"
+  exit "$LAND_RC_UNVERIFIED"
+}
+unanswered_parts() { # $1 what did not answer -> the three parts of a could-not-verify stop (never a failed test)
+  printf '  expected:      %s\n  what happened: %s did not answer in time, so nothing was checked: this is not a failed test\n  where to look: %s\n' "$EXPECT" "${1:-GitHub}" "$(look_here)"
+}
 # gh_read runs inside $( ), so what went wrong is left in a file, not a variable the subshell loses.
 GH_ERR_FILE="$(mktemp -t land-gh-err.XXXXXX)" || exit 1
 RATE_UNTIL_FILE="$(mktemp -t land-rate-until.XXXXXX)" || { rm -f "$GH_ERR_FILE"; exit 1; } # rate_wait's deadline, below
@@ -290,6 +331,7 @@ still_ready() { # after a race: rc 0 when PR $PR is still green, at $HEAD and cl
 # the repo carries a Cloudflare deploy workflow the route does not wait for).
 # --- routes begin (tests/test-land-routes.sh evals this block verbatim) ---
 STAGING=""; E2E_WF=""; SMOKE=""; PROMOTE_VIA=""; PROMOTE_WF="promote.yml"; DEPLOY_WF=""; PAGES_PROJECTS=""; D1_PREMERGE=""
+EXPECT="this repo to have a deploy route recorded in land"; LOOK="the route table in ~/bin/land (case \"\$NAME\")"
 case "$NAME" in
   west-peek-os)         DEPLOY="npm run deploy:production" ; SELF="" ;;
   # 26 Sep 2026 (build first, test in batches): the 217 Playwright journeys left ci.yml for
@@ -794,6 +836,14 @@ smoke_check() { # $1 url -> 200 and "ok":true, read up to 40 s for the edge to s
   return 1
 }
 # --- run_conclusion begin (tests/test-land-queue.sh evals this block verbatim) ---
+ran_kind() { # $1 a check bucket or run conclusion -> whether a test failed or the check never ran to the end
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    fail|failure) echo "a test failed" ;;
+    cancel|cancelled|timed_out|startup_failure|stale|action_required|neutral|pending|queued|""|unreadable|cancelled-at-ceiling)
+      echo "the check never ran to the end, so no test result exists" ;;
+    *) echo "the check ended $1" ;;
+  esac
+}
 # ONE READ PER POLL, A MINUTE APART (22 Nov 2026 hostile review F1): every wait here read the run twice
 # (`gh run view --json conclusion` then `--json status`, 2 REST requests each) every 20 s, after a
 # `gh run watch` that polled every 3 s, so one e2e wait of up to 58 min cost ~700 of the account's 5,000
@@ -1005,6 +1055,7 @@ promote_wait_inflight() {
 # ---------------------------------------------------------------------------------------------
 # land --promote [<repo>] [--run-e2e]: the newest e2e-green main commit, newer than production.
 if [ "$MODE" = promote ]; then
+  EXPECT="a main commit newer than production with a green full test run, then production to carry it"; LOOK=""
   { [ -n "$DEPLOY" ] || [ -n "$PROMOTE_VIA" ]; } && [ -n "$E2E_WF" ] || die "$NAME has no full-e2e route (E2E_WF unset): land <pr> ships it to production directly, so there is nothing to promote"
   say "1/4  reading main, production and the $E2E_WF runs for $NAME"
   git fetch -q origin main || die "could not fetch main"
@@ -1037,7 +1088,7 @@ if [ "$MODE" = promote ]; then
       could-not-dispatch) die "could not dispatch $E2E_WF on main" ;;
       no-run-appeared) die "dispatched $E2E_WF on main but no run appeared in 2 minutes. Check: gh run list --workflow $E2E_WF" ;;
     esac
-    [ "$CONC" = success ] || die "$E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC. Nothing promoted; production stays on ${PROD:-its current build}. Fix main first: gh run view $RID"
+    [ "$CONC" = success ] || die "$E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC ($(ran_kind "$CONC")). Nothing promoted; production stays on ${PROD:-its current build}. Fix main first: gh run view $RID"
     # That success is exactly what the repo's promote.yml (if any) fires on: wait for it, then
     # read production again — it has usually just shipped this very sha.
     promote_wait_inflight "$HEADSHA"
@@ -1998,8 +2049,10 @@ live_add() { # $1 owner/repo  $2 PR -> rc 0 listed (or already there) | 1 not, t
   return 1
 }
 # --- live_add end ---
+EXPECT="a PR number, or an open PR for this branch"; LOOK=""
 [ -n "$PR" ] || PR="$(gh pr view --json number -q .number 2>/dev/null)"
 [ -n "$PR" ] || die "no PR number given and none open for this branch"
+EXPECT="PR #$PR open into main, with every description line land reads"; LOOK="land --check $PR; ~/bin/pr-body-template.md"
 
 # land --check <pr>: EVERY DESCRIPTION GATE, READ-ONLY (27 Nov 2026). The same body_gates land runs before a merge,
 # on the PR as GitHub has it now: every problem in one list, each with the line to add from pr-body-template.md.
@@ -2071,6 +2124,7 @@ no_checks_stop() {
   [ "$m" = CONFLICTING ] && die "NAMED STOP [MERGE_CONFLICT] PR #$PR conflicts with main, so GitHub runs no CI on it. Merge origin/main into the branch, resolve, push, then land $PR again."
   die "PR #$PR has no checks at all — green cannot be verified"
 }
+EXPECT="every check on PR #$PR to run on its head and pass"; LOOK=""
 PENDING_UNTIL=$(( $(date +%s) + ${LAND_PENDING_WAIT:-1800} ))
 while :; do
   if ! CHECKS="$(gh_read '^\[' pr checks "$PR" --json name,bucket,link)"; then
@@ -2094,7 +2148,13 @@ jq -r '.[] | "\(.name)\t\(.bucket)\t\(.link)"' <<<"$CHECKS"
 # Row 18's shared baseline (renders the real output, fails on the automatic fails): its own sentence.
 BASELINE_RED="$(baseline_red "$CHECKS")" && die "PR #$PR's ship-ready-baseline check is not green ($BASELINE_RED): fix what its job summary lists, push, and land again."
 NOTGREEN="$(not_green "$CHECKS")"
-[ -z "$NOTGREEN" ] || die "PR #$PR is not green — $(echo "$NOTGREEN" | tr '\n' ';')"
+if [ -n "$NOTGREEN" ]; then
+  # failed tests first (they say what broke), then the checks that never ran; the look is the first failed check's own run
+  LOOK="$(jq -r '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | sort_by(if .bucket == "fail" then 0 else 1 end) | map(.link) | map(select(. != null and . != "")) | .[0:2] | join(" ; ")' <<<"$CHECKS" 2>/dev/null)"
+  NOTGREEN="$( { grep -E ': fail$' <<<"$NOTGREEN"; grep -vE ': fail$' <<<"$NOTGREEN"; } | grep .)"
+  die "PR #$PR is not green — $(while IFS= read -r l; do printf '%s (%s); ' "$l" "$(ran_kind "${l##*: }")"; done <<<"$NOTGREEN" | sed 's/; $//')"
+fi
+EXPECT="PR #$PR to pass land's description gates and merge cleanly into main"; LOOK="land --check $PR"
 # --owner: write her words into the PR body once, so the bypass is on the record (owner_override reads it).
 if [ -n "$OWNER_WORDS" ]; then
   [ "$(wc -w <<<"$OWNER_WORDS" | tr -d ' ')" -ge 3 ] || die "--owner needs her own words (3+), e.g. --owner=\"land it deploy it finish it\""
@@ -2208,6 +2268,7 @@ say "3/5  syncing main"
 # throwaway worktree for a scripted deploy), so all this step NEEDS is the fetch. The local branch
 # is fast-forwarded only when that cannot touch her work: on main, and no tracked file changed.
 # --- sync begin (tests/test-land-flow.sh) ---
+EXPECT="main to go green with #$PR merged, then the merge to reach production"; LOOK=""
 git fetch -q origin main || git fetch -q origin main || die "#$PR IS MERGED, but origin/main could not be fetched. Nothing was deployed. Re-run 'land $PR'."
 CUR="$(git symbolic-ref -q --short HEAD)"
 DIRTY="$(git status --porcelain --untracked-files=no)"
@@ -2429,7 +2490,7 @@ case "$CONC" in
       case "$CONC" in
         success) ;;
         "") die "could not read the re-run's conclusion. #$PR IS MERGED and NOT deployed. Check: gh run view $RID" ;;
-        *) die "main is $CONC on the re-run after merging #$PR. Not deploying. Fix main first." ;;
+        *) die "main is $CONC on the re-run after merging #$PR ($(ran_kind "$CONC")). Not deploying. Fix main first." ;;
       esac
     else
     # SUPERSEDED IS NOT BROKEN. `ci.yml` sets concurrency with cancel-in-progress, so merging a
@@ -2448,7 +2509,7 @@ case "$CONC" in
     fi
     ;;
   *)
-    die "main is $CONC after merging #$PR. Not deploying. Fix main first."
+    die "main is $CONC after merging #$PR ($(ran_kind "$CONC")). Not deploying. Fix main first."
     ;;
 esac
 fi
@@ -2652,6 +2713,7 @@ if [ -z "$DEPLOY" ] && { [ "$NAME" = bin ] || [ "$NAME" = seq-bin ]; }; then
     say "LANDED — #$PR is merged, $GREEN, and $LIVE_DIR is already at $(git -C "$LIVE_DIR" log --oneline -1)."
     exit 0
   fi
+EXPECT="$LIVE_DIR (what launchd runs) to fast-forward to main with #$PR"; LOOK="git -C $LIVE_DIR status; git -C $LIVE_DIR log --oneline -3"
   LIVE_CUR="$(git -C "$LIVE_DIR" symbolic-ref -q --short HEAD)"
   [ "$LIVE_CUR" = main ] || die "#$PR IS MERGED and $GREEN, but $LIVE_DIR is on ${LIVE_CUR:-a detached HEAD}, not main, so launchd still runs the old scripts. Switch it back: git -C $LIVE_DIR checkout main && git -C $LIVE_DIR merge --ff-only origin/main"
   LIVE_DIRTY="$(git -C "$LIVE_DIR" status --porcelain --untracked-files=no)"
@@ -2665,6 +2727,7 @@ fi
 
 if [ -z "$DEPLOY" ]; then
   say "5/5  $NAME $SELF — confirming the Cloudflare build(s) on the merge commit"
+EXPECT="every Cloudflare build on #$PR's merge commit to succeed"; LOOK="the Cloudflare check runs on the merge commit: gh pr view $PR --json mergeCommit; gh api repos/{owner}/{repo}/commits/<merge sha>/check-runs"
   MSHA_PAGES="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$MSHA_PAGES" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so the Cloudflare build was not confirmed. Check the check-runs on main."
   d1_postmerge "$MSHA_PAGES" || die "NAMED STOP [D1_MIGRATIONS_PENDING] D1 migrations unconfirmed on ${MSHA_PAGES:0:7}: ${DEPLOY_WHY:-see the output above}. #$PR IS MERGED and $NAME is deploying it against D1 $D1_PREMERGE. The live site may be failing. Apply them now from the repo: npx wrangler d1 migrations apply $D1_PREMERGE --remote"
@@ -2750,12 +2813,12 @@ gate_wait() { # $1 merge sha  $2 gate workflow names, one per line -> 0 once a r
             queue_gh run list --branch main --limit 30 --json databaseId,headSha,status,conclusion,name \
             -q ".[] | select(.name as \$n | $gj | any(.[]; . == \$n)) | \"\(.databaseId)\t\(.headSha)\t\(.status)\t\(.conclusion // \"\")\"")" || {
       printf '\n\033[31mSTOPPED: could not verify — main'"'"'s CI on %s could not be read. #%s IS MERGED; main is NOT confirmed green and production is NOT confirmed. Land again when GitHub answers: land %s\033[0m\n' "${sha:0:7}" "$PR" "$PR"
-      exit "$LAND_RC_UNVERIFIED"; }
+      unanswered_parts "GitHub (main's CI)"; exit "$LAND_RC_UNVERIFIED"; }
     pick="$(deploy_wf_pick "$sha" <<<"$rows")"
     if [ -n "$pick" ]; then
       IFS=$'\t' read -r rid st conc <<<"$pick"
       if [ "$st" = completed ]; then
-        [ "$conc" = success ] || die "#$PR IS MERGED, but main's CI run $rid on ${sha:0:7} finished $conc, so $DEPLOY_WF will not ship it. Main is NOT green; production NOT updated. Read that run: gh run view $rid --log-failed"
+        [ "$conc" = success ] || die "#$PR IS MERGED, but main's CI run $rid on ${sha:0:7} finished $conc ($(ran_kind "$conc")), so $DEPLOY_WF will not ship it. Main is NOT green; production NOT updated. Read that run: gh run view $rid --log-failed"
         echo "     main's CI run $rid carrying ${sha:0:7}: completed success"
         return 0
       fi
@@ -2770,7 +2833,7 @@ gate_wait() { # $1 merge sha  $2 gate workflow names, one per line -> 0 once a r
     if [ "$(date +%s)" -ge "$deadline" ]; then
       if [ -n "$said" ]; then
         printf '\n\033[31mSTOPPED: could not verify — NAMED STOP [MAIN_CI_UNFINISHED] #%s IS MERGED, but main'"'"'s CI run %s on %s was still %s after %s min (left running, not cancelled), so %s has not fired. Main is NOT confirmed green; production NOT confirmed. Land again once it finishes: land %s\033[0m\n' "$PR" "$rid" "${sha:0:7}" "$st" "$((MAIN_WAIT_SECS / 60))" "$DEPLOY_WF" "$PR"
-        exit "$LAND_RC_UNVERIFIED"
+        unanswered_parts "main's CI run (still running)"; exit "$LAND_RC_UNVERIFIED"
       fi
       die "NAMED STOP [MAIN_CI_NOT_FOUND] #$PR IS MERGED, but no run of $(printf '%s' "$2" | paste -sd/ -) carrying ${sha:0:7} appeared on main in $((MAIN_WAIT_SECS / 60)) min, so $DEPLOY_WF has nothing to fire on. Main is NOT confirmed green; production NOT confirmed: gh run list --branch main"
     fi
@@ -2782,6 +2845,7 @@ DEPLOY_WF="${DEPLOY_WF:-deploy.yml}"
 # --- deploy_wait begin (tests/test-land-gate-wait.sh evals this block verbatim) ---
 if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -z "$E2E_WF" ]; then
   say "5/5  $NAME deploys itself through $DEPLOY_WF — waiting for its run on the merge commit rather than racing it"
+EXPECT="$DEPLOY_WF to run on #$PR's merge commit and finish green, so production carries it"; LOOK=""
   DMSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
   [ -n "$DMSHA" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so the $DEPLOY_WF run was not found. Production NOT confirmed: gh run list --workflow $DEPLOY_WF"
   git fetch -q origin main 2>/dev/null || true
@@ -2813,7 +2877,7 @@ if git cat-file -e "origin/main:.github/workflows/$DEPLOY_WF" 2>/dev/null && [ -
     success) if [ -n "$SMOKE" ]; then smoke_check "$SMOKE" || die "#$PR IS MERGED and $DEPLOY_WF run $DRID finished green, but the production smoke check failed. Read that run: gh run view $DRID"; fi
              say "LANDED — #$PR is merged, $GREEN, and $DEPLOY_WF run $DRID shipped ${DMSHA:0:7} to production."; exit 0 ;;
     ""|unreadable) die "#$PR IS MERGED and $GREEN, but $DEPLOY_WF run $DRID's outcome could not be read. Check it before assuming production changed: gh run view $DRID" ;;
-    *)       die "#$PR IS MERGED and $GREEN, but $DEPLOY_WF run $DRID finished $DCONC. Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
+    *)       die "#$PR IS MERGED and $GREEN, but $DEPLOY_WF run $DRID finished $DCONC ($(ran_kind "$DCONC")). Production was NOT updated (or not proven). Read that run: gh run view $DRID --log-failed" ;;
   esac
 fi
 # --- deploy_wait end ---
@@ -2826,6 +2890,7 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
   # FROM origin/main, NEVER FROM HER CHECKOUT. Step 3 no longer switches or pulls her tree, so the
   # deploy runs through deploy_at: a throwaway detached worktree of the commit main just went green
   # on, removed afterwards.
+EXPECT="the deploy from main to finish and production to carry #$PR"; LOOK="the deploy output above"
   DSHA="$(git rev-parse origin/main 2>/dev/null)"
   [ -n "$DSHA" ] || die "#$PR IS MERGED and $GREEN, but origin/main could not be read here, so nothing was deployed. Re-run 'land $PR'."
   deploy_at "$DSHA" "$DEPLOY" || die "the deploy from ${DSHA:0:7} failed: $DEPLOY_WHY. #$PR IS MERGED and $GREEN (a 7403 is a missing CLOUDFLARE_ACCOUNT_ID, not permissions)."
@@ -2834,6 +2899,7 @@ if [ -z "$E2E_WF" ] && [ -z "$STAGING" ]; then
 fi
 
 # STAGING NOW; PRODUCTION AS THE PLAN DECIDES (routes with STAGING / E2E_WF / PROMOTE_VIA; header).
+EXPECT="staging, then production as the plan decides, to carry #$PR"; LOOK=""
 MSHA="${MERGESHA:-$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null)}"
 [ -n "$MSHA" ] || die "#$PR IS MERGED and $GREEN, but its merge commit could not be read, so nothing was deployed. Re-run 'land $PR'."
 E2E_CONC=""; REASON=""; LAST=""; PROD_STATE=""; SMALL_NOTE=""
@@ -2903,6 +2969,7 @@ for step in $PLAN; do
       if [ -z "$LAST" ] && { [ -z "$E2E_CONC" ] || [ "$E2E_CONC" = cancelled ] || [ "$E2E_CONC" = skipped ]; }; then
         printf '\n\033[31mSTOPPED: could not verify (%s) — the %s history on main could not be read, so "the suite is not known red" is unproven: %s. #%s IS MERGED%s; production untouched. Land again when GitHub answers: land %s\033[0m\n' \
           "$(gh_kind "$(gh_err)")" "$E2E_WF" "$(gh_err)" "$PR" "${STAGING:+, staging runs ${MSHA:0:7}}" "$PR"
+          unanswered_parts "GitHub (the $E2E_WF history)"
         exit "$LAND_RC_UNVERIFIED"
       fi
       IFS=$'\t' read -r LCONC LRID LSHA <<<"$LAST"
@@ -2923,7 +2990,7 @@ for step in $PLAN; do
         could-not-dispatch) die "NAMED STOP [E2E_NOT_DISPATCHED] could not dispatch $E2E_WF on main for #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Run it: land --promote $NAME --run-e2e" ;;
         no-run-appeared) die "NAMED STOP [E2E_NOT_DISPATCHED] dispatched $E2E_WF on main for #$PR ($REASON) but no run appeared in 2 minutes. ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Check: gh run list --workflow $E2E_WF" ;;
         success) : ;;
-        *) die "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] $E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC after #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Fix main first: gh run view $RID" ;;
+        *) die "NAMED STOP [E2E_RED_AFTER_LARGE_CHANGE] $E2E_WF run $RID on main ${HEADSHA:0:7} ended $CONC ($(ran_kind "$CONC")) after #$PR ($REASON). ${STAGING:+Staging runs ${MSHA:0:7}; }production untouched. Fix main first: gh run view $RID" ;;
       esac
       # That success is exactly what the repo's own promote workflow (if any) fires on: wait for it,
       # then read production — it has usually just shipped this very sha.

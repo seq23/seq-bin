@@ -299,6 +299,9 @@ outcome_lines() { # key <TAB> sha <TAB> task <TAB> by <TAB> expect <TAB> outcome
   sed -nE 's/^- OUTCOME-CHECK DUE ([^ ]+#[0-9]+) ([^ ]+) — task:([^ ]*) by:([0-9]{4}-[0-9]{2}-[0-9]{2}) expect:(>=[0-9]+|infer) — outcome: (.*) — check: (.*)$/\1\t\2\t\3\t\4\t\5\t\6\t\7/p' "$DUE_FILE" \
     | sed -E 's/[[:space:]]+$//'
 }
+expected_words() { # $1 ">=N" | infer -> the expected part of a notice
+  case "$1" in ">="*) printf 'at least %s' "${1#>=}" ;; *) printf 'the outcome the PR promised' ;; esac
+}
 days_since() { python3 -c 'import sys,datetime as d; print((d.date.fromisoformat(sys.argv[2])-d.date.fromisoformat(sys.argv[1])).days)' "$1" "$2"; }
 mask() { sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[email]/g'; }   # public comments: counts, never an address
 one_line() { tr '\n\t' '  ' | sed -E 's/\. +/; /g; s/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c1-220; }
@@ -362,6 +365,7 @@ notice() { # $1 key  $2 text -> rc 0 written (or already written)
   if [ -n "$NOTICE_CMD" ]; then "$NOTICE_CMD" "$1" "$2" </dev/null
   else (cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$2" </dev/null)
   fi >>"$LOG" 2>&1 || { say "  NAMED STOP [NOTICE_UNWRITTEN] the Notices line for $1 could not be written (see $LOG); the line in the list and the PR comment stand"; return 1; }
+  printf '%s Notices: %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$2" >> "$LOG"   # the line she reads, kept in the local log
   : > "$m"
 }
 READ_TOOLS='A check is ONE read and its pipes. No shell runs it, so no variables, no $(…), no ; && ||, no redirects.
@@ -508,13 +512,15 @@ Judged by a model with no tools, from that output alone.")" || { url="(comment n
     FAIL)
       outcome_mark "$key" FAIL "$url"; ofails=$((ofails + 1)); say "  FAIL $key $url — $seen"
       sheet_set "$task" "$key" "STATUS: FAIL $key $sha $TODAY — outcome NOT WORKING: $seen ($url)"
-      notify "NOT WORKING: $slugp $shortout — $seen"
-      notice "outcome:$key:not-working" "$slugp $shortout: NOT WORKING — $seen" || ounproved=$((ounproved + 1)) ;;
+      # Three parts (her yes 25 Nov 2026): what was expected, what was seen, where to look.
+      notify "NOT WORKING: $slugp $shortout — expected $(expected_words "$expect"); saw ${seen#saw }; look: $url"
+      notice "outcome:$key:not-working" "$slugp $shortout: NOT WORKING — expected $(expected_words "$expect"); saw ${seen#saw }; look: $url" || ounproved=$((ounproved + 1)) ;;
     *)
       ounproved=$((ounproved + 1)); : > "$tried"
       say "  COULDNT-CHECK $key — $seen; the line stays DUE"
-      [ "$late" -ge 2 ] && notify "NOT CHECKED for $late days: $slugp $shortout — $seen"
-      notice "outcome:$key:not-checked:$TODAY" "$slugp $shortout: NOT CHECKED — $seen" || true ;;
+      # NOT CHECKED is never a failed test: the check never gave a reading. It still says where to look.
+      [ "$late" -ge 2 ] && notify "NOT CHECKED for $late days: $slugp $shortout — the check never gave a reading: $seen; look: $url"
+      notice "outcome:$key:not-checked:$TODAY" "$slugp $shortout: NOT CHECKED — the check never gave a reading: $seen; look: $url" || true ;;
   esac
 done <<<"$OUTL"
 ran=$((ran + oruns)); fails=$((fails + ofails)); unproved=$((unproved + ounproved))

@@ -222,9 +222,12 @@ fixture() {
   git -C "$W/pusher" commit -qm "the PR"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
   git -C "$W/pusher" push -q origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
 }
+export LAND_STOPS_DIR="$W/stops"   # land's record of each PR's last stop ("tried before"), kept inside the test
 run_land() { # name [flags...] -> sets OUT, RC
   local name="$1"; shift
+  [ -n "${KEEP_STOPS:-}" ] || LAND_STOPS_DIR="$(mktemp -d "$W/stops.XXXXXX")"   # a fresh PR history per scenario, unless it tests "tried before"
   OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 PAGES_APPEAR_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" 7 "$@" 2>&1)"; RC=$?
+  printf '%s\n\0' "$OUT" >> "$W/every-out"   # every stop of every run is read for its three parts at the end
   [ -z "${LAND_TEST_SHOW:-}" ] || printf '%s\n' "$OUT" | sed 's/^/    | /'   # LAND_TEST_SHOW=1: print what land said
 }
 npm_log() { cat "$FAKE/npm-log" 2>/dev/null || true; }
@@ -236,6 +239,7 @@ SMALL_REASON="small change: 12 lines, 1 files; shipped on the fast check, e2e on
 run_promote() { # name [flags...] -> sets OUT, RC   (LAND_WAIT_FLOOR_SECS from the caller, default 360)
   local name="$1"; shift
   OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" --promote "$@" 2>&1)"; RC=$?
+  printf '%s\n\0' "$OUT" >> "$W/every-out"
 }
 fails=0; passes=0
 check() { # label, command...
@@ -524,6 +528,22 @@ echo ',{"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/run
 LAND_PENDING_WAIT=2 run_land approvalprep   # bounded: a land that ignored the failure would wait, then stop as pending
 check "a failure beside a pending check stops at once: rc 1, not green — lint: fail" eval '[ "$RC" -eq 1 ] && has "lint: fail"'
 check "…after one read, no waiting" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
+check "…it says a test failed (not 'never ran') and points at that check's own run" eval 'has "lint: fail (a test failed)" && has "where to look: https://github.com/o/r/actions/runs/555/job/2"'
+check "…and names what was expected" eval 'has "expected:      every check on PR #7 to run on its head and pass"'
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+echo ',{"name":"e2e","bucket":"cancel","link":"https://github.com/o/r/actions/runs/556/job/3"}' > "$FAKE/pending-also"
+LAND_PENDING_WAIT=2 run_land approvalprep
+check "a CANCELLED check is told apart from a failed test: 'never ran to the end, so no test result exists'" eval '[ "$RC" -eq 1 ] && has "e2e: cancel (the check never ran to the end, so no test result exists)" && ! has "(a test failed)"'
+echo "=== tried before (her yes 25 Nov 2026): a second stop of the same PR says what the first one was ==="
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+echo ',{"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/2"}' > "$FAKE/pending-also"
+LAND_PENDING_WAIT=2 run_land approvalprep
+check "a first stop says nothing was tried before" eval '! has "tried before:"'
+KEEP_STOPS=1 LAND_PENDING_WAIT=2 run_land approvalprep
+check "the same stop again says it was tried, that it stopped the SAME way, and to change something first" eval 'has "tried before:" && has "stopped the SAME way" && has "change what is named above first"'
+echo ',{"name":"e2e","bucket":"cancel","link":"https://github.com/o/r/actions/runs/556/job/3"}' > "$FAKE/pending-also"
+KEEP_STOPS=1 LAND_PENDING_WAIT=2 run_land approvalprep
+check "a different stop of the same PR quotes what the last attempt stopped with" eval 'has "tried before:" && has "it stopped with: PR #7 is not green — lint: fail (a test failed)"'
 check "…and nothing was merged" eval '! merge_called'
 
 echo "=== 10f. no checks on a conflicted PR is named a merge conflict (22 Nov 2026, boss-os #539) ==="
@@ -1188,6 +1208,33 @@ check "outcome under her bypass: never blocked; records UNDECLARED and writes a 
 rm -f "$FAKE/no-outcome" "$FAKE/no-notbuilt"; unset LAND_TODAY LAND_TASK
 unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
 export LAND_DUE_FILE="$W/post-land-checks.md"
+
+echo "=== EVERY STOP SAYS THREE THINGS (her yes 25 Nov 2026): expected, what happened, where to look ==="
+# Read every stop land printed in every run above. A part missing or empty on ANY stop is red, so a new stop
+# added without its stage's expect line, or a die() that drops a part, fails here.
+SHAPE="$(python3 - "$W/every-out" <<'PY'
+import re, sys
+outs = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\0")
+stops = bad = never = failed = 0
+for out in outs:
+    lines = re.sub(r"\x1b\[[0-9;]*m", "", out).split("\n")
+    for i, l in enumerate(lines):
+        if not l.startswith("STOPPED: "): continue
+        stops += 1
+        nxt = lines[i + 1:i + 5]
+        for part in ("  expected:", "  what happened:", "  where to look:"):
+            m = [x for x in nxt if x.startswith(part)]
+            if not m or not m[0][len(part):].strip():
+                bad += 1; print(f"MISSING{part.strip()} after: {l[:120]}")
+        if "is not green" in l:
+            if "(a test failed)" in l: failed += 1
+            elif "(the check never ran to the end" in l: never += 1
+            else: bad += 1; print(f"NOT-GREEN WITHOUT KIND: {l[:120]}")
+print(f"stops={stops} bad={bad} failed={failed} never={never}")
+PY
+)"
+check "every stop in every run carries expected, what happened and where to look ($(tail -1 <<<"$SHAPE"))" eval '[ "$(grep -c "^MISSING\|^NOT-GREEN" <<<"$SHAPE")" -eq 0 ] && [ "$(sed -nE "s/.*stops=([0-9]+).*/\1/p" <<<"$SHAPE")" -ge 20 ]'
+[ "$(grep -c "^MISSING\|^NOT-GREEN" <<<"$SHAPE")" -eq 0 ] || head -5 <<<"$SHAPE"
 
 # Rule 0: this must have examined something.
 [ "$passes" -ge 160 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }

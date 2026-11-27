@@ -213,6 +213,7 @@ check "exit 1 kept" rc ghdown 1
 check "ISSUE_UNFILED named" has "$W/ghdown.log" "NAMED STOP [ISSUE_UNFILED]"
 run ghopen FAKE_LOAD_OVERRIDE="a one=" FAKE_GH_EXISTING=7
 check "comments on the open issue" has "$W/ghopen.gh" "issue comment 7 -R seq23/seq-bin"
+check "the open issue is found by exact title from a plain list, not the lagging search" hasnt "$W/ghopen.gh" "--search"
 
 echo "=== 12. Central date edges ==="
 run early SKILL_CHECK_NOW=2026-11-29T05:59:00Z

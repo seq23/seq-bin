@@ -178,7 +178,8 @@ function line(r) {
 }
 
 function issue(title, body) {
-  const list = spawnSync(GH, ["issue", "list", "-R", REPO, "--state", "open", "--search", `"${title}" in:title`, "--json", "number,title", "-q", `.[] | select(.title == "${title}") | .number`], { encoding: "utf8" });
+  // A plain list, not --search: the search index lags minutes behind, so a same-day re-run would file a second issue.
+  const list = spawnSync(GH, ["issue", "list", "-R", REPO, "--state", "open", "--limit", "200", "--json", "number,title", "-q", `.[] | select(.title == ${JSON.stringify(title)}) | .number`], { encoding: "utf8" });
   if (list.status !== 0) return `NAMED STOP [ISSUE_UNFILED] gh could not list issues (${(list.stderr || "").trim().slice(0, 120)}); the report stands`;
   const n = (list.stdout || "").trim().split("\n")[0];
   const r = n ? spawnSync(GH, ["issue", "comment", n, "-R", REPO, "--body", body], { encoding: "utf8" })

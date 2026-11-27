@@ -552,7 +552,7 @@ function rollup(sites, week, state, lastState) {
     const wk = state.sites[s.id] || {}; const rows = Object.values(wk.asked || {}); const c = rows.filter((r) => r.status === "CHECKED");
     const lw = lastState?.sites?.[s.id]; const lc = lw ? Object.values(lw.asked || {}).filter((r) => r.status === "CHECKED") : [];
     checkedAll += c.length;
-    L.push(`| ${s.label} | ${c.length}/${QUESTIONS} | ${c.length ? `${c.filter((r) => r.ours).length} of ${c.length}` : "—"} | ${lc.length ? `${lc.filter((r) => r.ours).length} of ${lc.length}` : "not read"} | ${c.reduce((a, r) => a + r.queries.length, 0)} | ${wk.seeds ? seedLine(wk.seeds).replace(/\|/g, "/") : "—"} |`);
+    L.push(`| ${s.label} | ${c.length}/${QUESTIONS} | ${c.length ? `${c.filter((r) => r.ours).length} of ${c.length}` : "—"} | ${lc.length ? `${lc.filter((r) => r.ours).length} of ${lc.length}` : "not read"} | ${c.reduce((a, r) => a + r.queries.length, 0)} | ${wk.seeds ? (wk.seeds.status === "pr" ? `${wk.seeds.add ? `${wk.seeds.add.length} seed(s): ` : ""}${wk.seeds.url}` : `${wk.seeds.status}: ${String(wk.seeds.why || "").split(":")[0]}`).replace(/\|/g, "/") : "—"} |`);
   }
   const nights = state.nights || [];
   L.push("", "## Nights", nights.length ? nights.map((n) => `- ${n.night}: ${n.verdict} — ${n.line}`).join("\n") : "- none run yet this week");

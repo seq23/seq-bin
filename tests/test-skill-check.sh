@@ -44,7 +44,7 @@ M
 cat > "$W/bin/ai-run" <<'AI'
 #!/bin/bash
 S="$FAKE_STORE"; echo x >> "$S/calls"
-echo "args=$* caller=${AI_RUN_CALLER:-} nocredit=${AI_RUN_NO_CREDIT:-} mcp=${AI_RUN_MCP:-} bare=${AI_RUN_BARE:-} key=${ANTHROPIC_API_KEY:-} cl=${AI_RUN_CLAUDE_ARGS:-}" >> "$S/how"
+echo "args=$* caller=${AI_RUN_CALLER:-} nocredit=${AI_RUN_NO_CREDIT:-} mcp=${AI_RUN_MCP:-} bare=${AI_RUN_BARE:-} key=${ANTHROPIC_API_KEY:-} runs=${AI_RUN_MAX_RUNS:-} cl=${AI_RUN_CLAUDE_ARGS:-}" >> "$S/how"
 ask="${!#}"
 skills="$(grep -F -- "$ask|" "$FAKE_MAP" | head -1 | cut -d'|' -f2)"
 [ -n "${FAKE_LOAD_OVERRIDE:-}" ] && case "$ask" in "${FAKE_LOAD_OVERRIDE%%=*}") skills="${FAKE_LOAD_OVERRIDE#*=}" ;; esac
@@ -111,7 +111,7 @@ check "ranking read from the transcripts (alpha 5 first; retired skill dropped)"
 check "retired skill not ranked" hasnt "$(R ok)" "retired-skill"
 check "runs go through ai-run as brain" has "$W/ok.how" "args=--role brain -- a one"
 check "Skill is the only tool, two turns, no saved session" has "$W/ok.how" "cl=--tools Skill --max-turns 2 --output-format stream-json --verbose --no-session-persistence"
-check "never the API key: AI_RUN_NO_CREDIT=1 and the key dropped" has "$W/ok.how" "nocredit=1 mcp=none bare= key= cl="
+check "never the API key: AI_RUN_NO_CREDIT=1 and the key dropped" has "$W/ok.how" "nocredit=1 mcp=none bare= key= runs="
 check "caller is skill-check" has "$W/ok.how" "caller=skill-check"
 
 echo "=== 2. a misfire: the right skill does not load -> FAIL, exit 1, one issue ==="
@@ -205,6 +205,7 @@ run only -- --only beta
 check "exit 0" rc only 0
 check "only beta's 4 asks ran" [ "$(wc -l < "$W/only.calls" | tr -d ' ')" = 4 ]
 check "own file" test -f "$W/out/only/2026-11-29-only.md"
+check "a same-day re-run keeps the full run's day cap (8 asks x2 +10), not its own 4 asks" has "$W/only.how" "runs=26 cl="
 check "weekly file untouched" test ! -f "$(R only)"
 
 echo "=== 11. gh down: the stop is named, the exit stays 1; an open issue gets a comment ==="

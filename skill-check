@@ -200,6 +200,8 @@ async function main() {
   fs.rmSync(file, { force: true }); // an old report can never pass for this run's
   let items;
   try { items = loadAsks(); } catch (e) { writeReport(file, { fatal: e.message }); throw e; }
+  // ai-run's cap counts the caller's runs across the whole day, so a same-day --only re-run gets the full run's cap.
+  const maxRuns = items.length * 2 + 10;
   if (only) items = items.filter((i) => only.has(i.skill));
   if (items.length === 0) {
     const e = new Stop(2, "NO_ASKS_RAN", `0 asks to run${only ? ` for --only ${[...only].join(",")}` : ""}; 0 checked is a FAIL, never a pass.`);
@@ -207,7 +209,7 @@ async function main() {
   }
   const covered = new Set(items.map((i) => i.skill));
   const notCovered = only ? [] : (ranked.top || []).filter(([s]) => !covered.has(s));
-  const t0 = Date.now(), results = [], maxRuns = items.length * 2 + 10;
+  const t0 = Date.now(), results = [];
   let wall = null;
   for (const item of items) {
     if (!installed.has(item.skill)) { results.push({ ...item, loaded: [], verdict: "FAIL", why: `${item.skill} is not in ${SKILLS}` }); continue; }

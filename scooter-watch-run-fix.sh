@@ -25,7 +25,11 @@ REPORT_LOG="$STATE_DIR/report.log"
 # agent backgrounded its build wait, ended its turn on "the background wait will wake me", and idled
 # to the 2h cap with its fix landed but no report, issue or fix-log entry. With background tasks off,
 # every wait is one foreground call that returns to the agent.
-CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 AI_RUN_WORKER=claude AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
+# 27 Nov 2026 (tail-20261127T222243Z): ai-run's own default cap (3600 s) stopped the tail at 1 h, under
+# the 2 h watchdog it was designed for, with no report. The run gets the watchdog's budget less 5 min,
+# so ai-run stops it cleanly (rc 124) before the watchdog's hard kill.
+TAIL_SECS="${SCOOTER_WATCH_FIX_CAP:-7200}"; TAIL_SECS=$(( TAIL_SECS > 600 ? TAIL_SECS - 300 : TAIL_SECS ))
+CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 AI_RUN_MAX_SECS="$TAIL_SECS" AI_RUN_WORKER=claude AI_RUN_ADD_DIRS="$STATE_DIR" AI_RUN_CALLER="scooter-watch-run-fix.sh" \
   "$AI_RUN" --role worker --cwd "$REPO" --network --out "$TAIL_LOG" -- "$(cat "$PROMPT_FILE")" \
   < /dev/null > /dev/null 2>&1 &
 echo $! > "$FIXLOCK/claude_pid"
@@ -54,6 +58,20 @@ if [ "$RC" -eq 75 ] || [ "$RC" -eq 69 ]; then
   fi
 else
   rm -f "$CODEX_WAIT"
+  # 27 Nov 2026: a run stopped by a cap or a kill (124 TIME_CAP, 137/143 killed) without its report used
+  # to leave the email marked tailed, so nobody ever looked at it. It goes back on the queue ONCE
+  # (retried-message-ids.txt); a second stop is reported as before and not retried again.
+  if { [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ] || [ "$RC" -eq 143 ]; } && [ -s "$FIXLOCK/ids" ] \
+     && { [ ! -s "${REPORT_FILE:-/dev/null}" ] || grep -q 'INCOMPLETE' "$REPORT_FILE"; }; then
+    TAILED_FILE="$STATE_DIR/tailed-message-ids.txt"; RETRIED="$STATE_DIR/retried-message-ids.txt"; touch "$RETRIED"
+    NEW_IDS="$(grep -vxF -f "$RETRIED" "$FIXLOCK/ids" || true)"
+    if [ -n "$NEW_IDS" ] && [ -f "$TAILED_FILE" ]; then
+      printf '%s\n' "$NEW_IDS" > "$FIXLOCK/retry-ids"
+      grep -vxF -f "$FIXLOCK/retry-ids" "$TAILED_FILE" > "$TAILED_FILE.tmp"; mv "$TAILED_FILE.tmp" "$TAILED_FILE"
+      cat "$FIXLOCK/retry-ids" >> "$RETRIED"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) rc=$RC without a report — $(wc -l < "$FIXLOCK/retry-ids" | tr -d ' ') email(s) re-queued for one retry" >> "$REPORT_LOG"
+    fi
+  fi
 fi
 
 if [ -n "$REPORT_FILE" ]; then

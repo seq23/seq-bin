@@ -107,19 +107,36 @@ grep -q 'NOTE-SESS-10b' "$H" || bad "jobs: a session note was lost when the Jobs
 mkdir -p "$T/fakebin"; printf '{"type":"user","message":{"content":"TRANSCRIPT-TEXT"}}\n' > "$T/t.jsonl"
 cat > "$T/fakebin/claude" <<'SH'
 #!/bin/bash
-echo call >> "$HOME/claude-calls"; printf '## In flight\n- FAKE-MODEL-NOTE\n'
+echo call >> "$HOME/claude-calls"; sleep 4; printf '## In flight\n- FAKE-MODEL-NOTE\n'
 SH
 chmod +x "$T/fakebin/claude"
+# The real hook path (27 Nov 2026): it must RETURN AT ONCE and write the note from a detached copy, because a
+# hook that waited on the summariser held every compaction for minutes. Markers and the lock live in $T.
+export TMPDIR="$T"
 hook(){ printf '%s' "$1" | PATH="$T/fakebin:$PATH" bash "$S" >/dev/null 2>&1; }
+until_true(){ local n=0; until eval "$1"; do n=$((n+1)); [ $n -gt 60 ] && return 1; sleep 0.25; done; }
 before="$(cat "$H")"
 hook "{\"session_id\":\"sess-12\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\",\"agent_id\":\"a123\",\"agent_type\":\"builder\"}"
+sleep 1
 [ -e "$T/claude-calls" ] && bad "subagent compaction: the summariser model was called"
 [ "$(cat "$H")" = "$before" ] || bad "subagent compaction: HANDOFF.md was changed"
+t0=$(date +%s)
 hook "{\"session_id\":\"sess-12\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\"}"
+[ $(( $(date +%s) - t0 )) -le 2 ] || bad "main compaction: the hook waited on the summariser instead of returning at once"
+grep -q 'FAKE-MODEL-NOTE' "$H" && bad "main compaction: the note was there before the 4 s summariser could finish (it did not run detached)"
+until_true "grep -q 'FAKE-MODEL-NOTE' '$H'" || bad "main compaction: the model's note was not written"
 [ "$(cat "$T/claude-calls" 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || bad "main compaction: the summariser was not called exactly once"
-grep -q 'FAKE-MODEL-NOTE' "$H" || bad "main compaction: the model's note was not written"
+# A second compaction of the same session inside 10 minutes keeps the note and pays for no second summary.
+before="$(cat "$H")"
+hook "{\"session_id\":\"sess-12\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\"}"
+sleep 1
+[ "$(cat "$T/claude-calls" | wc -l | tr -d ' ')" = 1 ] || bad "repeat compaction: the summariser was called again inside 10 minutes"
+[ "$(cat "$H")" = "$before" ] || bad "repeat compaction: HANDOFF.md was rewritten inside 10 minutes"
+# Another session is not held back by sess-12's window.
+hook "{\"session_id\":\"sess-13\",\"transcript_path\":\"$T/t.jsonl\",\"trigger\":\"auto\"}"
+until_true "grep -q 'session:sess-13' '$H'" || bad "another session's compaction wrote no note"
 before="$(cat "$H")"
 hook 'not json {'
-[ "$(cat "$H")" = "$before" ] && bad "unreadable hook input: no stamped note was written"
+until_true '[ "$(cat "$H")" != "$before" ]' || bad "unreadable hook input: no stamped note was written"
 rm -rf "$T"
 [ $fail = 0 ] && echo "PASS test-handoff-keeps-curated" || exit 1

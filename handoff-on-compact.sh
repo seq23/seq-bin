@@ -24,6 +24,31 @@ if [ -n "$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null)" ]; th
   exit 0
 fi
 SESSION="$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)"
+
+# NEVER BLOCK THE COMPACTION (27 Nov 2026, measured): this hook held every compaction for up to 150 s on the
+# Opus summary below. With compaction firing about once a minute (12 in 13 minutes that morning) the session
+# could not finish a turn or answer her. So the hook now hands the work to a detached copy of itself and
+# returns at once; the copy writes the note. Tests (HANDOFF_TEST_SUMMARY) and HANDOFF_BG run in the foreground.
+# One note per session per 10 minutes: a second compaction inside that window keeps the note already written
+# (or being written) instead of paying for another Opus call, and says so.
+if [ -z "${HANDOFF_BG:-}" ] && [ -z "${HANDOFF_TEST_SUMMARY+set}" ]; then
+  marker="${TMPDIR:-/tmp}/handoff-bg-${SESSION//[^A-Za-z0-9_-]/}.stamp"
+  if [ -n "$(find "$marker" -mmin -10 2>/dev/null)" ]; then
+    echo "handoff-on-compact: kept this session's note from under 10 minutes ago (no second summary)" >&2
+    printf '{"systemMessage":"~/HANDOFF.md already has this session'"'"'s note from the last 10 minutes; kept it."}\n'
+    exit 0
+  fi
+  in_file="$(mktemp "${TMPDIR:-/tmp}/handoff-in.XXXXXX")" || in_file=""
+  if [ -n "$in_file" ] && printf '%s' "$INPUT" > "$in_file"; then
+    touch "$marker"
+    HANDOFF_BG="$in_file" nohup "$0" < "$in_file" >/dev/null 2>>"${TMPDIR:-/tmp}/handoff-on-compact.log" &
+    disown 2>/dev/null || true
+    printf '{"systemMessage":"Session note is being written to ~/HANDOFF.md in the background."}\n'
+    exit 0
+  fi
+  # Could not hand off: fall through and write the note in the foreground rather than write nothing.
+fi
+[ -n "${HANDOFF_BG:-}" ] && [ -f "${HANDOFF_BG}" ] && rm -f "${HANDOFF_BG}"
 TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)"
 TRIGGER="$(printf '%s' "$INPUT" | jq -r '.trigger // "auto"' 2>/dev/null)"
 STAMP_LOCAL="$(date '+%A %-d %B %Y, %H:%M %Z')"

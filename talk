@@ -1,0 +1,195 @@
+#!/bin/bash
+# talk — keep working with Claude on the free $200/month API credit when her Claude plan runs out.
+#
+#   talk "<message>"         carries on the most recent Claude conversation started in her home folder
+#   talk --new "<message>"   starts a fresh conversation
+#   echo "<message>" | talk  the message from stdin
+#
+# Her words, 27 Nov 2026: "A 'talk' command so she can keep working with Claude on the free $200 API credit
+# when her plan runs out". Each turn is ONE `claude -p` run from her home folder with her own settings and
+# CLAUDE.md (same rules, same tools, the permission mode her settings set), through `ai-run`'s credit run:
+# the Boss OS vault's ANTHROPIC_API_KEY goes into that one run's environment through `npm run -s vault:run`,
+# never an argument, never printed, and its value is replaced in everything shown or kept (ai-run).
+#
+# THE CREDIT. The API cannot report the credit left to a normal key, so the month's spend is counted from the
+# usage log every credit run writes (~/Library/Logs/ai-run.log, engine=claude-credit cost_usd=…), since the
+# day the credit renews (the 27th). Before a turn:
+#   · $200 used, or less than $1 left: no call at all; "The free API credit is used up for this month; it
+#     resets on <date>." exit 76.
+#   · the usage log cannot be read: no call at all; "couldn't read the credit", exit 69. Never guessed free.
+#   · otherwise the turn may spend at most what is left (claude's --max-budget-usd).
+# The API's own $0 stop is the last guard: no auto-reload and nothing bought, so it cannot bill her; its
+# "Credit balance is too low" is shown as the used-up line. After each turn: "this turn ~$X.XX · used this
+# month $Y.YY of $200". The spend counted is this Mac's runs only (the usage log).
+# On the credit, claude.ai connectors (Gmail, Calendar, Drive) and Claude in Chrome are off.
+#
+# Exit: 0 answered; 76 the credit is used up, refused or did not answer; 69 the credit could not be read;
+# 64 usage; any other ai-run stop (75 RUN_CAP, 124 TIME_CAP) passes through with its line.
+# Knobs (tests and her own use): TALK_MODEL (default: ai-run's opus), TALK_CREDIT_USD (200),
+# TALK_CREDIT_FLOOR_USD (1.00), TALK_CREDIT_RESET_DAY (27), TALK_TODAY (YYYY-MM-DD), AI_RUN_LOG, TALK_AI_RUN.
+set -uo pipefail
+
+usage() {
+  cat <<'TXT'
+talk "<message>"        keep working with Claude on the free $200/month API credit (carries on your last
+                        conversation in your home folder; same rules file, tools and permission mode)
+talk --new "<message>"  start a fresh conversation      echo "<message>" | talk   message from stdin
+Before each turn it counts the credit used this month from ~/Library/Logs/ai-run.log; at $200 (or under $1
+left) it stops without calling Claude. After each turn: "this turn ~$X.XX · used this month $Y.YY of $200".
+Gmail, Calendar, Drive and Claude in Chrome are off on the credit.
+TXT
+  exit "${1:-64}"
+}
+
+NEW=0 MSG="" HAVE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage 0 ;;
+    --new) NEW=1; shift ;;
+    --) shift; [ $# -gt 0 ] && { MSG="$*"; HAVE=1; }; break ;;
+    -*) echo "talk: unknown option: $1" >&2; usage ;;
+    *) MSG="$*"; HAVE=1; break ;;
+  esac
+done
+if [ "$HAVE" -eq 0 ]; then
+  [ -t 0 ] && usage
+  MSG="$(cat)"
+fi
+[[ "$MSG" =~ [^[:space:]] ]] || { echo "talk: the message is empty; nothing was sent." >&2; exit 64; }
+
+LOG="${AI_RUN_LOG:-$HOME/Library/Logs/ai-run.log}"
+AI_RUN="${TALK_AI_RUN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ai-run}"
+ALLOWANCE="${TALK_CREDIT_USD:-200}" FLOOR="${TALK_CREDIT_FLOOR_USD:-1.00}" RDAY="${TALK_CREDIT_RESET_DAY:-27}"
+for v in "$ALLOWANCE" "$FLOOR"; do [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "talk: TALK_CREDIT_USD and TALK_CREDIT_FLOOR_USD must be numbers" >&2; exit 64; }; done
+[[ "$RDAY" =~ ^[0-9]+$ ]] && [ "$RDAY" -ge 1 ] && [ "$RDAY" -le 28 ] || { echo "talk: TALK_CREDIT_RESET_DAY must be 1 to 28" >&2; exit 64; }
+[ -x "$AI_RUN" ] || { echo "NAMED STOP [NO_AI_RUN] talk needs ai-run at $AI_RUN; nothing was sent."; exit 69; }
+
+# --- the credit month: from the last renewal day (inclusive) to the next ---------------------------------
+TODAY="${TALK_TODAY:-$(date +%Y-%m-%d)}"
+[[ "$TODAY" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]] || { echo "talk: TALK_TODAY must be YYYY-MM-DD" >&2; exit 64; }
+Y=$((10#${BASH_REMATCH[1]})) M=$((10#${BASH_REMATCH[2]})) D=$((10#${BASH_REMATCH[3]}))
+if [ "$D" -ge "$RDAY" ]; then SY=$Y SM=$M; NY=$Y NM=$((M + 1)); else SY=$Y SM=$((M - 1)); NY=$Y NM=$M; fi
+[ "$SM" -eq 0 ] && { SM=12; SY=$((SY - 1)); }
+[ "$NM" -eq 13 ] && { NM=1; NY=$((NY + 1)); }
+SINCE="$(printf '%04d-%02d-%02d' "$SY" "$SM" "$RDAY")" UNTIL="$(printf '%04d-%02d-%02d' "$NY" "$NM" "$RDAY")"
+MONTHS=(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
+RESETS="$RDAY ${MONTHS[$((NM - 1))]} $NY"
+
+# used <-> "<dollars> <runs of unknown cost>", from every credit run in the log since SINCE (any caller: one credit)
+read_used() {
+  [ -f "$LOG" ] && [ -r "$LOG" ] || return 1
+  awk -F'\t' -v since="$SINCE" -v until="$UNTIL" '
+    substr($1, 1, 10) >= since && substr($1, 1, 10) < until && $3 == "engine=claude-credit" {
+      for (i = 4; i <= NF; i++) {
+        if ($i ~ /^cost_usd=[0-9]+(\.[0-9]+)?$/) s += substr($i, 10)
+        else if ($i ~ /^cost_usd=/) u++
+      }
+    }
+    END { printf "%.6f %d\n", s, u }' "$LOG"
+}
+money() { awk -v x="$1" 'BEGIN { printf "%.2f", x }'; }
+used_text() { # "$Y.YY" or "at least $Y.YY (N runs of unknown cost)"
+  if [ "$2" -gt 0 ]; then printf 'at least $%s (%s run(s) of unknown cost)' "$(money "$1")" "$2"; else printf '$%s' "$(money "$1")"; fi
+}
+used_up() {
+  echo "The free API credit is used up for this month; it resets on $RESETS."
+  echo "(used this month $(used_text "$1" "$2") of \$$(money "$ALLOWANCE"); nothing was sent)"
+  exit 76
+}
+
+if ! USED_LINE="$(read_used)"; then
+  echo "talk: couldn't read the credit ($LOG cannot be read), so nothing was sent; it is never guessed free."
+  exit 69
+fi
+read -r USED UNKNOWN <<< "$USED_LINE"
+LEFT="$(awk -v a="$ALLOWANCE" -v u="$USED" 'BEGIN { printf "%.2f", a - u }')"
+awk -v l="$LEFT" -v f="$FLOOR" 'BEGIN { exit !(l < f) }' && used_up "$USED" "$UNKNOWN"
+
+# --- one turn on the credit, shown as it is written ---------------------------------------------------
+TMPD="$(mktemp -d "${TMPDIR:-/tmp}/talk.XXXXXX")" || { echo "talk: no private directory could be made; nothing was sent."; exit 69; }
+LIVE="$TMPD/live"; : > "$LIVE"; chmod 600 "$LIVE"
+APID="" RPID=""
+cleanup() { rm -f "$LIVE" "$TMPD/done" "$TMPD/result" "$TMPD/out"; rmdir "$TMPD" 2>/dev/null; }
+trap cleanup EXIT
+# shellcheck disable=SC2329  # invoked by the trap
+STOPPED=""
+stop_turn() { STOPPED=1; [ -n "$APID" ] && kill -TERM "$APID" 2>/dev/null; }
+trap stop_turn INT TERM HUP
+
+# The reply as it is written: each finished message's text, a short line per tool it uses (main thread only),
+# and Claude's own result event (cost, error) for the line after. Exit 3 when it showed no text at all.
+read -r -d '' RENDER <<'JS'
+const fs = require("fs"), [live, done, result] = process.argv.slice(1);
+const fd = fs.openSync(live, "r"); let pos = 0, buf = "", shown = false, res = null;
+const short = (i) => { const v = i && (i.description || i.command || i.file_path || i.pattern || i.url || i.prompt); return v ? " " + String(v).replace(/\s+/g, " ").slice(0, 80) : ""; };
+const line = (l) => {
+  let e; try { e = JSON.parse(l); } catch { return; }
+  if (!e || e.parent_tool_use_id) return;
+  if (e.type === "assistant" && e.message && Array.isArray(e.message.content)) {
+    for (const b of e.message.content) {
+      if (b.type === "text" && b.text && b.text.trim()) { process.stdout.write((shown ? "\n" : "") + b.text.replace(/\n*$/, "\n")); shown = true; }
+      else if (b.type === "tool_use") process.stdout.write(`  · ${b.name}${short(b.input)}\n`);
+    }
+  } else if (e.type === "result") res = e;
+};
+const drain = () => { const b = Buffer.alloc(65536); let n; while ((n = fs.readSync(fd, b, 0, b.length, pos)) > 0) { pos += n; buf += b.toString("utf8", 0, n); } const parts = buf.split("\n"); buf = parts.pop(); parts.forEach(line); };
+const tick = () => {
+  const end = fs.existsSync(done); drain();
+  if (!end) return setTimeout(tick, 200);
+  if (buf) line(buf);
+  const c = res && typeof res.total_cost_usd === "number" && Number.isFinite(res.total_cost_usd) ? res.total_cost_usd.toFixed(6) : "unknown";
+  fs.writeFileSync(result, `cost=${c}\nsubtype=${res ? String(res.subtype).replace(/[^a-z_]/g, "") : "none"}\n`);
+  process.exit(shown ? 0 : 3);
+};
+tick();
+JS
+NODE="$(command -v node || echo /opt/homebrew/bin/node)"
+"$NODE" -e "$RENDER" "$LIVE" "$TMPD/done" "$TMPD/result" &
+RPID=$!
+
+ARGS="--max-budget-usd $LEFT"
+[ "$NEW" -eq 1 ] || ARGS="--continue $ARGS"
+[ -n "${TALK_MODEL:-}" ] && export AI_RUN_CLAUDE_MODEL="$TALK_MODEL"
+printf '%s' "$MSG" | AI_RUN_CREDIT_NOW=1 AI_RUN_CALLER=talk AI_RUN_IGNORE_PAUSE=1 AI_RUN_LIVE="$LIVE" AI_RUN_CLAUDE_ARGS="$ARGS" \
+  "$AI_RUN" --role brain --cwd "$HOME" > "$TMPD/out" 2>&1 &
+APID=$!
+wait "$APID"; RC=$?
+while kill -0 "$APID" 2>/dev/null; do wait "$APID"; RC=$?; done   # a trap can end the first wait early
+: > "$TMPD/done"
+wait "$RPID"; SHOWN=$?
+trap - INT TERM HUP
+
+TURN="$(sed -n 's/^cost=//p' "$TMPD/result" 2>/dev/null)"; SUB="$(sed -n 's/^subtype=//p' "$TMPD/result" 2>/dev/null)"
+STOPLINE="$(grep -m1 '^NAMED STOP \[' "$TMPD/out" 2>/dev/null)"
+cost_line() {
+  local u
+  if u="$(read_used)"; then
+    read -r USED UNKNOWN <<< "$u"
+    case "${TURN:-unknown}" in unknown) t="(no cost reported)" ;; *) t="~\$$(money "$TURN")" ;; esac
+    echo "this turn $t · used this month $(used_text "$USED" "$UNKNOWN") of \$$(money "$ALLOWANCE")"
+  else
+    case "${TURN:-unknown}" in unknown) t="(no cost reported)" ;; *) t="~\$$(money "$TURN")" ;; esac
+    echo "this turn $t · couldn't read the credit used this month ($LOG)"
+  fi
+}
+
+if [ -n "$STOPPED" ]; then
+  echo; echo "talk: stopped by you; what Claude wrote before then is above."; cost_line; exit 130
+fi
+if [ "$RC" -eq 0 ]; then
+  [ "$SHOWN" -eq 0 ] || grep -v '^NAMED STOP \[' "$TMPD/out"   # the live copy showed nothing: print the answer ai-run handed back
+  echo; cost_line; exit 0
+fi
+case "$STOPLINE" in
+  *"[CREDIT_STOP]"*)
+    if printf '%s' "$STOPLINE" | grep -qi 'credit balance is too low'; then
+      echo "The free API credit is used up for this month; it resets on $RESETS."
+    elif [ "$SUB" = error_max_budget_usd ] || printf '%s' "$STOPLINE" | grep -q 'error_max_budget_usd'; then
+      echo "This turn reached the \$$LEFT of free API credit left this month and was stopped; it resets on $RESETS."
+    else
+      echo "Claude on the free API credit did not answer: ${STOPLINE#*did not answer: }"
+    fi
+    cost_line; exit 76 ;;
+  "") echo "talk: the turn ended with exit $RC and no reason; $(tail -n 3 "$TMPD/out" | tr '\n' ' ')"; cost_line; exit "$RC" ;;
+  *) echo "$STOPLINE"; exit "$RC" ;;
+esac

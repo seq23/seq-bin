@@ -278,6 +278,9 @@ jobs:
       - name: ai-run routes worker to Codex, brain to Claude; a Claude limit runs once on the free API credit, then stops by name
         run: ./tests/test-ai-run.sh
 
+      - name: talk runs a turn on the free API credit only when the month's spend leaves room, shows the cost, never the key
+        run: ./tests/test-talk.sh
+
       # Her design of 2026-09-23 (then once a day at 06:00; Mon+Fri 08:00 since 2 Oct 2026): park per repo, rounds while
       # progress, the sweep merges only what it read green, opus pinned, one summary.
       # Drives ci-sweep.sh end to end through fake claude/gh/land/probe/audit.

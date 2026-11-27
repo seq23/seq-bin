@@ -49,6 +49,45 @@
       ]
     }
   ],
+  "review": {
+    "_what": "Where a review class shows in the PATHS a PR changes (her list of 27 Nov 2026). land's review_class reads this only when a PR's description has no usable 'Review class:' line: a diff touching none of these is inferred 'none' and lands on green CI; a diff touching one is asked for the line (REVIEW_CLASS_UNDECLARED), never guessed. A match never demands a reviewer by itself: the declared class does. Matched case-insensitively against each changed path that 'exclude' above does not drop (tests and docs). Structure only: these name where such code lives, never what a change means.",
+    "money": [
+      "stripe|paypal|revenuecat|paywall",
+      "checkout|billing|payment|payout|refund|invoice|pricing|subscription|purchase",
+      "(^|[/._-])(prices?|iap|plans?)([/._-]|$)"
+    ],
+    "delete": [
+      "(^|/)migrations?/",
+      "\\.sql$",
+      "(^|/)schema\\.prisma$",
+      "purge|backfill|wipe|bulk[-_]?(update|delete|change|edit)|migrat"
+    ],
+    "store": [
+      "(^|/)(store|fastlane|kdp|app-?store|play-?store|store-?listing)/",
+      "(^|/)(app\\.json|app\\.config\\.[jt]s|eas\\.json)$"
+    ],
+    "outreach": [
+      "(^|/)(e?mails?|mailers?|outreach|senders?|newsletters?|campaigns?|drip)/",
+      "\\.(mjml|eml)$",
+      "(^|/)[^/]*(e-?mail|mailer|outreach|newsletter|sender)[^/]*$"
+    ],
+    "data_store": {
+      "_what": "private-data has no honest path test (any code can read a person's record). So in a repo whose main holds a data store, every PR that changes more than tests and docs keeps the declared line. A repo holds one when a path on main matches 'paths', or a wrangler config on main names one of 'bindings'.",
+      "paths": [
+        "(^|/)migrations?/",
+        "\\.sql$",
+        "(^|/)schema\\.prisma$",
+        "(^|/)(supabase|prisma)/",
+        "(^|/)firestore\\.rules$"
+      ],
+      "bindings": [
+        "d1_databases",
+        "kv_namespaces",
+        "r2_buckets",
+        "hyperdrive"
+      ]
+    }
+  },
   "launch": [
     "(^|/)wrangler\\.(toml|jsonc?)$",
     "(^|/)(app\\.json|app\\.config\\.[jt]s|eas\\.json)$",

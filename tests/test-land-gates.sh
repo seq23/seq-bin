@@ -16,10 +16,12 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"; LAND="${LAND_UNDER_TEST:-$HERE/land}"
 export LAND_SURFACES="$HERE/land-surfaces.json"
 BLOCK="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND")"
 [ -n "$BLOCK" ] || { echo "FAIL: no gates block in $LAND"; exit 1; }
-grep -q 'GATE_MSG="$(gate_pr "$PR" "$HEAD" "$PRMETA")"' "$LAND" || { echo "FAIL: land no longer calls gate_pr before merging"; exit 1; }
+grep -q '^body_gates "$PR" "$HEAD" "$PRMETA" "${OWNER_WORDS:+1}"; BODY_RC=$?$' "$LAND" && grep -q 'out="$(gate_pr "$1" "$2" "$3")"; rc=$?' "$LAND" \
+  || { echo "FAIL: land no longer runs gate_pr (through body_gates) before merging"; exit 1; }
 grep -q 'BASELINE_RED="$(baseline_red "$CHECKS")" && die' "$LAND" || { echo "FAIL: land no longer reads the ship-ready-baseline check"; exit 1; }
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 export LAND_DIR="$W/landdir"; mkdir -p "$LAND_DIR"; printf '{"live": ["o/live"]}\n' > "$LAND_DIR/live-repos.json"   # the list beside land (its re-exec sets LAND_DIR)
+cp "$HERE/pr-body-template.md" "$LAND_DIR/"   # the ONE template, beside land: where every "add:" line comes from
 export GIT_AUTHOR_NAME=builder GIT_AUTHOR_EMAIL=builder@example.test GIT_COMMITTER_NAME=builder GIT_COMMITTER_EMAIL=builder@example.test
 fails=0; passes=0
 check() { local label="$1"; shift; if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); fi; }
@@ -69,11 +71,12 @@ pushed() { jq -rn --arg t "$2" '$t | fromdateiso8601' > "$W/suites/$1" || exit 1
 # A short sha the gate can read: land takes 7-40 hex characters with at least one a-f (a bare number is a size, not a
 # commit), so a prefix that happens to be all digits (8 chars: about 1 in 40 commits) is lengthened, never a flake.
 eval "$(grep '^sha_name() ' "$LAND")"   # land's own helper, never a copy
-gate() { # PR-view JSON -> RC, MSG (run in the repo, through the block, in a subshell)
-  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''gate_pr 9 "$1" "$2"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}")"; RC=$?
+gate() { # PR-view JSON -> RC, MSG: gate_pr's problems as land prints them (numbered, each with the line to add from
+  # the ONE template), or its one plain line when it could not read (rc 75). Run in the repo, through the block.
+  MSG="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''out="$(gate_pr 9 "$1" "$2")"; rc=$?; if [ "$rc" -eq 1 ]; then problems_print 9 "$1" <<<"$out"; else printf "%s" "$out"; fi; exit "$rc"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}")"; RC=$?
   [ -z "${GATES_TEST_SHOW:-}" ] || echo "    | rc $RC: $MSG"
 }
-one_line() { [ "$(grep -c . <<<"$MSG")" -eq 1 ]; }
+one_line() { [ "$(grep -cE '^  [0-9]+\. \[[A-Z_]+\] ' <<<"$MSG")" -eq 1 ] && grep -q '^       add: ' <<<"$MSG"; }   # ONE problem, with its line to add
 check "sha_name: an all-digit 8-char prefix is lengthened to its first a-f (12345678901b…) -> 12345678901b" [ "$(sha_name 12345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 12345678901b ]
 check "sha_name: a prefix with a letter stays 8 characters" [ "$(sha_name 1a345678901b3c4d5e6f7a8b9c0d1e2f3a4b5c6d)" = 1a345678 ]
 no_bare8() { ! grep -qE '[$][{][a-zA-Z0-9]+:0:8[}]' "$LAND"; }
@@ -88,7 +91,9 @@ repo; pr_head 2 '  return x + 2;'
 gate "$(meta 'Tweaks the page.' "$SITE")"
 check "no PASS line -> refused (rc 1)" [ "$RC" -eq 1 ]
 check "…in one plain line that says what to add" eval 'one_line && grep -q "Ship-ready: PASS — " <<<"$MSG"'
-for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent session_01BUILDER' '<reviewer>'; do
+gate "$(meta "Ship-ready: PASS — <reviewer> looked at the home page at 390 px" "$SITE")"
+check "a PASS line still holding the template's <reviewer> placeholder is no PASS -> refused, asking for a fresh reviewer's line" eval '[ "$RC" -eq 1 ] && one_line && grep -q "no fresh reviewer.s Ship-ready PASS line stands" <<<"$MSG"'
+for who in builder builder@example.test 'Claude Opus 5.5' seq23 'me' 'agent session_01BUILDER'; do
   gate "$(meta "Ship-ready: PASS — $who looked at the home page at 390 px" "$SITE")"
   check "PASS signed by the builder ($who) -> refused" eval '[ "$RC" -eq 1 ] && one_line && grep -q "signed by the builder" <<<"$MSG"'
 done
@@ -268,8 +273,10 @@ gate "$(meta "Patch or rebuild: alpha is one line of arithmetic and #41 set the 
 check "…with a line naming #41 and why -> allowed" [ "$RC" -eq 0 ]
 gate "$(meta "Patch or rebuild: alpha is one line of arithmetic and #4 set the wrong constant")"
 check "…a line naming another fix (#4, not #41) -> refused" [ "$RC" -eq 1 ]
-gate "$(meta "Changes alpha.")"; ask="$(sed -E 's/.*the line  //' <<<"$MSG")"
-gate "$(jq --arg c "${ask/<why a patch and not a rebuild of that design>/alpha is one line of arithmetic and the fix set the wrong constant}" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<"$(meta "Changes alpha.")")"
+gate "$(meta "Changes alpha.")"; ask="$(sed -nE 's/^ +add: //p' <<<"$MSG" | head -1)"; refs="$(grep -oE 'and names #[0-9]+( #[0-9]+)*' <<<"$MSG" | sed 's/^and names //')"
+check "…the refusal gives the template's line to add and names the fix (#41)" eval 'grep -q "^Patch or rebuild: <why a patch" <<<"$ask" && [ "$refs" = "#41" ]'
+ask="${ask/<why a patch and not a rebuild of that design, 5+ words>/alpha is one line of arithmetic and the fix set the wrong constant}"; ask="${ask/<each fix ref land names, like #41>/$refs}"
+gate "$(jq --arg c "$ask" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<"$(meta "Changes alpha.")")"
 check "…following the refusal's own words (an owner-account comment) -> allowed (R4)" [ "$RC" -eq 0 ]
 gate "$(jq --arg c "Patch or rebuild: alpha is one line of arithmetic and #41 set the wrong constant" '.comments = [{authorAssociation: "OWNER", body: $c}, {authorAssociation: "OWNER", body: "VERDICT: fail\n- F2 other"}, {authorAssociation: "OWNER", body: $p}]' --arg p "$GOOD" <<<"$(meta "Changes alpha.")")"
 check "…a later fail verdict does not void the builder's Patch line (it is not a verdict; the PASS after it stands)" [ "$RC" -eq 0 ]

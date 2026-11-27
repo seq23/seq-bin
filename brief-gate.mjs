@@ -2,8 +2,9 @@
 // agents, which skipped this gate and the builder/reviewer 200K compaction cap and ran to 417K context).
 //  1. Work agents must be `builder`, `reviewer`, `helper`, `claude` or `general-purpose` (all carry autoCompactWindow 200K in ~/.claude/agents since 25 Nov 2026; helper added that day for any one-off job). Read-only helpers pass.
 //  2. A builder brief must carry the reviewer-POV sections (agent-brief skill) and its REVIEW CLASS line
-//     (`REVIEW CLASS: none — <why>` or money|children|private-data|store|delete|launch — <why>), which the builder copies
-//     into the PR body as `Review class: ...`: land refuses a PR without it (eng check of #155, 23 Nov 2026).
+//     (`REVIEW CLASS: none — <why>` or one of land's classes — <why>; the words are land's ONE list, REVIEW_CLASSES, read
+//     from the land beside this file: money|private-data|delete|store|launch|outreach since her final list of 27 Nov
+//     2026), which the builder copies into the PR body as `Review class: ...` (pr-body-template.md carries the form).
 //  3. A review of a PR whose task sheet says FAIL is a re-check: the brief must carry "RECHECK OF:" (the failed items
 //     only, her ruling 21 Nov 2026), never a fresh full review (42% of the weekend went on reviews and redos).
 //  4. CLAIMS PROVEN (her order 24 Nov 2026, "do this now", after both builder fails that day were PR-body claims nobody
@@ -45,7 +46,12 @@ let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
   const p=(i.prompt||'').toUpperCase();
   if(t==='builder'){
     const need=['THE REVIEW YOU WILL FACE','HOW IT BREAKS','SELF-PROOF','HER WORDS'].filter(k=>!p.includes(k));
-    if(!/REVIEW CLASS:\s*(NONE|MONEY|CHILDREN|PRIVATE-DATA|STORE|DELETE|LAUNCH)\s*(—|–|--|-|:)\s*\S/.test(p))need.push('REVIEW CLASS: none|money|children|private-data|store|delete|launch — <why> (the builder copies it into the PR body as Review class: ...; land refuses a PR without it)');
+    // The class words are land's ONE list (REVIEW_CLASSES in the land beside this file). Unreadable: any one word passes,
+    // since the line itself is what the builder needs, and land still reads an unknown word as a class.
+    let classes=null;
+    try{const m=readFileSync(new URL('./land',import.meta.url),'utf8').match(/^REVIEW_CLASSES="([a-z|-]+)"$/m);if(m)classes=m[1].toUpperCase().split('|');}catch{}
+    const cls=(p.match(/REVIEW CLASS:\s*([A-Z-]+)\s*(?:—|–|--|-|:)\s*\S/)||[])[1];
+    if(!cls||(cls!=='NONE'&&classes&&!classes.includes(cls)))need.push(`REVIEW CLASS: none|${(classes||['<class>']).join('|').toLowerCase()} — <why> (the builder copies it into the PR body as Review class: ...; pr-body-template.md carries the form)`);
     // 4. Built from HER words, not mine (her words 24 Nov 2026: "I TOLD U THE FUCKING BRIEFS WERE WRONG TO BEGIN WITH IVE
     //    COMPLAINED ABOUT BRIEFS COUNTLESS TIMES"; Noelle was built wrong twice, and extras nobody asked for burned her week).
     if(!/ASKED FOR:\s*["“][^"”]{8,}["”]/.test(p))need.push('ASKED FOR: "<her own words, verbatim, in quotes>" (what she asked for, never my summary)');

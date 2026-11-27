@@ -202,7 +202,7 @@ while IFS=$'\x1f' read -r repo n author draft title url; do
       out="$(LAND_AFTER_RATE_WAIT_SECS=120 LAND_AFTER_READ_PATIENCE_SECS=60 "$LA" "$n" --repo "$repo" ${slug:+--task "$slug"} ${DRY:+--dry-run} 2>&1)"; lrc=$?
       why="$(printf '%s' "$out" | grep -m1 -E 'REFUSED|could not verify|would land|started' | sed -E 's/^land-after: //; s/^REFUSED — //')"
       # "needs a reviewer": only the reason, never land-after's whole how-to (it is on the PR's own refusal).
-      [ "$lrc" -eq 4 ] && why="$(sed -E 's/^[^ ]+ needs a review \((.*)\) and has no reviewer PASS line.*/\1, and no reviewer PASS/; s/ \(add `Review class: none.*\)\)/)/; s/ \(add `Review class: none[^)]*\)//' <<<"$why")"
+      [ "$lrc" -eq 4 ] && why="$(sed -E 's/^[^ ]+ needs a reviewer: //; s/: a fresh reviewer (looks|must|checks) .*//; s/; nothing started\..*//' <<<"$why")"
       why="${why:0:200}"
       case $lrc in
         0) if [ -n "$DRY" ]; then add "$key" "- **$key green** $quiet: would start land-after (dry run) — $short"

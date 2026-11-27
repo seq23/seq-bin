@@ -29,6 +29,10 @@ nocls='THE REVIEW YOU WILL FACE HOW IT BREAKS SELF-PROOF HER WORDS ASKED FOR: �
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls\"}}" "builder brief with no REVIEW CLASS line refused"
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: maybe\"}}" "a REVIEW CLASS that is no class refused"
 run 0 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls Review class: money -- moves payouts\"}}" "a named class passes"
+for cls in private-data delete store launch outreach; do
+  run 0 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: $cls — the brief says why\"}}" "land's class '$cls' passes (her list of 27 Nov 2026; the words are read from land's REVIEW_CLASSES)"
+done
+run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: children — the old class word\"}}" "a class word land no longer lists (children: now private-data) is refused, naming the list"
 nomine="${nocls/ASKED FOR: “build noelle as she said” /}"
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nomine REVIEW CLASS: none — x\"}}" "builder brief without her verbatim ASKED FOR refused"
 noyes="${nocls/HER YES: “yes go” /}"

@@ -8,7 +8,8 @@
 # checked out in <dir> against origin/main, with <body-file> as the PR body. The dangerous-command guard
 # calls it on every `gh pr create`, so the builder writes the line before a reviewer ever looks.
 #   exit 0  nothing to answer, or every fix is answered
-#   exit 1  a fix of the last 30 days is not answered: one line on stdout says which and what to add
+#   exit 1  a fix of the last 30 days is not answered: one line on stdout says which and what to add (the line's form
+#           is read from pr-body-template.md beside land, the one place it lives)
 #   exit 3  could not judge (no land, no git, no origin/main): the caller lets the PR through; land still asks
 set -u
 LAND_SRC="${LAND_SRC:-$(dirname "$0")/land}"
@@ -24,5 +25,7 @@ head="$(git rev-parse HEAD 2>/dev/null)" || exit 3
 base="$(git merge-base origin/main HEAD 2>/dev/null)" || exit 3
 body="$(if [ "$body_file" = "-" ]; then cat; else cat "$body_file"; fi)"
 msg="$(gate_patch new "$base" "$head" "$body")" && exit 0
-echo "${msg/PR #new/This PR}"
+LAND_TEMPLATE="$(dirname "$LAND_SRC")/pr-body-template.md"   # the ONE place the line's form lives (beside land)
+add="$(template_add PATCH_OR_REBUILD_MISSING | paste -sd' ' -)"
+echo "${msg/PR #new/This PR}. Add the line:  ${add:-Patch or rebuild: (its form could not be read from $LAND_TEMPLATE)}"
 exit 1

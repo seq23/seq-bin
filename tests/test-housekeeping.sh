@@ -10,6 +10,9 @@ T=$(mktemp -d)
 export HOUSEKEEPING_RCLONE_CONFIG="$T/rclone.conf"
 printf '[gdrive]\ntype = drive\nclient_id = own.apps.googleusercontent.com\nclient_secret = s\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[gdrive-sl]\ntype = drive\nclient_id = \nscope = drive.file\ntoken = {"access_token":"TOKEN-NEVER-POSTED"}\n\n[local]\ntype = alias\n' > "$T/rclone.conf"
 export HOME="$T" HOUSEKEEPING_NO_VAULT=1 HOUSEKEEPING_TODAY=2026-11-02 BOSS_OPEN_LOOPS_TOKEN=olt_test
+# 03:30 CST on 2 Nov 2026; backup results below are stamped relative to it.
+NOW_S=$(node -e 'console.log(Date.parse("2026-11-02T09:30:00Z")/1000)'); export HOUSEKEEPING_NOW_MS=$((NOW_S*1000))
+LR(){ echo "$1 $2 $((NOW_S - $3*60))" > "$T/Library/Application Support/drive-backup/last-run.txt"; }
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main -c commit.gpgsign=false)
 fail=0; bad(){ echo "FAIL: $1"; fail=1; }
 
@@ -37,7 +40,7 @@ echo old > "$T/GitHub/.wt-agent/a.txt"; touch -t 202001010000 "$T/GitHub/.wt-age
 mkdir -p "$T/.claude" "$T/Library/Application Support/drive-backup" "$T/Library/Logs/drive-backup"
 for _ in $(seq 1 100); do printf 'word '; done > "$T/.claude/CLAUDE.md"
 printf 'Work/Misc/dump\n' > "$T/Library/Application Support/drive-backup/needs-decision.txt"
-echo "NAMED STOP: DRIVE_BACKUP_FAILED — see the log" > "$T/Library/Logs/drive-backup/2026-11-02.log"
+LR FAILED 2026-11-01 300   # failed at 22:30 last night
 
 row(){ grep "\"stop\":\"$1\"" "$T/posts.jsonl"; }
 opened(){ row "$1" | grep -qv '"cleared":true'; }
@@ -56,7 +59,8 @@ row UNSAVED_GITHUB_WT_AGENT >/dev/null && bad "running agent's worktree was post
 opened BACKUP_BIG_FOLDER || bad "held-back folder opened no row"
 row BACKUP_BIG_FOLDER | grep -q '"owner":"sequoia"' || bad "held-back folder row is not hers"
 row BACKUP_BIG_FOLDER | grep -q 'Work/Misc/dump' || bad "held-back folder row does not name the folder"
-opened BACKUP_FAILED || bad "backup stop in today's log opened no row"
+opened BACKUP_FAILED || bad "last night's failed run opened no row"
+row BACKUP_FAILED | grep -q '2026-11-01.log' || bad "failure row does not name the night's log"
 row BACKUP_FAILED | grep -q '"owner":"claude"' || bad "backup stop row is not Claude's"
 cleared BACKUP_TOO_SLOW || bad "absent backup stop not cleared"
 row RULES_CLEANUP_2026_11 >/dev/null && bad "rules row posted at 100 words on the 2nd"
@@ -82,12 +86,25 @@ row RULES_CLEANUP_2026_11 >/dev/null && bad "rules row posted twice in one month
 
 # Run 4: everything saved, folder decided, backup clean → every row closes.
 "${G[@]}" -C "$T/GitHub/dirty" checkout -q -- a.txt; rm "$T/GitHub/dirty/b.txt"
-rm "$T/Library/Application Support/drive-backup/needs-decision.txt"; echo "drive-backup OK" > "$T/Library/Logs/drive-backup/2026-11-02.log"
+rm "$T/Library/Application Support/drive-backup/needs-decision.txt"; LR OK 2026-11-01 300   # the real case: started 22:00 yesterday, finished clean
 : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4 exit non-zero"
 cleared UNSAVED_GITHUB_DIRTY || bad "saved checkout did not clear its row"
 opened UNSAVED_GITHUB_DIRTY && bad "saved checkout still posted as unsaved"
 cleared BACKUP_BIG_FOLDER || bad "decided folder did not clear its row"
 cleared BACKUP_FAILED || bad "clean backup did not clear the failure row"
+cleared BACKUP_DID_NOT_RUN || bad "clean run that started yesterday evening was posted as did-not-run (the 22-27 Nov bug)"
+# Run 4c: a run still going at 03:30 is not a failure; one RUNNING for 10+ hours was killed (too slow).
+LR RUNNING 2026-11-01 300; : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4c exit non-zero"
+cleared BACKUP_DID_NOT_RUN && cleared BACKUP_TOO_SLOW && cleared BACKUP_FAILED || bad "a run in progress opened a row"
+LR RUNNING 2026-11-01 660; : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4d exit non-zero"
+opened BACKUP_TOO_SLOW || bad "a run stuck RUNNING for 11 hours opened no too-slow row"
+# Run 4e: last result is 2 nights old, or there is none → did not run.
+LR OK 2026-10-31 1770; : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1; cleared BACKUP_DID_NOT_RUN || bad "29.5h-old OK posted did-not-run"
+LR OK 2026-10-31 1860; : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4f exit non-zero"
+opened BACKUP_DID_NOT_RUN || bad "no run for 31 hours opened no did-not-run row"
+rm "$T/Library/Application Support/drive-backup/last-run.txt"; : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1
+opened BACKUP_DID_NOT_RUN || bad "no result file at all opened no did-not-run row"
+LR OK 2026-11-01 300
 printf '[gdrive]\ntype = drive\nclient_id = a\n\n[gdrive-sl]\ntype = drive\nclient_id = b\n' > "$T/rclone.conf"
 : > "$T/posts.jsonl"; bash "$S" >/dev/null 2>&1 || bad "run 4b exit non-zero"
 cleared RCLONE_OWN_CLIENT || bad "every remote on its own client did not clear the row"

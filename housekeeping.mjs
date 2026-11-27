@@ -27,12 +27,11 @@ const HOME = process.env.HOME;
 const REPO = "seq23/seq-bin";
 const DRY = process.env.HOUSEKEEPING_DRY_RUN === "1";
 const DAY = 86_400_000;
-const NOW = Date.now();
+const NOW = Number(process.env.HOUSEKEEPING_NOW_MS) || Date.now(); // test override only
 const WORD_LIMIT = 3000; // her call 10 Nov 2026 (was 2500)
 const STATE_DIR = path.join(HOME, "Library/Application Support/housekeeping");
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 const BACKUP_STATE = path.join(HOME, "Library/Application Support/drive-backup");
-const BACKUP_LOGS = path.join(HOME, "Library/Logs/drive-backup");
 
 const stop = (code, exit, words) => Object.assign(new Error(`NAMED STOP [${code}] ${words}`), { exit });
 const dayIn = (ms, tz) => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
@@ -116,14 +115,20 @@ function checkBackup(posts, log) {
     });
   } else posts.push({ ...base, stop: "BACKUP_BIG_FOLDER", owner: "sequoia", cleared: true, finish_line: "every held-back folder is either backed up or on the skip list" });
 
-  const logFile = path.join(BACKUP_LOGS, `${TODAY_LOCAL}.log`);
-  let found = null;
-  if (!fs.existsSync(logFile)) found = "DID_NOT_RUN";
+  // drive-backup.sh writes its own result to last-run.txt ("<RESULT> <night> <epoch s>"). A log named for
+  // today is never the test: the run starts at 22:00, so its log carries yesterday's date (27 Nov 2026,
+  // every clean night since 22 Nov was posted "did not run").
+  const lr = path.join(BACKUP_STATE, "last-run.txt");
+  let found = null, night = TODAY_LOCAL;
+  if (!fs.existsSync(lr)) found = "DID_NOT_RUN";
   else {
-    const size = fs.statSync(logFile).size, fd = fs.openSync(logFile, "r"), len = Math.min(size, 256 << 10);
-    const buf = Buffer.alloc(len); fs.readSync(fd, buf, 0, len, size - len); fs.closeSync(fd);
-    const m = [...buf.toString("utf8").matchAll(/NAMED STOP:? \[?DRIVE_BACKUP_(TOO_SLOW|FAILED)\]?/g)].pop();
-    if (m) found = m[1];
+    const [res, day, at] = fs.readFileSync(lr, "utf8").trim().split(/\s+/);
+    const hours = (NOW - Number(at) * 1000) / 3600e3;
+    if (day) night = day;
+    if (!Number.isFinite(hours)) found = "DID_NOT_RUN";
+    else if (res === "RUNNING") found = hours < 10 ? null : "TOO_SLOW"; // still going, or killed before it could say
+    else if (hours > 30) found = "DID_NOT_RUN"; // no run since the night before last
+    else if (res === "FAILED" || res === "TOO_SLOW") found = res;
   }
   const words = {
     TOO_SLOW: ["Last night's backup ran out of time before it finished", "Find what made it slow (the log names where it stopped) and make the next run finish inside its hour."],
@@ -132,7 +137,7 @@ function checkBackup(posts, log) {
   };
   for (const k of Object.keys(words)) {
     const stopCode = `BACKUP_${k}`;
-    if (k === found) posts.push({ ...base, stop: stopCode, title: words[k][0], finish_line: "the nightly backup finishes cleanly", next_step: `${words[k][1]} Log: ~/Library/Logs/drive-backup/${TODAY_LOCAL}.log` });
+    if (k === found) posts.push({ ...base, stop: stopCode, title: words[k][0], finish_line: "the nightly backup finishes cleanly", next_step: `${words[k][1]} Log: ~/Library/Logs/drive-backup/${night}.log` });
     else posts.push({ ...base, stop: stopCode, cleared: true, finish_line: "the nightly backup finishes cleanly" });
   }
   log.push(`backup: ${fs.existsSync(nd) ? "big folder held back; " : ""}${found ? `stop ${found}` : "clean"}`);

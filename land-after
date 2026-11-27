@@ -50,6 +50,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 TASKS="${LAND_AFTER_TASKS:-$HOME/Work/tasks}"
 DONE="$TASKS/done"; LOGS="$TASKS/logs"; LOCKS="$TASKS/locks"
+DUE_FILE="$TASKS/post-land-checks.md"   # the post-land-check list (land writes it): in this folder, never a task sheet
 LAND_BIN="${LAND_AFTER_LAND:-$HERE/land}"          # tests point this at a fake lander
 LAND_SRC="$HERE/land"                               # the gates block is read from the real one
 LAND_DIR="${LAND_DIR:-$HERE}"                    # land-surfaces.json sits beside land (the gates read it)
@@ -181,6 +182,7 @@ status() {
   local f slug line flags pid age n=0
   for f in "$TASKS"/*.md; do
     [ -f "$f" ] || continue
+    [ "$f" = "$DUE_FILE" ] && continue
     n=$((n + 1)); slug="$(basename "$f" .md)"; line="$(head -1 "$f")"; flags=""
     age="$(age_min "$f" || echo 0)"
     case "$line" in

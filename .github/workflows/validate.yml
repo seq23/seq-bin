@@ -174,6 +174,12 @@ jobs:
       # 9 Nov 2026: the compaction hook overwrote a hand-written Today status in ~/HANDOFF.md.
       - name: handoff-on-compact.sh keeps a same-day hand-written status and replaces only its own note
         run: ./tests/test-handoff-keeps-curated.sh
+      # 27 Nov 2026 (her words: "its not overwrting too much and i still have a complete picture at the end of the
+      # day"): each compaction replaced the session's note with a summary of the last stretch only, and a dropped
+      # or rolled-over note was gone. Notes now build up, every note that leaves is archived by day, the
+      # post-land-check lines live in their own list, and code checks the model's PR numbers and paths.
+      - name: handoff-on-compact.sh builds a session's note up, archives every note that leaves, and never lets an outage or an invented PR number into HANDOFF
+        run: ./tests/test-handoff-day-picture.sh
       # 22 Nov 2026 (her words: "Hand waiting to a script, not an agent"): land-after lands a PASSed PR
       # detached and writes the result to the task sheet. Refuses no-PASS / twice / bad slugs; never PASS
       # on an unread answer or a land that merged nothing; cleanup only done/ and logs/ past 14 days.

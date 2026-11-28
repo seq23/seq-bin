@@ -117,7 +117,7 @@
     },
     {
       "id": "wkys", "label": "We Keep You Spry", "night": 2,
-      "about": "a done-for-you AI implementation service for owner-run businesses (holding companies and search funds, home-service roll-ups, independent insurance agencies, bail bond agencies): a $1,500 assessment, a 30-day install for $10,000, or a 90-day engagement from $25,000; it installs AI across the business, trains the team and hands it over",
+      "about": "a done-for-you AI implementation service for owner-run businesses (holding companies and search funds, home-service roll-ups, independent insurance agencies, bail bond agencies, property management companies): a $1,500 assessment, a 30-day install for $10,000, or a 90-day engagement from $25,000; it installs AI across the business, trains the team and hands it over",
       "brain": "wkys", "brain_headings": ["Company"],
       "domains": ["wekeepyouspry.com"], "names": ["We Keep You Spry", "WKYS", "Keep You Spry"],
       "seeds": { "repo": "seq23/WKYS", "config": "search-loop.config.json" }

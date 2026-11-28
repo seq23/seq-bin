@@ -33,7 +33,7 @@
 #   BEFORE ANYTHING STARTS it runs land's read-only `land --check <pr>` and refuses AT ONCE with the full list of
 #   what the PR's description still lacks, each with the line to add (pr-body-template.md carries them all).
 #   A refusal exits 1, except "it needs a fresh reviewer's PASS first" (none, voided, stale, builder-signed,
-#   no Engineering): exit 4, so pr-watch can say "needs a reviewer" without reading the words.
+#   no Engineering, or a protected PR's REVIEW_REQUIRED): exit 4, so pr-watch can say "needs a reviewer" without reading the words.
 #
 #   land-after --sweep       (nightly, housekeeping.sh) a `landing` sheet whose worker is gone (power loss,
 #                            kill -9) becomes FAIL unknown on its sheet, so nothing waits unseen.
@@ -394,7 +394,8 @@ main() {
   # reviewer's PASS, mutation proof, patch or rebuild, forms, outcome, not built, click-through. A description that
   # lacks three lines is told all three here, at once, never one per run after a CI wait. Only a PR in a review
   # class waits on a reviewer (land's list: money, private-data, delete, store, launch, outreach, a review-required
-  # label ever, a change to live-repos.json); everything else starts on its own.
+  # label ever, a change to live-repos.json, and a protected PR: a noelle/ branch or a .github/ change, REVIEW_REQUIRED,
+  # read by land's own trusted_review_required, which no Owner override clears); everything else starts on its own.
   local CHK crc list codes n why
   CHK="$(cd "$DIR" && "$LAND_SRC" --check "$PR" </dev/null 2>&1 | sed $'s/\033\\[[0-9;]*m//g'; exit "${PIPESTATUS[0]}")"; crc=$?
   if [ "$crc" -eq 75 ]; then
@@ -404,8 +405,8 @@ main() {
     list="$(grep -E '^  [0-9]+\. \[[A-Z_]+\] |^       add: ' <<<"$CHK")"
     codes="$(sed -nE 's/^  [0-9]+\. \[([A-Z_]+)\] .*/\1/p' <<<"$list")"; n="$(grep -c . <<<"$codes")"
     [ -n "$codes" ] || refuse "land --check stopped on $REPO#$PR: $(grep -E 'STOPPED:|NAMED STOP' <<<"$CHK" | tail -1 | sed 's/^STOPPED: //' | cut -c1-400); nothing started"
-    if grep -qxE 'REVIEW_PASS_MISSING|STALE_PASS|LAUNCH_PASS_MISSING' <<<"$codes"; then
-      why="$(sed -nE 's/^  [0-9]+\. \[(REVIEW_PASS_MISSING|STALE_PASS|LAUNCH_PASS_MISSING)\] (PR #[0-9]+(.s)? )?//p' <<<"$list" | head -1)"
+    if grep -qxE 'REVIEW_PASS_MISSING|REVIEW_REQUIRED|STALE_PASS|LAUNCH_PASS_MISSING' <<<"$codes"; then
+      why="$(sed -nE 's/^  [0-9]+\. \[(REVIEW_PASS_MISSING|REVIEW_REQUIRED|STALE_PASS|LAUNCH_PASS_MISSING)\] (PR #[0-9]+(.s)? )?//p' <<<"$list" | head -1)"
       say "REFUSED — $REPO#$PR needs a reviewer: $why; nothing started. All $n thing(s) to fix, each with its line:"
       printf '%s\n' "$list"
       say "the fresh reviewer posts its line with: gh pr comment $PR -R $REPO --body '<the add: line above, filled in>'"

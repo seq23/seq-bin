@@ -39,7 +39,7 @@ Mutation proof: none — <why there is no behaviour to break, 6+ words>
 
 ## Reviewer lines
 <!-- The lines under this heading are never written by the builder: delete the heading and them from the body. A fresh reviewer posts them as a PR comment from the repo's owner account, naming the head it looked at. `Owner override:` is written only by `land --owner`, on her words. -->
-<!-- land:REVIEW_PASS_MISSING,STALE_PASS — only for a PR in a review class (money, private-data, delete, store, launch, outreach, a review-required label, a change to live-repos.json). -->
+<!-- land:REVIEW_PASS_MISSING,REVIEW_REQUIRED,STALE_PASS — only for a PR in a review class (money, private-data, delete, store, launch, outreach, a review-required label, a change to live-repos.json), or a protected PR (a noelle/ branch, or any change under .github/): there only a PR comment by the owner account counts, never the body, it must name the current head, and no Owner override clears it. -->
 Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output> at <head sha>; Engineering: PASS
 
 <!-- land:LAUNCH_PASS_MISSING — only for something new going public (a first site, app, channel or listing). -->

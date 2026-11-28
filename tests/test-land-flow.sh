@@ -101,18 +101,20 @@ case "$a" in
   "pr view "*baseRefName*) answer base main ;;
   # the allowance GitHub reports (land reads it with --jq): spent, back in 3 s.
   "api rate_limit"*) echo $(( $(date +%s) + 3 )); exit 0 ;;
-  "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # pr-meta = the PR's files/body/comments JSON (case 1d); absent = one non-screen file, no body.
   # --owner reads the body and writes the override line back into pr-meta's body (her bypass, 21 Nov 2026).
   "pr view "*"--json body "*) jq -r '.body // ""' "$FAKE_DIR/pr-meta" 2>/dev/null; exit 0 ;;
   "pr edit "*"--body-file -"*) b="$(cat)"; jq --arg b "$b" '.body = $b' "$FAKE_DIR/pr-meta" > "$FAKE_DIR/pr-meta.new" && mv "$FAKE_DIR/pr-meta.new" "$FAKE_DIR/pr-meta"; exit 0 ;;
   # The PR's repo is its url (o/r, on the fixture live-repos.json unless a case says otherwise); no-url = GitHub left it out.
-  "pr view "*"files,body,comments"*) { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
+  "pr view "*"files,body,comments"*) head="$(answer head "$HEADSHA")" || exit $?
+    { sed "s/@HEAD@/$(sha_name "$HEADSHA")/g" "$FAKE_DIR/pr-meta" 2>/dev/null || echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}'; } \
+      | jq -c --arg head "$head" '.headRefOid = $head | .headRefName //= "fixture"' \
       | if [ -f "$FAKE_DIR/no-url" ]; then cat; else jq -c '.url //= "https://github.com/o/r/pull/7"'; fi \
       | if [ -f "$FAKE_DIR/no-class" ]; then cat; else jq -c '.body = ((.body // "") + "\n\nReview class: none — a fixture change in no risk class")'; fi \
       | if [ -f "$FAKE_DIR/no-forms" ]; then cat; else jq -c '.body = ((.body // "") + "\nForms: none — a fixture change touching no form")'; fi \
       | if [ -f "$FAKE_DIR/no-outcome" ]; then cat; else jq -c '.body = ((.body // "") + "\nOutcome: none — a fixture change that runs nothing")'; fi \
       | if [ -f "$FAKE_DIR/no-notbuilt" ]; then cat; else jq -c '.body = ((.body // "") + "\n\n## Not built\nNothing cut.")'; fi; exit 0 ;;
+  "pr view "*headRefOid*) answer head "$HEADSHA" ;;
   # label-events = every label ever added (gh's --jq answer over the PR's issue events); default none; tls = down.
   "api --paginate repos/"*"/issues/7/events "*) answer label-events '[]' ;;
   # live_add: seq-bin's list through the contents API (live-get = its answer), the PUT logged to live-put.
@@ -1208,6 +1210,39 @@ check "outcome under her bypass: never blocked; records UNDECLARED and writes a 
 rm -f "$FAKE/no-outcome" "$FAKE/no-notbuilt"; unset LAND_TODAY LAND_TASK
 unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
 export LAND_DUE_FILE="$W/post-land-checks.md"
+
+echo "=== 22. protected PRs (#175): a noelle/ branch or a .github/ change lands only on a separate reviewer's comment for its head ==="
+edited() { grep -q '^pr edit' "$FAKE/calls"; }
+NPASS='Ship-ready: PASS — hostile-review session_01REVIEW looked at the diff and its tests at @HEAD@; Engineering: PASS'
+NBODY='Moves the CI file.\n'"$NPASS"'\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the gate in land | tests/x.test.sh goes red |\nOwner override: \"ship it all now\" (25 Nov 2026 13:07 CT)'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"headRefName":"noelle/levers","labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "abuse: a noelle/ PR with a body PASS, an Owner override AND --owner: rc 1, NAMED STOP [REVIEW_REQUIRED], not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [REVIEW_REQUIRED]" && ! merge_called'
+check "…her words were not written onto it (no pr edit), and land says the bypass does not apply" eval '! edited && has "owner override: does not apply to PR #7"'
+check "…no ENG-CHECK DUE bypass line was written" eval '! grep -q "landed under her bypass" "$LAND_DUE_FILE" 2>/dev/null'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+jq -c --arg c "$NPASS" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<'{"files":[{"path":"pr.txt"}],"headRefName":"noelle/levers","labels":[],"body":"Moves the CI file.\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the gate in land | tests/x.test.sh goes red |","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "a noelle/ PR with a separate reviewer's owner comment for its head, under --owner: rc 0, merged, nothing written onto it" eval '[ "$RC" -eq 0 ] && merge_called && ! edited && ! grep -q "landed under her bypass" "$LAND_DUE_FILE" 2>/dev/null'
+# A .github file renamed out in the REAL head commit, while GitHub's file list names only the new path.
+handoff_fixture; fixture approvalprep promote; rm -f "$LAND_DUE_FILE"
+git -C "$W/pusher" checkout -q pr; mkdir -p "$W/pusher/ci"; git -C "$W/pusher" mv .github/workflows/promote.yml ci/promote.yml
+git -C "$W/pusher" commit -qm "move the workflow out"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+git -C "$W/pusher" push -q -f origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
+echo '{"files":[{"path":"ci/promote.yml"},{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "edge: a .github workflow renamed out (GitHub lists only ci/promote.yml), Owner override in the body: rc 1, REVIEW_REQUIRED, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [REVIEW_REQUIRED]" && ! merge_called'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "control: the same body on a normal branch with no .github change lands on its Owner override (rc 0)" eval '[ "$RC" -eq 0 ] && merge_called'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+echo 0123456789abcdef0123456789abcdef01234567 > "$FAKE/head"
+run_land approvalprep
+check "outage: a head git cannot fetch (so whether it changes .github/ is unknown): rc 75 could not verify, not merged" eval '[ "$RC" -eq 75 ] && has "whether it changes .github/ is unknown" && ! merge_called'
+rm -f "$FAKE/head"
 
 echo "=== EVERY STOP SAYS THREE THINGS (her yes 25 Nov 2026): expected, what happened, where to look ==="
 # Read every stop land printed in every run above. A part missing or empty on ANY stop is red, so a new stop

@@ -159,6 +159,14 @@ echo "=== Fast PRs (her ruling 23 Nov 2026): the PASS is asked for only of a rev
 reset "Fixes it."; echo '[{"name":"review-required"}]' > "$FAKE/labels"
 la 7 --task fastreview
 check "safety: review-required label and no PASS line: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "Ship-ready: PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/fastreview.md" ]'
+echo "=== protected PRs (#175): a .github/ change starts only on a separate reviewer's comment for its head ==="
+reset "$GOOD"$'\n''Owner override: "ship it all now" (25 Nov 2026 13:07 CT)'; echo '[]' > "$FAKE/labels"; echo '[{"path": ".github/CODEOWNERS"}]' > "$FAKE/files"
+la 7 --task protbody
+check "abuse: a .github/ change whose body carries a PASS and an Owner override: refused rc 4 REVIEW_REQUIRED, nothing started" eval '[ "$RC" -eq 4 ] && has "[REVIEW_REQUIRED]" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/protbody.md" ]'
+reset 'Owner override: "ship it all now" (25 Nov 2026 13:07 CT)'; echo '[]' > "$FAKE/labels"; echo '[{"path": ".github/CODEOWNERS"}]' > "$FAKE/files"
+jq -n --arg c "$GOOD" '[{authorAssociation: "OWNER", body: $c}]' > "$FAKE/comments"
+la 7 --task protcomment
+check "…with a separate reviewer's owner comment naming its head: started (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"
 la 7 --task fastplain
 check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]

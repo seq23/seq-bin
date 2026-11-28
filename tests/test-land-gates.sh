@@ -9,6 +9,10 @@
 #   patch       — a PR changing a function a fix commit changed in the last 30 days -> refused without
 #                 a "Patch or rebuild:" line naming that fix; allowed with one; a fix older than the
 #                 window, or one in another function, asks nothing; a placeholder line is not an answer.
+#   protected   — a noelle/ branch or a .github/ change (#175, her yes 27 Nov 2026): the body is never a review, her
+#                 Owner override and --owner never clear REVIEW_REQUIRED, the PASS is an owner comment naming the current
+#                 head (STALE_PASS otherwise), and the exact git diff sees a .github file deleted or renamed out; git that
+#                 cannot tell is 75, and JSON whose exact diff was never read counts as protected.
 # Negative proofs at the foot: a block whose signoff ignores the builder, and one whose patch check
 # never reads history, both fail these cases.
 set -uo pipefail
@@ -48,7 +52,7 @@ meta() { # body [files json] [extra json] -> PR view JSON
   # a code PR (the default files) carries a fresh reviewer's PASS too, unless NOREVIEW (22 Nov 2026: the gate is real for code)
   [ -n "${2:-}" ] || [ -n "${NOREVIEW:-}" ] || b="$b"$'\n''Ship-ready: PASS — code reviewer session_01REVIEW looked at the diff and its tests at @HEAD@; Engineering: PASS'
   jq -n --arg b "$b" --argjson f "$f" \
-    '{files: $f, body: $b, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
+    '{files: $f, body: $b, from_git_github: false, author: {login: "seq23"}, commits: [{authors: [{name: "builder", email: "builder@example.test", login: ""}],
       messageBody: "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BUILDER"}]}' \
     | if [ -n "${FAST:-}" ]; then   # FAST: a PR in no review class (a launched repo, no label ever, a reasoned none)
         jq -c '. + {labels: [], label_history: [], url: "https://github.com/o/live/pull/9"} | .body += "\nReview class: none — docs and tests only here"'
@@ -340,6 +344,87 @@ gate "$(FAST=1 NOPROOF=1 meta "Docs only." '[{"path":"README.md"},{"path":"tests
 check "docs and tests only need no proof (rc 0)" [ "$RC" -eq 0 ]
 gate "$(NOPROOF=1 meta 'Owner override: "ship it, land it now" (22 Nov 2026 12:00 CT)')"
 check "her Owner override skips it (rc 0)" [ "$RC" -eq 0 ]
+echo "=== protected: a noelle/ branch or a change under .github/ needs a separate reviewer's comment for its head (#175) ==="
+noelle() { jq -c '.headRefName = "noelle/work"'; }
+owner_says() { jq -c --arg c "$1" --arg who "${2:-OWNER}" '.comments = ((.comments // []) + [{authorAssociation: $who, body: $c}])'; }
+code_is() { grep -qE "^  [0-9]+\. \[$1\] " <<<"$MSG"; }
+repo; pr_head 2 '  return x + 2;'
+BYPASSED="$(FAST=1 NOREVIEW=1 meta "$GOOD"$'\nOwner override: "ship it right now" (27 Nov 2026 19:30 CT)' "$SITE")"
+gate "$BYPASSED"
+check "control: the same body on a normal PR lands on its Owner override (rc 0)" [ "$RC" -eq 0 ]
+gate "$(noelle <<<"$BYPASSED")"
+check "abuse: a noelle/ PR whose body carries a PASS and an Owner override -> refused REVIEW_REQUIRED (rc 1)" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+gate "$(FAST=1 NOREVIEW=1 meta "$GOOD" "$SITE" | noelle)"
+check "abuse: a noelle/ PR's own body PASS, no override -> refused REVIEW_REQUIRED (the body is never a review)" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+gate "$(noelle <<<"$BYPASSED" | owner_says "$GOOD" CONTRIBUTOR)"
+check "abuse: the PASS in a comment by a non-owner account -> refused" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+gate "$(noelle <<<"$BYPASSED" | owner_says 'Ship-ready: PASS — builder looked at the diff at @HEAD@; Engineering: PASS')"
+check "abuse: an owner comment signed by the builder -> refused" eval '[ "$RC" -eq 1 ] && grep -q "signed by the builder" <<<"$MSG"'
+gate "$(noelle <<<"$BYPASSED" | owner_says "$GOOD")"
+check "a separate reviewer's owner comment naming the head -> allowed (rc 0)" [ "$RC" -eq 0 ]
+gate "$(noelle <<<"$BYPASSED" | owner_says "$GOOD" | owner_says $'VERDICT: fail\n- F1 the gate is open')"
+check "…a later VERDICT: fail comment voids it -> refused" [ "$RC" -eq 1 ]
+gate "$(FAST=1 NOPROOF=1 meta 'Docs only.'$'\nOwner override: "ship it right now" (27 Nov 2026 19:30 CT)' '[{"path":"README.md"}]' | noelle)"
+check "edge: a noelle/ PR with no .github change and docs only -> still needs the reviewer (REVIEW_REQUIRED)" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+WF='[{"path":".github/workflows/ci.yml"}]'
+gate "$(FAST=1 NOREVIEW=1 NOPROOF=1 meta "$GOOD"$'\nOwner override: "ship it right now" (27 Nov 2026 19:30 CT)' "$WF")"
+check "a .github/ change with a body PASS and an Owner override -> refused REVIEW_REQUIRED" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+check "…the refusal says to post it as an owner-account comment, with the line to add" eval 'one_line && grep -q "as a PR comment by the repo.s owner account" <<<"$MSG"'
+gate "$(FAST=1 NOREVIEW=1 NOPROOF=1 meta 'Bumps CI.' "$WF" | owner_says "$GOOD")"
+check "…with a separate reviewer's owner comment for this head -> allowed (rc 0)" [ "$RC" -eq 0 ]
+gate "$(FAST=1 NOREVIEW=1 NOPROOF=1 meta "$GOOD"$'\nOwner override: "ship it right now" (27 Nov 2026 19:30 CT)' '[{"path":"ci/renamed.yml"}]' | jq -c '.from_git_github = true')"
+check "a .github file renamed out (GitHub lists only the new path; the exact diff saw .github) -> refused REVIEW_REQUIRED" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+gate "$(FAST=1 NOREVIEW=1 NOPROOF=1 meta "$GOOD"$'\nOwner override: "ship it right now" (27 Nov 2026 19:30 CT)' '[{"path":"README.md"}]' | jq -c 'del(.from_git_github)')"
+check "outage: a PR view whose exact diff was never read counts as protected -> refused, never bypassed" eval '[ "$RC" -eq 1 ] && code_is REVIEW_REQUIRED'
+# STALE: a protected PASS names the current head itself; main's softer rules (a main merge after the PASS, a sha-less
+# PASS posted after the head reached GitHub) do not apply.
+stale_pr; git -C "$W/r" checkout -q main; echo two > "$W/r/other.txt"; git -C "$W/r" add other.txt; git -C "$W/r" commit -qm "main moves on"
+git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" checkout -q pr; git -C "$W/r" merge -q --no-edit main; publish_pr
+gate "$(meta 'Tweaks the page.' "$SITE" | owner_says "$(passed_at)")"
+check "control: a normal PR's PASS on the commit before a main merge still counts (rc 0)" [ "$RC" -eq 0 ]
+gate "$(meta 'Tweaks the page.' "$SITE" | noelle | owner_says "$(passed_at)")"
+check "abuse: a protected PR's PASS naming an older commit -> refused STALE_PASS, naming the current head" eval '[ "$RC" -eq 1 ] && code_is STALE_PASS && grep -q "an older commit" <<<"$MSG" && grep -q "naming $(sha_name "$PR_HEAD")" <<<"$MSG"'
+stale_pr; publish_pr; pushed "$PR_HEAD" 2026-01-02T00:05:00Z
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE")" 2026-01-03T00:00:00Z)"
+check "control: a normal PR's sha-less owner PASS posted after its head arrived counts (rc 0)" [ "$RC" -eq 0 ]
+gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE" | noelle)" 2026-01-03T00:00:00Z)"
+check "a protected PR's sha-less PASS -> refused STALE_PASS (it must name the head)" eval '[ "$RC" -eq 1 ] && code_is STALE_PASS && grep -q "no commit on this PR" <<<"$MSG"'
+echo "=== protected: --owner (body_gates' 4th argument) never clears it, and its forms/outcome leniency is off ==="
+# shellcheck disable=SC2034 # BP and BRC are read by the eval'd check lines below
+bg() { # PR-view JSON, owner flag -> BRC, BP: body_gates' problems
+  BP="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''body_gates 9 "$1" "$2" "$3"; rc=$?; printf "%s" "$BODY_PROBLEMS"; exit "$rc"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}" "$2")"; BRC=$?
+}
+repo; pr_head 2 '  return x + 2;'
+bg "$(FAST=1 NOREVIEW=1 meta 'Bumps CI.' "$WF" | jq -c '.body += "\nOutcome: none — a fixture change that runs nothing\n\n## Not built\nNothing cut."')" 1
+check "a .github/ change under --owner: REVIEW_REQUIRED stands (rc 1)" eval '[ "$BRC" -eq 1 ] && grep -q "^REVIEW_REQUIRED" <<<"$BP"'
+bg "$(FAST=1 NOREVIEW=1 meta 'Bumps CI.' "$WF" | owner_says "$GOOD")" 1
+check "…with no Outcome or Not built line, --owner does not record them UNDECLARED: they are asked for" eval '[ "$BRC" -eq 1 ] && grep -q "^NOT_BUILT_UNDECLARED" <<<"$BP" && ! grep -q "^REVIEW_REQUIRED" <<<"$BP"'
+bg "$(FAST=1 NOREVIEW=1 meta 'Fixes a page.' "$SITE" | jq -c '.body += "\nOutcome: none — a fixture change that runs nothing"')" 1
+check "control: a normal PR under --owner: no problems (rc 0)" [ "$BRC" -eq 0 ]
+echo "=== protected: the exact git diff of the head (verified_workflow_paths), deletes and renames included ==="
+# shellcheck disable=SC2034 # VW and VRC are read by the eval'd check lines below
+vwp() { # head -> VRC, VW (from_git_github, or empty)
+  VW="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''verified_workflow_paths 9 "$1" <<<"{\"files\":[]}" | jq -r .from_git_github; exit "${PIPESTATUS[0]}"' _ "$1")"; VRC=$?
+}
+wf_pr() { # git command run in the clone for the PR's one commit -> PR_HEAD (main holds .github/workflows/ci.yml)
+  repo; mkdir -p "$W/r/.github/workflows"; echo 'name: ci' > "$W/r/.github/workflows/ci.yml"; git -C "$W/r" add -A; git -C "$W/r" commit -qm "ci"
+  git -C "$W/r" push -q origin HEAD:main; git -C "$W/r" fetch -q origin
+  (cd "$W/r" && eval "$1") && git -C "$W/r" commit -qam "the PR" && PR_HEAD="$(git -C "$W/r" rev-parse HEAD)"
+  git -C "$W/r" push -q origin "HEAD:refs/pull/9/head"; git -C "$W/r" reset -q --hard origin/main
+}
+wf_pr 'git rm -q .github/workflows/ci.yml'; vwp "$PR_HEAD"
+check "a .github file deleted -> from_git_github true" eval '[ "$VRC" -eq 0 ] && [ "$VW" = true ]'
+wf_pr 'mkdir -p ci && git mv .github/workflows/ci.yml ci/ci.yml'; vwp "$PR_HEAD"
+check "a .github file renamed out -> from_git_github true" eval '[ "$VRC" -eq 0 ] && [ "$VW" = true ]'
+wf_pr 'echo "  on: push" >> .github/workflows/ci.yml'; vwp "$PR_HEAD"
+check "a .github file edited -> from_git_github true" eval '[ "$VRC" -eq 0 ] && [ "$VW" = true ]'
+wf_pr 'echo more >> site/index.html'; vwp "$PR_HEAD"
+check "edge: no .github change (main has one) -> from_git_github false" eval '[ "$VRC" -eq 0 ] && [ "$VW" = false ]'
+vwp 0123456789abcdef0123456789abcdef01234567
+check "outage: a head git cannot fetch -> rc 75, never false" eval '[ "$VRC" -eq 75 ] && [ "$VW" != false ]'
+git -C "$W/r" remote set-url origin "$W/no-such-origin.git"; vwp "$PR_HEAD"
+check "outage: origin cannot be fetched -> rc 75, never false" eval '[ "$VRC" -eq 75 ] && [ "$VW" != false ]'
+git -C "$W/r" remote set-url origin "$W/origin.git"
 }
 
 run_cases
@@ -357,6 +442,14 @@ neg() { # label, sed expression applied to land
   if LAND_UNDER_TEST="$W/land-broken" bash "$0" >/dev/null 2>&1; then echo "  FAIL negative proof: $1 still passes"; exit 1; fi
   echo "  ok   negative proof: $1 fails this test"
 }
+neg "a protected test that never says protected" '/^trusted_review_required()/a\
+  return 1'
+neg "a protected PR whose body still counts as a review" 's/--argjson strict "\$strict" <<</--argjson strict false <<</'
+neg "her bypass applied to a protected PR" '/^pr_owner_override()/,/^}/s/^  trusted_review_required <<<"\$json" \&\& return 1$/  :/'
+neg "a protected PASS that need not name the current head" 's/if \[ "\$sha" != "\$3" \] \&\& trusted_review_required/if false \&\& trusted_review_required/'
+neg "an exact diff that git could not read counted as no .github change" '/^verified_workflow_paths()/,/^}/s/have_head "\$1" "\$2" >\/dev\/null || return 75/have_head "$1" "$2" >\/dev\/null || { jq -c ".from_git_github = false" <<<"$meta"; return 0; }/'
+neg "a deleted .github file missed by the exact diff" 's/git diff --name-only --no-renames "\$base" "\$2" -- .github/git diff --name-only --no-renames --diff-filter=AM "$base" "$2" -- .github/'
+neg "--owner clearing protection inside body_gates" 's/^  if ! trusted_review_required <<<"\$3"; then { \[ -n "\${4:-}" \] || pr_owner_override <<<"\$3"; } \&\& bypass=1; fi$/  { [ -n "${4:-}" ] || pr_owner_override <<<"$3"; } \&\& bypass=1/'
 neg "a signoff that never asks who signed" '/^is_builder()/a\
   return 1'
 neg "a patch check that never reads history" '/^patch_fixes()/a\

@@ -76,4 +76,4 @@ fi
 # The wrapper releases the lock after it emails the report; only clean up if the wrapper is gone.
 sleep "${SCOOTER_WATCH_WATCHDOG_GRACE:-30}"
 mine || exit 0
-kill -0 "$WRAPPER_PID" 2>/dev/null || rm -rf "$FIXLOCK"
+kill -0 "$WRAPPER_PID" 2>/dev/null || "$(dirname "$0")/scooter-watch-dead-lock.sh" "$FIXLOCK" "$(dirname "$FIXLOCK")"

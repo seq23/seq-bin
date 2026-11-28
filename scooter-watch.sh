@@ -317,6 +317,10 @@ FIXLOCK="$STATE_DIR/.fix-lock"
 CODEX_WAIT="$STATE_DIR/codex-wait"   # written by scooter-watch-run-fix.sh when Codex hit its limit
 FIX_CAP_SECONDS=7200   # 2h hard kill (watchdog) — a single event's diagnosis+fix; detached from this tick.
 
+# 28 Nov 2026: a lock whose wrapper died with no exit is never removed silently; its emails go back on the queue
+# (once) and are picked up on the next tick. Before this, the dispatch branch below did `rm -rf "$FIXLOCK"` and lost them.
+"$HOME_DIR/bin/scooter-watch-dead-lock.sh" "$FIXLOCK" "$STATE_DIR"
+
 if [ "$PENDING_COUNT" -gt 0 ] && [ -d "$FIXLOCK" ] && kill -0 "$(cat "$FIXLOCK/pid" 2>/dev/null)" 2>/dev/null; then
   RUNNING_SINCE="$(cat "$FIXLOCK/started_at" 2>/dev/null)"
   echo "[watch] $PENDING_COUNT email(s) waiting for a tail, but an agent is in flight (since $RUNNING_SINCE) — they stay queued for the next free tick"

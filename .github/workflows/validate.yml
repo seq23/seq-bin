@@ -230,6 +230,8 @@ jobs:
         run: ./tests/test-scooter-watch-fail.sh
       - name: A tail watchdog only stops its own agent
         run: ./tests/test-scooter-watch-watchdog.sh
+      - name: a tail that died with no exit has its emails re-queued once
+        run: ./tests/test-scooter-watch-dead-lock.sh
       - name: Partner tail runs with background tasks off
         run: ./tests/test-scooter-watch-foreground.sh
       - name: Partner tail gets its full 2 h and retries a capped email once

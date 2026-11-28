@@ -101,7 +101,7 @@ has "is queued — deploy.yml fires only when it finishes" && ok "says why it is
 
 echo "=== 2. CI on the merge commit finishes red ==="
 CI_STATES="in_progress completed:failure" DEPLOY_TEXT="$CI_YML" MAIN_HEAD=$MSHA run_wait
-if [ "$(rc)" = 1 ] && has "finished failure, so deploy.yml will not ship it" && ! grep -qi "main is green" "$W/out" && ! grep -q "run list --workflow deploy.yml" "$W/calls"; then ok "refused, never green, the deploy never looked for"; else bad "red CI: rc $(rc)"; show; fi
+if [ "$(rc)" = 1 ] && has "finished failure (a test failed), so deploy.yml will not ship it" && ! grep -qi "main is green" "$W/out" && ! grep -q "run list --workflow deploy.yml" "$W/calls"; then ok "refused, never green, the deploy never looked for"; else bad "red CI: rc $(rc)"; show; fi
 
 echo "=== 3. CI still running at the bound: unsure (75), never cancelled, never green ==="
 CI_STATES="queued" DEPLOY_TEXT="$CI_YML" MAIN_HEAD=$MSHA LAND_MAIN_WAIT_SECS=1 run_wait

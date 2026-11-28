@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- chatgpt-searches (her ask 27 Nov 2026): each night 22:00 Central, the sites due that night (16 sites over the
+     week, at most 3 a night) are asked about in ChatGPT Temporary Chats through Claude in Chrome on her plan; the
+     run stops at 02:00 Central or a ChatGPT limit and owes the rest to the next night. Inside the Mac's 22:00-07:00
+     window; an ai-run job driving her Chrome, so it stays on the Mac. install-launchd.sh moves the Hour to the Mac's
+     zone. A Mac asleep at 22:00 runs it on wake; the script itself refuses outside 22:00-01:59 Central. -->
+<dict>
+	<key>Label</key>
+	<string>com.seq.chatgpt-searches</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>/Users/sequoiataylor/bin/chatgpt-searches</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+	<key>StandardOutPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/chatgpt-searches.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sequoiataylor/Library/Logs/chatgpt-searches.log</string>
+</dict>
+</plist>

@@ -1,0 +1,1 @@
+/Users/sequoiataylor/.boss-os/runtime/scripts/ops/ai-visibility.sh

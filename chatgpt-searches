@@ -1,0 +1,693 @@
+#!/usr/bin/env node
+// chatgpt-searches — every week, by itself, what ChatGPT searches before it recommends something in each money
+// business's category, and whether our site shows up (her ask, 27 Nov 2026: "i want this ChatGPT's hidden-searches
+// check to run regularly as part of our program and be integrated permanently"). New gaps become search-loop seeds.
+//
+//   chatgpt-searches                    the night's run (launchd 22:00 Central): the sites due tonight and any owed
+//   chatgpt-searches --hand [--sites a,b]  a run by hand, at any hour but the Mac's rest (07:00-09:59 Central)
+//   chatgpt-searches --plan             which sites are due tonight; no model, no browser
+//   chatgpt-searches --rollup           rewrite this week's rollup from the week's state; no model, no browser
+//
+// HOW. chatgpt-searches-sites.json lists 16 sites, each on one night (Mon-Sun, at most 3 a night). For a site due
+// tonight:
+//   1. QUESTIONS, once a week per site: a no-tools `claude -p` (ai-run --role brain, AI_RUN_BARE=1) writes 5 buyer
+//      questions from the site's brain sections and last week's gaps. CODE refuses a question that names us (any of
+//      the site's names or domains), repeats last week's word for word, or is not one plain question.
+//   2. ASKING: one `claude -p --chrome` in her Chrome, locked to six Claude in Chrome tools (chatgpt-searches-
+//      settings.json, --permission-mode dontAsk, none of her settings). It pastes chatgpt-searches-capture.js (filled
+//      with the site's questions and our domains) into a ChatGPT Temporary Chat with Web search on, and calls its
+//      functions. CODE reads the event stream: every install must be the exact script, every other page call one of
+//      the script's own calls, and a question counts only when the script's capture says ChatGPT received that very
+//      question in a temporary chat and finished its answer. The searches, the pages read and the citations come
+//      from ChatGPT's own answer stream; the businesses named are the session's reading of the answer, kept only
+//      where the name is in the answer text word for word.
+//   3. SEEDS, once a site's week is complete: each chat where we did not show up and ChatGPT searched is a gap. A
+//      no-tools `claude -p` turns each gap's searches into one search a person would type (2-14 words, no brand of
+//      ours or of anyone the answer named); CODE checks them, appends them to the site's search-loop config `seeds`
+//      (search-loop v1.17.0; at most 25, a seed this job added and the engine has finished is the first to go),
+//      validates the file with the engine's own validate-config, and opens ONE PR on that repo, handed to
+//      `land-after`. A config with no `product.facts` gets no seeds (v1.17.0 refuses them): it is named, never
+//      written.
+//
+// PACE. The night runs 22:00-02:00 Central. A ChatGPT "temporary limit", a sign-out, Chrome or the extension
+// gone, or her Claude plan's limit stops the night: the rest of the sites (and the questions not asked) are owed
+// to the next night, inside the same week. A Mac asleep at 22:00 runs it on wake; outside 22:00-01:59 the
+// scheduled run refuses (NAMED STOP [OUTSIDE_NIGHT]) and the sites wait for the next night.
+//
+// OUTPUT. ~/Work/tasks/logs/chatgpt-searches/<night>/<site>.md (and .json), and rollup-<ISO week>.md, rewritten
+// each night. Her Notices line (Boss OS morning "notices", through addMorningLines): a night that could not check
+// (with the reason), a night that asked nothing (Rule 0), and a site that showed up in fewer chats than last week.
+//
+// RULE 0. A night with sites due and 0 questions checked never exits 0: exit 75 with COULDNT-CHECK and its reason
+// when a wall stopped it, exit 1 FAIL otherwise; both write the Notices line. An outage is never "0 gaps".
+//
+// MONEY. AI_RUN_NO_CREDIT=1: her plan only, never the API key. The session cannot click, type or open settings: the
+// script types the question and presses Send, nothing else. Temporary Chat: nothing kept, no memory written.
+//
+// Exit: 0 every due question checked (or nothing due) · 1 FAIL (0 checked, no wall) or a site's step broke ·
+//   3 OUTSIDE_NIGHT / MAC_REST · 64 usage · 75 a wall stopped the night (the rest is owed).
+// Env (tests): CSQ_SITES, CSQ_OUT, CSQ_STATE, CSQ_BRAINS, CSQ_AI_RUN, CSQ_NOW, CSQ_REPOS, CSQ_ENGINE_DIR, CSQ_GH,
+//   CSQ_GIT, CSQ_LAND_AFTER, CSQ_NOTICE (a command given <key> <text>), CSQ_LOGS, CSQ_OPEN_CHROME=0.
+// Each asking session's event stream: ~/Library/Logs/chatgpt-searches/<time>-<site>.jsonl, kept 14 days.
+"use strict";
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+
+const HOME = os.homedir();
+const HERE = __dirname;
+const SITES_FILE = process.env.CSQ_SITES || path.join(HERE, "chatgpt-searches-sites.json");
+const CAPTURE_FILE = path.join(HERE, "chatgpt-searches-capture.js");
+const PROMPT_FILE = path.join(HERE, "chatgpt-searches-prompt.md");
+const SETTINGS_FILE = path.join(HERE, "chatgpt-searches-settings.json");
+const OUT = process.env.CSQ_OUT || path.join(HOME, "Work/tasks/logs/chatgpt-searches");
+const STATE = process.env.CSQ_STATE || path.join(HOME, ".boss-os/chatgpt-searches");
+const BRAINS = process.env.CSQ_BRAINS || path.join(HOME, "Brains");
+const AI_RUN = process.env.CSQ_AI_RUN || path.join(HOME, "bin/ai-run");
+const REPOS = process.env.CSQ_REPOS || path.join(HOME, "GitHub");
+const GH = process.env.CSQ_GH || "gh";
+const GIT = process.env.CSQ_GIT || "git";
+const LAND_AFTER = process.env.CSQ_LAND_AFTER || path.join(HERE, "land-after");
+const RUNTIME = path.join(HOME, ".boss-os/runtime");
+const LOGS = process.env.CSQ_LOGS || path.join(HOME, "Library/Logs/chatgpt-searches");
+const QUESTIONS = 5;
+const MAX_TRIES = 2;            // a question that failed twice (not on a wall) is final for the week
+const MAX_SEEDS = 25;           // search-loop v1.17.0 MAX_SEEDS
+const SEED_DONE = new Set(["built", "strengthened", "answered_by"]);
+const WALLS = new Set(["LIMIT", "SIGNED_OUT", "NOT_TEMP", "NO_CHROME", "CLAUDE_LIMIT", "CLAUDE_SIGNED_OUT", "PAUSED", "RUN_CAP", "NO_RUNNER", "TIME_UP"]);
+const WALL_WORDS = {
+  LIMIT: "ChatGPT said it hit a temporary limit", SIGNED_OUT: "ChatGPT is signed out in Chrome", NOT_TEMP: "ChatGPT would not open a Temporary Chat",
+  NO_CHROME: "Chrome or the Claude in Chrome extension was not reachable", CLAUDE_LIMIT: "her Claude plan's usage limit was reached",
+  CLAUDE_SIGNED_OUT: "the Claude command line is signed out", PAUSED: "scheduled AI jobs are paused (ai-pause)", RUN_CAP: "the runs-a-day cap was reached",
+  NO_RUNNER: "ai-run is missing", TIME_UP: "the night's window (until 02:00 Central) ran out",
+};
+
+class Stop extends Error { constructor(code, reason, msg) { super(`NAMED STOP [${reason}] ${msg}`); this.code = code; this.reason = reason; } }
+
+// ---------- clock (Central) ----------
+function central(d) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(d).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour), minute: Number(p.minute) };
+}
+const addDays = (date, n) => new Date(Date.parse(`${date}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+// The night a run belongs to: a run after midnight (and before noon) is the night that started the evening before.
+const nightOf = (c) => (c.hour < 12 ? addDays(c.date, -1) : c.date);
+const slotOf = (date) => { const w = new Date(`${date}T12:00:00Z`).getUTCDay(); return w === 0 ? 7 : w; }; // 1 Mon .. 7 Sun
+function isoWeek(date) {
+  const d = new Date(`${date}T12:00:00Z`); const day = slotOf(date);
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const y = d.getUTCFullYear(); const start = Date.UTC(y, 0, 1);
+  return `${y}-W${String(Math.ceil(((d - start) / 86400000 + 1) / 7)).padStart(2, "0")}`;
+}
+const prevWeekOf = (date) => isoWeek(addDays(date, -7));
+// Minutes from now until 02:00 Central of this night (only meaningful inside 22:00-01:59).
+const minutesToTwo = (c) => (c.hour >= 22 ? (24 - c.hour) * 60 - c.minute + 120 : (2 - c.hour) * 60 - c.minute);
+
+// ---------- small helpers ----------
+const readJson = (f, dflt) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return dflt; } };
+function writeAtomic(file, text) { fs.mkdirSync(path.dirname(file), { recursive: true }); const t = `${file}.tmp`; fs.writeFileSync(t, text); fs.renameSync(t, file); }
+const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const say = (s) => process.stdout.write(`[${new Date().toISOString().slice(11, 19)}] ${s}\n`);
+
+function loadSites() {
+  let j;
+  try { j = JSON.parse(fs.readFileSync(SITES_FILE, "utf8")); } catch (e) { throw new Stop(2, "SITES_UNREADABLE", `${SITES_FILE}: ${e.message}`); }
+  const sites = Array.isArray(j?.sites) ? j.sites : [];
+  const bad = sites.filter((s) => !s.id || !s.label || !s.about || !Number.isInteger(s.night) || s.night < 1 || s.night > 7
+    || !Array.isArray(s.domains) || !s.domains.length || !Array.isArray(s.names) || !s.names.length || !s.brain || !Array.isArray(s.brain_headings)
+    || (s.seeds !== null && !(s.seeds && /^[\w.-]+\/[\w.-]+$/.test(s.seeds.repo) && s.seeds.config)) || (s.seeds === null && !s.seeds_why));
+  if (!sites.length || bad.length) throw new Stop(2, "SITES_INVALID", `${SITES_FILE}: ${bad.length ? `bad entries ${bad.map((s) => s.id || "?").join(", ")}` : "no sites"}`);
+  return sites;
+}
+
+// ---------- the words that make something ours (never in a question or a seed) ----------
+function brandTerms(site) {
+  const t = new Set();
+  for (const n of site.names) { t.add(norm(n)); t.add(norm(n.replace(/&/g, " and "))); }
+  for (const d of site.domains) { const label = d.split(".")[0]; t.add(norm(d)); t.add(norm(label)); t.add(norm(label.replace(/\d+$/, ""))); }
+  return [...t].filter((x) => x.length >= 3);
+}
+const namesUs = (text, site) => { const n = ` ${norm(text)} `; const squash = n.replace(/ /g, ""); return brandTerms(site).some((b) => n.includes(` ${b} `) || (b.length >= 6 && squash.includes(b.replace(/ /g, "")))); };
+
+// ---------- brain excerpt ----------
+// The brain sections whose heading names one of the site's headings, each to the next heading of its level or
+// higher; private spans are cut. A brain that cannot be read is a named stop for that site, never an empty prompt.
+function brainExcerpt(site) {
+  let text;
+  try { text = fs.readFileSync(path.join(BRAINS, `${site.brain}.md`), "utf8"); } catch (e) { throw new Stop(1, "BRAIN_UNREAD", `${site.brain}.md: ${e.code || e.message}`); }
+  text = text.replace(/<!--\s*confidential\s*-->[\s\S]*?(<!--\s*\/confidential\s*-->|$)/g, "[private]");
+  const lines = text.split("\n"); const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,4})\s+(.*)$/);
+    if (!m || !site.brain_headings.some((h) => m[2].toLowerCase().includes(h.toLowerCase()))) continue;
+    const level = m[1].length; const chunk = [lines[i]];
+    for (let k = i + 1; k < lines.length; k++) { const n = lines[k].match(/^(#{1,4})\s/); if (n && n[1].length <= level) break; chunk.push(lines[k]); }
+    out.push(chunk.join("\n"));
+  }
+  const s = out.join("\n\n").slice(0, 14000);
+  if (s.length < 80) throw new Stop(1, "BRAIN_SECTION_MISSING", `${site.brain}.md has no section headed ${site.brain_headings.join(" / ")}`);
+  return s;
+}
+
+// ---------- the model runner ----------
+const LIMIT_RE = /(hit|reached) your ([a-z0-9-]+ ){0,2}limit|usage limit|(5-hour|weekly|session|daily|opus) limit/i;
+const AUTH_RE = /not logged in|please run \/login|invalid api key|authentication_error|unauthori[sz]ed|oauth token (has )?expired/i;
+function aiRun({ prompt, model, bare, args, maxSecs, caller }) {
+  const env = { ...process.env, AI_RUN_CALLER: caller || "chatgpt-searches", AI_RUN_NO_CREDIT: "1", AI_RUN_CLAUDE_MODEL: model,
+    AI_RUN_MAX_SECS: String(maxSecs), AI_RUN_MAX_RUNS: "60", ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
+  delete env.ANTHROPIC_API_KEY; delete env.AI_RUN_WORKER; delete env.AI_RUN_BARE; delete env.AI_RUN_CLAUDE_ARGS; delete env.AI_RUN_MCP;
+  if (bare) env.AI_RUN_BARE = "1"; else env.AI_RUN_CLAUDE_ARGS = args;
+  const r = spawnSync(AI_RUN, ["--role", "brain"], { input: prompt, cwd: HOME, env, encoding: "utf8", timeout: (maxSecs + 120) * 1000, maxBuffer: 256 * 1024 * 1024 });
+  const all = `${r.stdout || ""}\n${r.stderr || ""}`;
+  let wall = null;
+  if (r.error) wall = r.error.code === "ENOENT" ? "NO_RUNNER" : null;
+  const named = all.match(/NAMED STOP \[([A-Z_]+)\]/)?.[1];
+  if (!wall && named === "PAUSED") wall = "PAUSED";
+  else if (!wall && named === "RUN_CAP") wall = "RUN_CAP";
+  else if (!wall && (named === "CLAUDE_LIMIT" || /"status":\s*"rejected"/.test(all) || (LIMIT_RE.test(all) && !/CSQ1\|/.test(all)))) wall = "CLAUDE_LIMIT";
+  else if (!wall && AUTH_RE.test(all) && !/CSQ1\|/.test(all)) wall = "CLAUDE_SIGNED_OUT";
+  return { rc: r.status, stdout: r.stdout || "", stderr: r.stderr || "", wall, named, timedOut: named === "TIME_CAP" || r.error?.code === "ETIMEDOUT" };
+}
+// One JSON object out of a model's answer text (the first { to the last }).
+function jsonFrom(text) { const a = text.indexOf("{"), b = text.lastIndexOf("}"); if (a < 0 || b <= a) return null; try { return JSON.parse(text.slice(a, b + 1)); } catch { return null; } }
+// Try the first model; on her plan's limit, the other once.
+function askModel(opts, models) {
+  let r;
+  for (const m of models) { r = aiRun({ ...opts, model: m }); r.model = m; if (r.wall !== "CLAUDE_LIMIT") return r; }
+  return r;
+}
+
+// ---------- 1. questions ----------
+function questionProblems(qs, site, lastQs) {
+  const p = [];
+  if (!Array.isArray(qs) || qs.length !== QUESTIONS) return [`not ${QUESTIONS} questions`];
+  const seen = new Set(), last = new Set((lastQs || []).map(norm));
+  qs.forEach((q, i) => {
+    if (typeof q !== "string" || q.length < 20 || q.length > 220 || !q.trim().endsWith("?") || /\n/.test(q)) p.push(`q${i + 1}: one plain question of 20-220 characters ending in "?"`);
+    else if (namesUs(q, site)) p.push(`q${i + 1}: names us ("${q}")`);
+    else if (last.has(norm(q))) p.push(`q${i + 1}: repeats last week's question word for word`);
+    else if (seen.has(norm(q))) p.push(`q${i + 1}: repeats another question`);
+    seen.add(norm(q));
+  });
+  return p;
+}
+function questionPrompt(site, last, problems) {
+  const gaps = (last?.rows || []).filter((r) => r.status === "CHECKED");
+  const lastLines = gaps.length ? gaps.map((r) => `- "${r.asked}" → ${r.ours ? "we showed up" : "we did NOT show up"}; ChatGPT searched: ${r.queries.map((q) => `"${q}"`).join(", ") || "(nothing)"}`).join("\n") : "(none: this is the first week)";
+  return `You write the questions a stranger would type into ChatGPT when they are about to choose a ${site.about}.
+
+Write exactly ${QUESTIONS} questions, one per line of a JSON list. Each is one plain question a real buyer would ask, as they would ask it, ending in "?". Each covers a different need or situation. At least two follow up last week's gaps below (the same need asked another way, or the next thing that buyer would ask); never repeat last week's questions word for word.
+Never name the business, its sites or its products: never use any of these words: ${[...site.names, ...site.domains].join(", ")}. Ask like someone who has never heard of it. No other brand names either.
+
+What the business sells (from its brain):
+${brainExcerpt(site)}
+
+Last week's questions:
+${lastLines}
+${problems ? `\nYour last answer was refused: ${problems.join("; ")}. Write all ${QUESTIONS} again.\n` : ""}
+Answer with JSON only: {"questions": ["...", "...", "...", "...", "..."]}`;
+}
+function writeQuestions(site, lastWeek) {
+  const lastQs = (lastWeek?.rows || []).map((r) => r.asked);
+  let problems = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = askModel({ prompt: questionPrompt(site, lastWeek, problems), bare: true, maxSecs: 300 }, ["opus", "sonnet"]);
+    if (r.wall) return { wall: r.wall };
+    const qs = jsonFrom(r.stdout)?.questions;
+    problems = questionProblems(qs, site, lastQs);
+    if (!problems.length) return { questions: qs.map((q) => q.trim()), model: r.model };
+  }
+  return { error: `QUESTIONS_REFUSED: ${problems.join("; ")}` };
+}
+
+// ---------- 2. asking in Chrome ----------
+const squashJs = (s) => String(s).replace(/\s+/g, "");
+function installText(site, questions) {
+  const cfg = { site: site.id, qs: questions, ours: { domains: site.domains, names: site.names } };
+  return fs.readFileSync(CAPTURE_FILE, "utf8").replace(/^\s*\/\/.*\n/gm, "").replace(/^\s+/gm, "").replace("__CFG__", JSON.stringify(cfg)).trim();
+}
+const CALL_RES = [/^awaitwindow\.__csq\.(ask|wait)\(\d+\);?$/, /^window\.__csq\.out\(\d+,\d+\);?$/, /^window\.__csq\.state\(\);?$/, /^window\.__csq\.names\(\d+,\[.*\]\);?$/s];
+
+// Read a Chrome session's stream-json: which calls ran, what the script returned, and how it ended.
+function readSession(text, canonical, questions) {
+  const uses = new Map(), results = []; const plain = [];
+  for (const raw of String(text).split("\n")) {
+    const line = raw.trim(); if (!line) continue;
+    let d = null; if (line.startsWith("{")) { try { d = JSON.parse(line); } catch { d = null; } }
+    if (!d) { plain.push(line); continue; }
+    const content = d.message?.content;
+    if (d.type === "assistant" && Array.isArray(content)) {
+      for (const b of content) {
+        if (b?.type === "tool_use") uses.set(b.id, b);
+        if (b?.type === "text") plain.push(String(b.text));
+      }
+    } else if (d.type === "user" && Array.isArray(content)) {
+      for (const b of content) if (b?.type === "tool_result") {
+        const t = typeof b.content === "string" ? b.content : (b.content || []).map((x) => x?.text || "").join("\n");
+        results.push({ id: b.tool_use_id, text: t, error: !!b.is_error });
+      }
+    } else if (d.type === "result" && typeof d.result === "string") plain.push(d.result);
+  }
+  const want = squashJs(canonical);
+  const rows = {}; const notes = []; let installs = 0, badInstall = 0, offScript = 0, chromeErr = 0;
+  const row = (n) => (rows[n] = rows[n] || { n, chunks: {}, of: null, ask: null, wait: null, names: null });
+  for (const r of results) {
+    const u = uses.get(r.id); if (!u) continue;
+    const name = String(u.name || "");
+    if (r.error && /not connected|no browser|extension|disconnected|could not connect|no response/i.test(r.text)) chromeErr++;
+    if (!/javascript_tool$/.test(name)) continue;
+    const code = squashJs(u.input?.text || "");
+    if (code.includes("__csqS") || code.includes("CSQ-READY")) {
+      installs++;
+      if (code !== want) { badInstall++; continue; }
+      continue;
+    }
+    if (!CALL_RES.some((re) => re.test(code))) { offScript++; notes.push(`off-script page call: ${(u.input?.text || "").slice(0, 80)}`); continue; }
+    for (const ln of r.text.split("\n")) {
+      let m;
+      if ((m = ln.match(/^CSQA\|(\d+)\|([A-Z_]+)/))) row(+m[1]).ask = m[2];
+      else if ((m = ln.match(/^CSQW\|(\d+)\|([A-Z_0-9]+)/))) row(+m[1]).wait = m[2];
+      else if ((m = ln.match(/^CSQ1\|(\d+)\|(\d+)\|(\d+)\|(.*)$/))) { const x = row(+m[1]); x.of = +m[3]; x.chunks[+m[2]] = m[4]; }
+      else if ((m = ln.match(/^CSQN\|(\d+)\|(.*)$/))) { try { row(+m[1]).names = JSON.parse(m[2]); } catch { /* unreadable: names stay unread */ } }
+    }
+  }
+  const said = plain.join("\n");
+  const stop = said.match(/CSQ-STOP\|(\d+)\|([A-Z_]+)/);
+  let wall = null;
+  const words = Object.values(rows).flatMap((x) => [x.ask, x.wait]);
+  if (words.includes("LIMIT")) wall = "LIMIT";
+  else if (words.includes("SIGNED_OUT")) wall = "SIGNED_OUT";
+  else if (words.includes("NOT_TEMP")) wall = "NOT_TEMP";
+  else if (chromeErr && !Object.values(rows).some((x) => x.ask === "SENT")) wall = "NO_CHROME";
+  else if (stop && ["LIMIT", "SIGNED_OUT", "NOT_TEMP", "NO_CHROME"].includes(stop[2]) && !Object.values(rows).some((x) => x.ask === "SENT")) wall = stop[2];
+  // Each question's verdict: CHECKED only on the script's own capture of a finished temporary chat of that question.
+  const out = {};
+  for (let n = 1; n <= questions.length; n++) {
+    const x = rows[n];
+    const base = { n, asked: questions[n - 1] };
+    if (badInstall) { out[n] = { ...base, status: "COULDNT-CHECK", reason: "SCRIPT_CHANGED: the session pasted a script that is not chatgpt-searches-capture.js" }; continue; }
+    if (offScript) { out[n] = { ...base, status: "COULDNT-CHECK", reason: "OFF_SCRIPT: the session ran its own code on the page" }; continue; }
+    if (!x || !x.ask) { out[n] = { ...base, status: "NOT_ASKED", reason: wall ? `not asked: ${wall}` : "not asked" }; continue; }
+    if (x.ask !== "SENT") { out[n] = { ...base, status: "COULDNT-CHECK", reason: `ask: ${x.ask}` }; continue; }
+    if (x.wait !== "DONE") { out[n] = { ...base, status: "COULDNT-CHECK", reason: `answer: ${x.wait || "never finished"}` }; continue; }
+    const got = x.of ? Array.from({ length: x.of }, (_, i) => x.chunks[i]) : [];
+    let cap = null;
+    if (got.length && got.every((c) => typeof c === "string")) { try { cap = JSON.parse(got.join("")); } catch { cap = null; } }
+    if (!cap) { out[n] = { ...base, status: "COULDNT-CHECK", reason: `capture not read (${x.of ? Object.keys(x.chunks).length : 0} of ${x.of || "?"} parts)` }; continue; }
+    const problems = [];
+    if (cap.asked !== questions[n - 1]) problems.push("the capture is for another question");
+    if (!norm(cap.sent).endsWith(norm(questions[n - 1]))) problems.push("ChatGPT received other words than the question");
+    if (cap.temporary !== true) problems.push("not a temporary chat");
+    if (cap.complete !== true) problems.push("the answer did not finish");
+    if (cap.status !== 200) problems.push(`HTTP ${cap.status}`);
+    if (!cap.cid) problems.push("no chat id");
+    if (problems.length) { out[n] = { ...base, status: "COULDNT-CHECK", reason: problems.join("; "), cap }; continue; }
+    const named = x.names && Array.isArray(x.names.named) ? x.names.named : null;
+    const ours = (cap.ours_read || []).length + (cap.ours_cited || []).length + (cap.ours_named || []).length > 0;
+    out[n] = {
+      ...base, status: "CHECKED", cid: cap.cid, model: cap.model, memory: cap.memory, search_on: cap.search_on,
+      queries: Array.isArray(cap.queries) ? cap.queries : [], read_pages: cap.read_pages, read_domains: cap.read_domains || [],
+      read_domains_total: cap.read_domains_total, cited: cap.cited || [], cited_total: cap.cited_total,
+      named, named_rejected: x.names?.rejected || [], ours, ours_read: cap.ours_read || [], ours_cited: cap.ours_cited || [], ours_named: cap.ours_named || [],
+    };
+  }
+  return { rows: out, wall, installs, badInstall, offScript, notes, said: said.slice(-600) };
+}
+
+function askInChrome(site, questions, numbers, maxSecs) {
+  const canonical = installText(site, questions);
+  const prompt = fs.readFileSync(PROMPT_FILE, "utf8").replace("{{SITE}}", `${site.label} (${site.id})`).replace("{{NUMBERS}}", numbers.join(", ")).replace("{{SCRIPT}}", canonical);
+  const turns = 12 + numbers.length * 16;
+  const args = `--chrome --output-format stream-json --verbose --max-turns ${turns} --permission-mode dontAsk --setting-sources= --settings ${SETTINGS_FILE} --no-session-persistence`;
+  const r = askModel({ prompt, args, maxSecs }, ["sonnet", "opus"]);
+  // The session's own event stream is the evidence behind every row: kept 14 days on the Mac, never in a repo.
+  try {
+    fs.mkdirSync(LOGS, { recursive: true });
+    for (const f of fs.readdirSync(LOGS)) { const p = path.join(LOGS, f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400000) fs.rmSync(p, { force: true }); }
+    fs.writeFileSync(path.join(LOGS, `${new Date().toISOString().replace(/[:.]/g, "-")}-${site.id}.jsonl`), r.stdout);
+  } catch { /* the rows still stand; the log is a convenience */ }
+  const s = readSession(r.stdout, canonical, questions);
+  if (r.wall && !Object.values(s.rows).some((x) => x.status === "CHECKED")) s.wall = r.wall;
+  if (!s.wall && r.timedOut) s.timedOut = true;
+  s.model = r.model; s.rc = r.rc;
+  return s;
+}
+
+// ---------- 3. seeds ----------
+function seedProblems(seed, site, avoid) {
+  const q = String(seed?.query || "").trim(); const words = q.split(/\s+/).filter(Boolean).length;
+  if (q.length < 8 || q.length > 120 || words < 2 || words > 14) return "not a search of 2-14 words, 8-120 characters";
+  if (namesUs(q, site)) return "names us";
+  const n = ` ${norm(q)} `;
+  const brand = avoid.find((a) => norm(a).length >= 3 && n.includes(` ${norm(a)} `));
+  if (brand) return `names ${brand}`;
+  if (seed.wants !== undefined && !(Array.isArray(seed.wants) && seed.wants.length <= 4 && seed.wants.every((w) => typeof w === "string" && w.trim().length >= 2 && w.length <= 60))) return "wants: up to 4 short feature words";
+  return null;
+}
+function seedPrompt(site, gaps, problems) {
+  return `These are ChatGPT's own web searches, captured while it answered buyer questions about a ${site.about}. In each one the business did not show up.
+
+For each question, write ONE search a person would type into Google that asks for the same thing: 2-14 words, 8-120 characters, lower case, no brand, company, app or product names at all (ours or anyone's), no site: or other operators. Add "wants": up to 4 short feature words the searcher asked for (e.g. "no account", "free"). Skip a question whose searches are off the subject of ${site.about}.
+${problems ? `\nYour last answer was refused: ${problems.join("; ")}. Write them again.\n` : ""}
+${gaps.map((g) => `Q${g.n}: "${g.asked}"\nChatGPT searched: ${g.queries.map((q) => `"${q}"`).join(", ")}`).join("\n\n")}
+
+Answer with JSON only: {"seeds": [{"q": <question number>, "query": "...", "wants": ["..."]}]}`;
+}
+function writeSeedList(site, gaps) {
+  let problems = null, last = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = askModel({ prompt: seedPrompt(site, gaps, problems), bare: true, maxSecs: 300 }, ["opus", "sonnet"]);
+    if (r.wall) return { wall: r.wall };
+    const list = jsonFrom(r.stdout)?.seeds;
+    if (!Array.isArray(list)) { problems = ["no JSON seeds list"]; continue; }
+    const ok = [], bad = [];
+    for (const s of list) {
+      const g = gaps.find((x) => x.n === Number(s?.q));
+      const why = !g ? "no such question" : seedProblems(s, site, g.named || []);
+      if (why) bad.push(`Q${s?.q} "${s?.query}": ${why}`); else ok.push({ q: g.n, query: String(s.query).trim().toLowerCase(), ...(s.wants?.length ? { wants: s.wants.map((w) => w.trim()) } : {}) });
+    }
+    last = { seeds: ok, refused: bad };
+    if (!bad.length) return last;
+    problems = bad;
+  }
+  return last || { seeds: [], refused: ["no answer"] };
+}
+
+const git = (cwd, args, opts = {}) => spawnSync(GIT, args, { cwd, encoding: "utf8", ...opts });
+// The engine's own validator, from search-loop's origin/main (or CSQ_ENGINE_DIR in tests).
+function engineDir() {
+  if (process.env.CSQ_ENGINE_DIR) return process.env.CSQ_ENGINE_DIR;
+  const repo = path.join(REPOS, "search-loop");
+  if (git(repo, ["fetch", "-q", "origin", "main"]).status !== 0) throw new Stop(1, "ENGINE_UNREAD", `${repo}: git fetch failed`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "csq-engine-"));
+  const tar = spawnSync("bash", ["-c", `git -C "${repo}" archive origin/main | tar -x -C "${dir}"`], { encoding: "utf8" });
+  if (tar.status !== 0) throw new Stop(1, "ENGINE_UNREAD", `search-loop archive failed: ${tar.stderr.slice(0, 160)}`);
+  return dir;
+}
+
+function seedsForSite(site, week, wk, { dry }) {
+  const rows = Object.values(wk.asked || {});
+  const gaps = rows.filter((r) => r.status === "CHECKED" && !r.ours && r.queries.length);
+  if (!site.seeds) return { status: "no-home", why: site.seeds_why, gaps: gaps.length };
+  if (!gaps.length) return { status: "none", why: "no gap this week (we showed up, or ChatGPT did not search)", gaps: 0 };
+  const name = site.seeds.repo.split("/")[1]; const repoDir = path.join(REPOS, name);
+  if (!fs.existsSync(path.join(repoDir, ".git"))) return { status: "stopped", why: `SEEDS_REPO_MISSING: no checkout at ${repoDir}`, gaps: gaps.length };
+  if (git(repoDir, ["fetch", "-q", "origin", "main"]).status !== 0) return { status: "stopped", why: "SEEDS_REPO_UNREAD: git fetch failed", gaps: gaps.length };
+  const shown = git(repoDir, ["show", `origin/main:${site.seeds.config}`]);
+  const cfg = shown.status === 0 ? (() => { try { return JSON.parse(shown.stdout); } catch { return null; } })() : null;
+  if (!cfg) return { status: "stopped", why: `SEEDS_CONFIG_UNREAD: ${site.seeds.config} on origin/main`, gaps: gaps.length };
+  if (!(Array.isArray(cfg.product?.facts) && cfg.product.facts.length)) return { status: "waiting", why: `NO_PRODUCT_FACTS: ${site.seeds.repo} ${site.seeds.config} has no product.facts, and search-loop v1.17.0 refuses seeds without them`, gaps: gaps.length };
+  const branch = `chatgpt-seeds/${site.id}-${week}`;
+  const open = spawnSync(GH, ["pr", "list", "-R", site.seeds.repo, "--head", branch, "--state", "all", "--json", "number,url", "-q", ".[0].url"], { encoding: "utf8" });
+  if (open.status === 0 && open.stdout.trim()) return { status: "pr", url: open.stdout.trim(), why: "already opened this week", gaps: gaps.length };
+  const written = writeSeedList(site, gaps);
+  if (written.wall) return { status: "stopped", why: `seed writer: ${WALL_WORDS[written.wall] || written.wall}`, wall: written.wall, gaps: gaps.length };
+  const existing = Array.isArray(cfg.seeds) ? cfg.seeds : [];
+  const have = new Set(existing.map((s) => norm(typeof s === "string" ? s : s.query)));
+  const fresh = written.seeds.filter((s) => !have.has(norm(s.query)) && (have.add(norm(s.query)) || true));
+  if (!fresh.length) return { status: "none", why: `every gap's search is already a seed${written.refused.length ? `; refused: ${written.refused.join("; ")}` : ""}`, gaps: gaps.length, refused: written.refused };
+  // Room: drop only seeds THIS job added that the engine has finished (built, strengthened, answered).
+  const ledgerFile = path.join(STATE, "seeds-ledger.json"); const ledger = readJson(ledgerFile, {});
+  const mine = new Set((ledger[site.seeds.repo] || []).map(norm));
+  const book = (() => { const r = git(repoDir, ["show", `origin/main:${cfg.ledger_dir || "data/search-loop"}/seeds.json`]); try { return r.status === 0 ? JSON.parse(r.stdout).seeds || {} : {}; } catch { return {}; } })();
+  const doneQueries = new Set(Object.values(book).filter((b) => SEED_DONE.has(b?.status)).map((b) => norm(b.query)));
+  let kept = existing.slice();
+  const dropped = [];
+  while (kept.length + fresh.length > MAX_SEEDS) {
+    const i = kept.findIndex((s) => { const q = norm(typeof s === "string" ? s : s.query); return mine.has(q) && doneQueries.has(q); });
+    if (i < 0) break;
+    dropped.push(kept[i]); kept.splice(i, 1);
+  }
+  const room = MAX_SEEDS - kept.length; const add = fresh.slice(0, Math.max(0, room)); const waiting = fresh.slice(add.length);
+  if (!add.length) return { status: "waiting", why: `SEEDS_FULL: ${site.seeds.repo} already lists ${existing.length} seeds the engine has not finished`, gaps: gaps.length };
+  const next = { ...cfg, seeds: [...kept, ...add.map(({ q, ...s }) => s)] };
+  if (dry) return { status: "dry", add, dropped, waiting, gaps: gaps.length, refused: written.refused };
+  // A worktree on origin/main; the edit, the engine's validator, one commit, one PR, then land-after.
+  const wt = path.join(REPOS, `.wt-csq-${site.id}-${week}`);
+  git(repoDir, ["worktree", "remove", "--force", wt]);
+  const add1 = git(repoDir, ["worktree", "add", "-B", branch, wt, "origin/main"]);
+  if (add1.status !== 0) return { status: "stopped", why: `SEEDS_WORKTREE: ${add1.stderr.trim().slice(0, 160)}`, gaps: gaps.length };
+  const cleanup = () => git(repoDir, ["worktree", "remove", "--force", wt]);
+  const file = path.join(wt, site.seeds.config);
+  const indent = (fs.readFileSync(file, "utf8").match(/^\{\n( +)"/) || [, "  "])[1].length;
+  fs.writeFileSync(file, `${JSON.stringify(next, null, indent)}\n`);
+  let check;
+  try { check = spawnSync("node", [path.join(engineDir(), "bin/search-loop.mjs"), "validate-config", "--config", site.seeds.config, "--root", wt], { cwd: wt, encoding: "utf8" }); }
+  catch (e) { cleanup(); return { status: "stopped", why: e.message, gaps: gaps.length }; }
+  if (check.status !== 0) { cleanup(); return { status: "stopped", why: `SEEDS_INVALID: the engine's validate-config refused it: ${(check.stdout + check.stderr).trim().slice(0, 200)}`, gaps: gaps.length }; }
+  const diffStat = git(wt, ["diff", "--stat"]).stdout.trim();
+  const msg = `search-loop seeds: ${add.length} ChatGPT search${add.length === 1 ? "" : "es"} where ${site.label} did not show up (${week})`;
+  const commit = git(wt, ["commit", "-am", `${msg}\n\nFrom chatgpt-searches (seq-bin): the searches ChatGPT ran in ${week}'s buyer questions where the site was missing.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`]);
+  const push = commit.status === 0 ? git(wt, ["push", "-q", "-f", "-u", "origin", branch]) : commit;
+  if (push.status !== 0) { cleanup(); return { status: "stopped", why: `SEEDS_NOT_PUSHED: ${(push.stderr || push.stdout).trim().slice(0, 160)}`, gaps: gaps.length }; }
+  const ledgerDir = cfg.ledger_dir || "data/search-loop";
+  const body = prBody({ site, week, add, dropped, waiting, refused: written.refused, gaps, check: (check.stdout || "").trim(), diffStat, ledgerDir });
+  const bodyFile = path.join(STATE, `pr-body-${site.id}-${week}.md`); writeAtomic(bodyFile, body);
+  const pr = spawnSync(GH, ["pr", "create", "-R", site.seeds.repo, "--head", branch, "--base", "main", "--title", msg, "--body-file", bodyFile], { cwd: wt, encoding: "utf8" });
+  cleanup();
+  const url = (pr.stdout || "").trim().split("\n").pop();
+  if (pr.status !== 0 || !/\/pull\/\d+$/.test(url)) return { status: "stopped", why: `SEEDS_PR_NOT_OPENED: ${(pr.stderr || "").trim().slice(0, 160)}`, gaps: gaps.length };
+  ledger[site.seeds.repo] = [...(ledger[site.seeds.repo] || []), ...add.map((s) => s.query)];
+  writeAtomic(ledgerFile, `${JSON.stringify(ledger, null, 2)}\n`);
+  const num = url.match(/\/pull\/(\d+)$/)[1];
+  const land = spawnSync(LAND_AFTER, [num, "--repo", site.seeds.repo, "--task", `chatgpt-seeds-${site.id}`], { encoding: "utf8" });
+  return { status: "pr", url, add, dropped, waiting, gaps: gaps.length, refused: written.refused, land: land.status === 0 ? (land.stdout || "").trim().split("\n").pop() : `NAMED STOP [LAND_AFTER_REFUSED] ${(land.stdout + land.stderr).trim().slice(-200)}` };
+}
+
+function prBody({ site, week, add, dropped, waiting, refused, gaps, check, diffStat, ledgerDir }) {
+  const repo = site.seeds.repo;
+  return `## What changed
+Adds ${add.length} search${add.length === 1 ? "" : "es"} to this site's search-loop \`seeds\`: each is what ChatGPT searched (${week}, Temporary Chat, Web search on) while answering a buyer question where ${site.label} did not show up. The engine (v1.17.0) puts each through every check a found search meets before any page is written.
+
+${add.map((s) => `- \`${s.query}\`${s.wants ? ` (wants: ${s.wants.join(", ")})` : ""} — from Q${s.q}: "${gaps.find((g) => g.n === s.q)?.asked}"; ChatGPT searched ${gaps.find((g) => g.n === s.q)?.queries.map((q) => `"${q}"`).join(", ")}`).join("\n")}
+${dropped.length ? `\nMade room by removing seeds this job added earlier that the engine has finished: ${dropped.map((s) => `\`${typeof s === "string" ? s : s.query}\``).join(", ")}.` : ""}${waiting.length ? `\nWaiting for room (the list holds 25): ${waiting.map((s) => `\`${s.query}\``).join(", ")}.` : ""}
+
+Review class: none — search-loop config data only (seeds for the existing engine); no money, private data, store or first launch.
+
+Forms: none — only search-loop.config.json changes; no form page or server path.
+
+Outcome: the site's search-loop run reads the new seeds into its seeds ledger — check: gh api repos/${repo}/contents/${ledgerDir}/seeds.json --jq .size — expect: >= 1 — by: 8 days
+
+## Self-review
+- Abuse and data loss: n/a — appends seeds; removes only seeds this job added that the engine marked finished.
+- Real output: the chats behind each seed are in the week's file on the Mac (~/Work/tasks/logs/chatgpt-searches/), searches captured from ChatGPT's own answer stream.
+- Outage: n/a — a config file; the engine refuses a seed it cannot check and keeps it queued.
+- Tests that prove nothing: n/a — data only; the engine's own validator is the check below.
+- Claims: the config passes the engine's validator: \`node search-loop/bin/search-loop.mjs validate-config --config ${site.seeds.config}\` → ${check || "config OK"}
+- Claims: only the seeds list changed: \`git diff --stat\` → ${diffStat.replace(/\n/g, " ")}
+- Logic edges: at most 25 seeds; a seed already listed is never added twice.
+- Design: n/a — writes into the engine's one seeds input, no second input.
+- CI: the repo's own checks run on this PR; land-after lands it on green.
+${refused?.length ? `\nRefused by the seed checks (not added): ${refused.join("; ")}\n` : ""}
+## Not built
+Nothing cut.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+`;
+}
+
+// ---------- Notices ----------
+function notice(key, text) {
+  const marker = path.join(STATE, "notices", key.replace(/[^\w.-]/g, "_"));
+  if (fs.existsSync(marker)) return "already written";
+  const cmd = process.env.CSQ_NOTICE;
+  const r = cmd ? spawnSync(cmd, [key, text], { encoding: "utf8" })
+    : spawnSync("node", ["scripts/vault/vault.mjs", "run", "--", "node", "--input-type=module", "-e",
+      'const [m, t, k] = process.argv.slice(1); const { addMorningLines } = await import(m); addMorningLines("notices", { lines: [{ text: t, key: k, links: [] }] });',
+      path.join(RUNTIME, "src/shared/boss/mail/morning.mjs"), text, key], { cwd: RUNTIME, encoding: "utf8" });
+  if (r.status !== 0) return `NAMED STOP [NOTICE_UNWRITTEN] ${(r.stderr || r.stdout || "").trim().slice(0, 160)}`;
+  writeAtomic(marker, `${new Date().toISOString()} ${text}\n`);
+  return "written";
+}
+
+// ---------- reports ----------
+// The cited list as she reads it: no picture files, and one App Store link per app (ChatGPT cites the same app in
+// a dozen countries).
+function tidyCited(list) {
+  const seen = new Set(), out = [];
+  for (const u of list || []) {
+    if (/\.(jpe?g|png|gif|webp|svg|avif)$/i.test(u) || /^media\.gettyimages\./.test(u)) continue;
+    const id = u.match(/^apps\.apple\.com\/[a-z]{2}\/app\/[^/]+\/(id\d+)/)?.[1];
+    const key = id || u;
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(id ? u.replace(/^apps\.apple\.com\/[a-z]{2}\//, "apps.apple.com/us/") : u);
+  }
+  return out;
+}
+const yes = (r) => (r.ours ? `**YES** (${[...r.ours_read.map((u) => `read ${u}`), ...r.ours_cited.map((u) => `cited ${u}`), ...r.ours_named.map((n) => `named "${n}"`)].join("; ")})` : "no");
+function siteReport(site, week, night, wk, tonight) {
+  const rows = Object.values(wk.asked || {}).sort((a, b) => a.n - b.n);
+  const checked = rows.filter((r) => r.status === "CHECKED");
+  const L = [`# ${site.label}: what ChatGPT searches before it recommends (${week})`, "",
+    `Night of ${night} (Central). Asked in chatgpt.com, her signed-in Chrome, a Temporary Chat for every question (not kept in her history, no memory), Web search on. Searches come from ChatGPT's own answer stream; sites read from its search results; sites cited from its citations; businesses named are the ones the answer names, each found word for word in the answer. Ours = ${site.domains.join(", ")} read or cited, or ${site.names.map((n) => `"${n}"`).join(", ")} named.`, "",
+    `**Ours showed up in ${checked.filter((r) => r.ours).length} of ${checked.length} checked chats** (${rows.length ? `${checked.length} of ${QUESTIONS} questions checked this week` : "none checked yet"}${tonight.length ? `; asked tonight: ${tonight.join(", ")}` : ""}).`, ""];
+  for (let n = 1; n <= QUESTIONS; n++) {
+    const r = wk.asked?.[n]; const q = wk.questions?.[n - 1];
+    L.push(`## Q${n}. ${q || "(no question)"}`);
+    if (!r) { L.push("- Not asked yet this week.", ""); continue; }
+    if (r.status !== "CHECKED") { L.push(`- **${r.status}**: ${r.reason}${r.tries ? ` (try ${r.tries} of ${MAX_TRIES})` : ""}`, ""); continue; }
+    L.push(`- Chat id: \`${r.cid}\` (Temporary Chat; ${r.model || "model unknown"}; memory in context: ${r.memory}; Web search on: ${r.search_on ? "yes" : "NO"})`);
+    L.push(`- Searches ChatGPT ran (${r.queries.length}):${r.queries.length ? "" : " none (it answered without searching)"}`);
+    for (const q2 of r.queries) L.push(`    - \`${q2}\``);
+    const cited = tidyCited(r.cited);
+    L.push(`- Sites it cited (${cited.length}${r.cited_total > r.cited.length ? ` of the first ${r.cited.length} of ${r.cited_total} links` : ""}): ${cited.length ? cited.join(", ") : "none linked"}`);
+    L.push(`- Sites it read: ${r.read_pages} pages on ${r.read_domains_total} domains: ${r.read_domains.slice(0, 15).join(", ")}${r.read_domains_total > 15 ? " …" : ""}`);
+    L.push(`- Businesses it named: ${r.named === null ? "not read (the session gave no list)" : r.named.length ? r.named.join(" · ") : "none"}${r.named_rejected?.length ? ` (left out, not in the answer: ${r.named_rejected.join(", ")})` : ""}`);
+    L.push(`- Ours among them: ${yes(r)}`, "");
+  }
+  if (wk.seeds) L.push("## Seeds", `- ${seedLine(wk.seeds)}`, "");
+  return L.join("\n");
+}
+const seedLine = (s) => s.status === "pr" ? `PR ${s.url}${s.add ? `: ${s.add.length} seed(s) — ${s.add.map((x) => `"${x.query}"`).join(", ")}` : ` (${s.why})`}${s.land ? `; ${s.land}` : ""}`
+  : s.status === "dry" ? `would add ${s.add.length}: ${s.add.map((x) => `"${x.query}"`).join(", ")}` : `${s.status}: ${s.why}`;
+
+function rollup(sites, week, state, lastState) {
+  const L = [`# ChatGPT hidden searches — week ${week}`, "",
+    "One row per site: how many of the week's 5 buyer questions were checked, in how many chats our site showed up (read, cited or named), last week's number, and where the gaps went.", "",
+    "| Site | Checked | Ours showed up | Last week | Searches captured | Seeds |", "|---|---|---|---|---|---|"];
+  let checkedAll = 0;
+  for (const s of sites) {
+    const wk = state.sites[s.id] || {}; const rows = Object.values(wk.asked || {}); const c = rows.filter((r) => r.status === "CHECKED");
+    const lw = lastState?.sites?.[s.id]; const lc = lw ? Object.values(lw.asked || {}).filter((r) => r.status === "CHECKED") : [];
+    checkedAll += c.length;
+    L.push(`| ${s.label} | ${c.length}/${QUESTIONS} | ${c.length ? `${c.filter((r) => r.ours).length} of ${c.length}` : "—"} | ${lc.length ? `${lc.filter((r) => r.ours).length} of ${lc.length}` : "not read"} | ${c.reduce((a, r) => a + r.queries.length, 0)} | ${wk.seeds ? (wk.seeds.status === "pr" ? `${wk.seeds.add ? `${wk.seeds.add.length} seed(s): ` : ""}${wk.seeds.url}` : `${wk.seeds.status}: ${String(wk.seeds.why || "").split(":")[0]}`).replace(/\|/g, "/") : "—"} |`);
+  }
+  const nights = state.nights || [];
+  L.push("", "## Nights", nights.length ? nights.map((n) => `- ${n.night}: ${n.verdict} — ${n.line}`).join("\n") : "- none run yet this week");
+  const top = {};
+  for (const s of sites) for (const r of Object.values(state.sites[s.id]?.asked || {})) if (r.status === "CHECKED") for (const d of r.read_domains) top[d] = (top[d] || 0) + 1;
+  L.push("", "## Sites ChatGPT read most this week", Object.entries(top).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([d, n]) => `- ${d} (${n} chats)`).join("\n") || "- none yet");
+  L.push("", `OUTPUT ${checkedAll} questions checked this week`, "");
+  return L.join("\n");
+}
+
+// ---------- the night ----------
+function weekFile(week) { return path.join(STATE, `week-${week}.json`); }
+// A new week starts at Monday's slot. The job's very first week (no week before it on file) starts at the first
+// night it runs, so the sites of nights already past are not all piled onto that first night.
+function loadWeek(week, slot, firstEver) { const w = readJson(weekFile(week), null); return w && w.week === week ? w : { week, start_slot: firstEver ? slot : 1, sites: {}, nights: [] }; }
+
+async function main() {
+  const argv = process.argv.slice(2);
+  let hand = false, plan = false, rollOnly = false, only = null, dry = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--hand") hand = true; else if (argv[i] === "--plan") plan = true; else if (argv[i] === "--rollup") rollOnly = true;
+    else if (argv[i] === "--seeds-dry") dry = true;
+    else if (argv[i] === "--sites" && argv[i + 1]) only = new Set(argv[++i].split(",").map((s) => s.trim()).filter(Boolean));
+    else { console.error("usage: chatgpt-searches [--hand [--sites a,b]] | --plan | --rollup"); return 64; }
+  }
+  const sites = loadSites();
+  if (only) { const unknown = [...only].filter((id) => !sites.some((s) => s.id === id)); if (unknown.length) throw new Stop(64, "UNKNOWN_SITE", unknown.join(", ")); }
+  const now = process.env.CSQ_NOW ? new Date(process.env.CSQ_NOW) : new Date();
+  const c = central(now); const night = nightOf(c); const week = isoWeek(night); const slot = slotOf(night);
+  const lastState = readJson(weekFile(prevWeekOf(night)), null); const state = loadWeek(week, slot, !lastState);
+  if (rollOnly) { const f = path.join(OUT, `rollup-${week}.md`); writeAtomic(f, rollup(sites, week, state, lastState)); console.log(`rollup: ${f}`); return 0; }
+  const done = (s) => { const w = state.sites[s.id]; return !!w && Object.keys(w.asked || {}).length === QUESTIONS && Object.values(w.asked).every((r) => r.status === "CHECKED" || (r.tries || 0) >= MAX_TRIES); };
+  let due = sites.filter((s) => (only ? only.has(s.id) : s.night <= slot && s.night >= (state.start_slot || 1)) && !done(s)).sort((a, b) => a.night - b.night);
+  if (plan) { console.log(`night ${night} (${week}, slot ${slot}): due ${due.map((s) => s.id).join(", ") || "nothing"}`); return 0; }
+  const hhmm = `${String(c.hour).padStart(2, "0")}:${String(c.minute).padStart(2, "0")}`;
+  if (!hand && !(c.hour >= 22 || c.hour < 2)) throw new Stop(3, "OUTSIDE_NIGHT", `it is ${hhmm} Central; the night runs 22:00-01:59, so tonight's sites wait for the next night (a Mac asleep at 22:00 runs a missed job on wake).`);
+  if (hand && c.hour >= 7 && c.hour < 10) throw new Stop(3, "MAC_REST", `it is ${hhmm} Central, the Mac's rest (07:00-09:59); run it after 10:00.`);
+  const deadline = Date.now() + (hand ? 4 * 60 : minutesToTwo(c)) * 60000;
+  fs.mkdirSync(STATE, { recursive: true });
+  const lock = path.join(STATE, ".lock");
+  try { fs.mkdirSync(lock); } catch { const pid = Number(readJson(path.join(lock, "pid.json"), {}).pid); let alive = false; try { process.kill(pid, 0); alive = !!pid; } catch { alive = false; }
+    if (alive) throw new Stop(0, "ALREADY_RUNNING", `pid ${pid} holds ${lock}`); fs.rmSync(lock, { recursive: true, force: true }); fs.mkdirSync(lock); }
+  fs.writeFileSync(path.join(lock, "pid.json"), JSON.stringify({ pid: process.pid }));
+  try {
+    return await runNight({ sites, due, state, lastState, night, week, deadline, hand, dry });
+  } finally { fs.rmSync(lock, { recursive: true, force: true }); }
+}
+
+async function runNight({ sites, due, state, lastState, night, week, deadline, hand, dry }) {
+  const nightDir = path.join(OUT, night);
+  if (!due.length) {
+    const line = `nothing due tonight: every site due by this night was checked this week`;
+    state.nights.push({ night, verdict: "NOTHING_DUE", line, at: new Date().toISOString() });
+    writeAtomic(weekFile(week), JSON.stringify(state, null, 1));
+    writeAtomic(path.join(OUT, `rollup-${week}.md`), rollup(sites, week, state, lastState));
+    console.log(`OUTPUT 0 questions checked — ${line}`);
+    return 0;
+  }
+  if (process.env.CSQ_OPEN_CHROME !== "0") { spawnSync("open", ["-ga", "Google Chrome"]); spawnSync("sleep", ["15"]); }
+  let wall = null, checkedTonight = 0, broke = [];
+  const asked = [];
+  for (const site of due) {
+    if (wall) break;
+    const minsLeft = (deadline - Date.now()) / 60000;
+    if (minsLeft < 25) { wall = "TIME_UP"; break; }
+    const wk = state.sites[site.id] = state.sites[site.id] || { asked: {} };
+    say(`== ${site.id}`);
+    if (!wk.questions) {
+      let q;
+      try { q = writeQuestions(site, lastState?.sites?.[site.id] ? { rows: Object.values(lastState.sites[site.id].asked || {}) } : null); }
+      catch (e) { q = { error: e.message }; }
+      if (q.wall) { wall = q.wall; break; }
+      if (q.error) { broke.push(`${site.id}: ${q.error}`); say(`  ${q.error}`); continue; }
+      wk.questions = q.questions; wk.questions_by = q.model;
+      writeAtomic(weekFile(week), JSON.stringify(state, null, 1));
+    }
+    const numbers = []; for (let n = 1; n <= QUESTIONS; n++) { const r = wk.asked[n]; if (!r || (r.status !== "CHECKED" && (r.tries || 0) < MAX_TRIES)) numbers.push(n); }
+    if (numbers.length) {
+      const maxSecs = Math.max(300, Math.min(2700, Math.floor((deadline - Date.now()) / 1000) - 120));
+      const s = askInChrome(site, wk.questions, numbers, maxSecs);
+      const tonight = [];
+      for (const n of numbers) {
+        const r = s.rows[n];
+        if (r.status === "NOT_ASKED") continue;                       // owed: a wall or the end of the session
+        const prev = wk.asked[n];
+        wk.asked[n] = r.status === "CHECKED" ? { ...r, night } : { ...r, night, tries: (prev?.tries || 0) + 1 };
+        tonight.push(`Q${n} ${r.status === "CHECKED" ? "checked" : r.status}`);
+        if (r.status === "CHECKED") checkedTonight++;
+      }
+      for (const nn of s.notes) say(`  ${nn}`);
+      if (s.badInstall || s.offScript) broke.push(`${site.id}: the session ${s.badInstall ? "changed the capture script" : "ran its own code on the page"}`);
+      say(`  asked ${numbers.join(",")}: ${tonight.join(", ") || "nothing"}${s.wall ? ` — wall ${s.wall}` : ""} (model ${s.model}, exit ${s.rc})`);
+      asked.push(site.id);
+      writeAtomic(weekFile(week), JSON.stringify(state, null, 1));
+      writeAtomic(path.join(nightDir, `${site.id}.json`), JSON.stringify({ site: site.id, night, week, questions: wk.questions, asked: wk.asked }, null, 1));
+      writeAtomic(path.join(nightDir, `${site.id}.md`), siteReport(site, week, night, wk, tonight));
+      if (s.wall) { wall = s.wall; break; }
+    }
+    const complete = Object.keys(wk.asked).length === QUESTIONS && Object.values(wk.asked).every((r) => r.status === "CHECKED" || (r.tries || 0) >= MAX_TRIES);
+    if (complete && !wk.seeds) {
+      try { wk.seeds = seedsForSite(site, week, wk, { dry }); } catch (e) { wk.seeds = { status: "stopped", why: e.message }; }
+      if (wk.seeds.wall) { const w = wk.seeds.wall; delete wk.seeds; wall = w; }
+      else say(`  seeds: ${seedLine(wk.seeds)}`);
+      writeAtomic(weekFile(week), JSON.stringify(state, null, 1));
+      writeAtomic(path.join(nightDir, `${site.id}.md`), siteReport(site, week, night, wk, []));
+      // A drop: fewer chats with us than last week's complete set.
+      const lw = lastState?.sites?.[site.id]; const now5 = Object.values(wk.asked).filter((r) => r.status === "CHECKED");
+      const last5 = lw ? Object.values(lw.asked || {}).filter((r) => r.status === "CHECKED") : [];
+      const a = now5.filter((r) => r.ours).length, b = last5.filter((r) => r.ours).length;
+      if (last5.length && now5.length && a / now5.length < b / last5.length) {
+        say(`  ${notice(`chatgpt-searches:${week}:${site.id}:drop`, `ChatGPT hidden searches: ${site.label} showed up in ${a} of ${now5.length} ChatGPT chats this week, down from ${b} of ${last5.length} last week; its gaps go to its search pages as new searches`)}`);
+      }
+    }
+  }
+  const owed = due.filter((s) => { const w = state.sites[s.id]; return !w || !w.questions || Object.keys(w.asked || {}).length < QUESTIONS || Object.values(w.asked).some((r) => r.status !== "CHECKED" && (r.tries || 0) < MAX_TRIES); }).map((s) => s.id);
+  let verdict, line, code;
+  if (checkedTonight === 0 && wall) { verdict = "COULDNT-CHECK"; line = `${WALL_WORDS[wall] || wall}; ${owed.length} site(s) wait for the next night: ${owed.join(", ")}`; code = 75; }
+  else if (checkedTonight === 0) { verdict = "FAIL"; line = `0 questions checked for ${due.length} due site(s)${broke.length ? `: ${broke.join("; ")}` : ""}`; code = 1; }
+  else if (wall) { verdict = "PARTIAL"; line = `${checkedTonight} questions checked, then ${WALL_WORDS[wall] || wall}; owed to the next night: ${owed.join(", ")}`; code = 75; }
+  else { verdict = owed.length || broke.length ? "PARTIAL" : "PASS"; line = `${checkedTonight} questions checked on ${asked.join(", ") || "no site"}${owed.length ? `; still owed: ${owed.join(", ")}` : ""}${broke.length ? `; broke: ${broke.join("; ")}` : ""}`; code = broke.length ? 1 : 0; }
+  state.nights.push({ night, verdict, line, wall, checked: checkedTonight, at: new Date().toISOString(), hand });
+  writeAtomic(weekFile(week), JSON.stringify(state, null, 1));
+  writeAtomic(path.join(nightDir, "night.json"), JSON.stringify({ night, week, verdict, line, wall, checked: checkedTonight, owed, broke }, null, 1));
+  const rollFile = path.join(OUT, `rollup-${week}.md`);
+  writeAtomic(rollFile, rollup(sites, week, state, lastState));
+  if (verdict === "COULDNT-CHECK" || verdict === "FAIL" || (verdict === "PARTIAL" && wall)) {
+    say(notice(`chatgpt-searches:${night}:${verdict.toLowerCase()}`, `ChatGPT hidden searches: ${verdict === "FAIL" ? "FAIL" : "COULDNT-CHECK"} tonight — ${line}`));
+  }
+  console.log(`OUTPUT ${checkedTonight} questions checked — ${verdict}: ${line}`);
+  console.log(`rollup: ${rollFile}`);
+  console.log(verdict === "PASS" ? `CHATGPT-SEARCHES-COMPLETE: ${checkedTonight} questions` : `CHATGPT-SEARCHES-INCOMPLETE: ${verdict}`);
+  return code;
+}
+
+module.exports = { tidyCited, readSession, questionProblems, seedProblems, namesUs, brandTerms, installText, isoWeek, nightOf, slotOf, central, minutesToTwo, brainExcerpt, seedsForSite, jsonFrom };
+if (require.main === module) {
+  main().then((code) => process.exit(code), (e) => { console.error(e.message); if (e.reason === "ALREADY_RUNNING") process.exit(0); process.exit(e.code ?? 1); });
+}

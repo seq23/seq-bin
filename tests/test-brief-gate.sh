@@ -17,8 +17,10 @@ body(){ printf '%s\n' "$2" > "$T/b/seq23_boss-os_$1.md"; }
 rev(){ printf '{"tool_name":"Agent","tool_input":{"subagent_type":"reviewer","prompt":"review seq23/boss-os#%s"}}' "$1"; }
 run(){ echo "$2" | TASK_SHEETS_DIR="$T/tasks" BRIEF_GATE_PR_BODIES="$T/b" node brief-gate.mjs >/dev/null 2>&1; got=$?; [ "$got" = "$1" ] || { echo "FAIL want $1 got $got: $3"; fail=1; }; }
 full='THE REVIEW YOU WILL FACE HOW IT BREAKS SELF-PROOF HER WORDS ASKED FOR: “build noelle as she said” NOT ASKED FOR: none HER YES: “yes go” CLAUDE BECAUSE: needs the browser REVIEW CLASS: none — log wording only'
-run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose","prompt":"x"}}' "general agent refused"
-run 2 '{"tool_name":"Agent","tool_input":{"prompt":"x"}}' "no type = general, refused"
+run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"some-uncapped-type","prompt":"x"}}' "an agent type with no 200K cap refused"
+run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"helper","prompt":"x"}}' "helper (200K cap) passes"
+run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose","prompt":"x"}}' "general-purpose (200K cap since 25 Nov) passes"
+run 0 '{"tool_name":"Agent","tool_input":{"prompt":"x"}}' "no type = general-purpose (200K cap), passes"
 run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"Explore","prompt":"x"}}' "read-only helper passes"
 run 0 '{"tool_name":"Bash","tool_input":{}}' "not an Agent call"
 run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"builder","prompt":"x"}}' "builder brief missing sections"
@@ -27,6 +29,10 @@ nocls='THE REVIEW YOU WILL FACE HOW IT BREAKS SELF-PROOF HER WORDS ASKED FOR: �
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls\"}}" "builder brief with no REVIEW CLASS line refused"
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: maybe\"}}" "a REVIEW CLASS that is no class refused"
 run 0 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls Review class: money -- moves payouts\"}}" "a named class passes"
+for cls in private-data delete store launch outreach; do
+  run 0 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: $cls — the brief says why\"}}" "land's class '$cls' passes (her list of 27 Nov 2026; the words are read from land's REVIEW_CLASSES)"
+done
+run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocls REVIEW CLASS: children — the old class word\"}}" "a class word land no longer lists (children: now private-data) is refused, naming the list"
 nomine="${nocls/ASKED FOR: “build noelle as she said” /}"
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nomine REVIEW CLASS: none — x\"}}" "builder brief without her verbatim ASKED FOR refused"
 noyes="${nocls/HER YES: “yes go” /}"
@@ -34,7 +40,7 @@ run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"
 noextra="${nocls/NOT ASKED FOR: none /}"
 run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$noextra REVIEW CLASS: none — x\"}}" "builder brief without NOT ASKED FOR refused"
 nocodex="${nocls/CLAUDE BECAUSE: needs the browser/}"
-run 2 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocodex REVIEW CLASS: none — x\"}}" "Claude builder with no reason it cannot run on Codex refused"
+run 0 "{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"builder\",\"prompt\":\"$nocodex REVIEW CLASS: none — x\"}}" "Claude builder with no CLAUDE BECAUSE line passes (her ruling 25 Nov 2026: Codex is a default, not a hard rule)"
 run 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"reviewer","prompt":"review seq23/boss-os#539"}}' "full review of a FAILed PR refused"
 run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"reviewer","prompt":"RECHECK OF: F1 F2 on seq23/boss-os#539"}}' "re-check of a FAILed PR passes"
 run 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"reviewer","prompt":"review seq23/boss-os#540"}}' "review of a PASSed PR passes"

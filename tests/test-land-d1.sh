@@ -43,6 +43,7 @@ check() { # label expected actual
 }
 route_db() { ( die() { echo "DIED"; }; NAME="$1"; eval "$ROUTES"; echo "${D1_PREMERGE:-none}" ); }
 check "p-n-p names its D1 database" pnp-admin "$(route_db p-n-p)"
+check "dream-wedding-builder (Workers Builds, no migration step) names its D1 database" dream-wedding-builder "$(route_db dream-wedding-builder)"
 check "a Pages repo with no D1 names none" none "$(route_db sprylabs-hpc-site)"
 check "a scripted-deploy repo (migrates in its own script) names none" none "$(route_db west-peek-os)"
 

@@ -11,6 +11,11 @@ export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 STATE=~/Library/Application\ Support/drive-backup; mkdir -p "$STATE"; SKIPF="$STATE/skip-tonight.txt"; : > "$SKIPF"
 MAXSECS=${DRIVE_BACKUP_MAX_SECS:-3600}; START=$(date +%s); BIG=${DRIVE_BACKUP_BIG_FOLDER:-2000}
 D=$(date +%Y-%m-%d); LOG=~/Library/Logs/drive-backup/$D.log; DEST=${DRIVE_BACKUP_DEST:-gdrive:Mac-Backup}
+# The run's own result, for housekeeping (27 Nov 2026): the log is named for the night the run STARTED
+# (22:00, so yesterday by 03:30), which made housekeeping post "did not run" after clean runs. housekeeping
+# reads this file instead: "<RUNNING|OK|FAILED|TOO_SLOW|BIG_FOLDER> <night> <epoch seconds>".
+RESULT="$STATE/last-run.txt"; print -r -- "RUNNING $D $(date +%s)" > "$RESULT"
+trap 'rc=$?; case $rc in 0) r=OK;; 3) r=TOO_SLOW;; 4) r=BIG_FOLDER;; *) r=FAILED;; esac; print -r -- "$r $D $(date +%s)" > "$RESULT"' EXIT
 EXCL=(--exclude 'vault/**' --exclude '*token*' --exclude '*.env' --exclude '.env*' --exclude '*secret*'
       --exclude '*credential*' --exclude 't2r-test-accounts.txt' --exclude 'browser/**' --exclude 'kdp-profile/**'
       --exclude 'kdp/**' --exclude 'node_modules/**' --exclude '.git/**' --exclude '.DS_Store'

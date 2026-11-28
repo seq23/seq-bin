@@ -212,9 +212,11 @@ bump() { printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$DIR/gen.$$" && mv 
 # --- watchers: a loop of reads through this file -------------------------------------------------------
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 watch_loop() { # gh run watch <id> [...] | gh pr checks [<pr>] --watch [...]
-  local sub="$1" iv="$WATCH_SECS" fail_fast=0 exit_status=0 rest=() out rc v tty=0
+  # fail fast by default (her ruling 23 Nov 2026): the first red check ends the wait; GH_WATCH_ALL=1 waits for every check.
+  local sub="$1" iv="$WATCH_SECS" fail_fast=1 exit_status=0 rest=() out rc v tty=0
   shift 2
   [ -t 1 ] && tty=1
+  [ "${GH_WATCH_ALL:-0}" = 1 ] && fail_fast=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --watch|--compact) ;;

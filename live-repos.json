@@ -26,6 +26,7 @@
     "seq23/local-guides-generator",
     "seq23/p-n-p",
     "seq23/peace-be-still",
+    "seq23/search-loop",
     "seq23/secondaries",
     "seq23/seq-bin",
     "seq23/sequoiataylor",
@@ -38,6 +39,7 @@
     "seq23/west-peek-os",
     "seq23/west-peek-pitch-lab",
     "seq23/westpeek-live",
+    "seq23/whisperalmanac-site",
     "seq23/william-hurley",
     "seq23/WPP-llm"
   ]

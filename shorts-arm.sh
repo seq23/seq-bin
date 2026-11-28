@@ -86,7 +86,8 @@ say "sentinel: $STATE"
 # The email to her: a brain run (Claude, her Gmail connector) sends exactly what the worker wrote.
 BODY="$(awk '/^NOTIFY-BEGIN$/{b=""; f=1; next} /^NOTIFY-END$/{f=0; last=b} f{b=b $0 "\n"} END{printf "%s", last}' "$RUN_LOG")"
 [ -n "$BODY" ] || BODY="The Shorts lane run ended $STATE but wrote no summary. Log: $RUN_LOG"
-"$AI_RUN" --role brain --out "$RUN_LOG" -- "Send one email with the Gmail connector to seq.taylor@gmail.com, subject \`Shorts lane\`, with exactly this body and nothing else, then print SHORTS-ARM-EMAILED on its own line:
+# AI_RUN_NO_CREDIT=1: a run on the free API credit has no claude.ai connectors, so it could not send this.
+AI_RUN_NO_CREDIT=1 "$AI_RUN" --role brain --out "$RUN_LOG" -- "Send one email with the Gmail connector to seq.taylor@gmail.com, subject \`Shorts lane\`, with exactly this body and nothing else, then print SHORTS-ARM-EMAILED on its own line:
 
 $BODY" < /dev/null > /dev/null 2>&1
 grep -q '^SHORTS-ARM-EMAILED' "$RUN_LOG" && say "emailed her the result" || say "NAMED STOP [EMAIL_NOT_SENT] the brain run did not confirm the email; the result is in $RUN_LOG"

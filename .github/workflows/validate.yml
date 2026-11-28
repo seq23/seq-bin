@@ -56,6 +56,11 @@ jobs:
       - name: tz-watch keeps launchd on Central times when the Mac changes zone
         run: ./tests/test-tz-watch.sh
 
+      # 27 Nov 2026, her "Try one site only": Search for Agents on one zone, and a money guard that
+      # switches it off at 80% of the free AI Search allowance or after two days unable to read it.
+      - name: agent-search changes one zone only and its money guard never says "under" when it could not read
+        run: ./tests/test-agent-search.sh
+
       # Two workflows on one push to main (west-peek-os, 21 Sep 2026): land must watch the
       # gate run, never the journeys. Evals the pick_run block out of land against a fixture.
       - name: land must watch the gate run on a two-workflow main
@@ -78,6 +83,11 @@ jobs:
         run: ./tests/test-pass-line.sh
       - name: the Open Loops mirror hook rebuilds only after Open Loops changes and is never silent on an outage
         run: ./tests/test-open-loops-mirror-hook.sh
+      # 27 Nov 2026 (her words: "a new section on open loops for the not yet proven stuff and move it off the main list").
+      - name: the Open Loops mirror keeps "Landed, waiting on proof" rows off the main list and out of its counts
+        run: node --test tests/test-open-loops-mirror.mjs
+      - name: open-loops-proof closes a proving row on PASS, returns it on FAIL, and never closes one on an outage
+        run: node --test tests/test-open-loops-proof.mjs
 
       # seq-bin's last land step fast-forwards the launchd copy (the main checkout, ~/bin), never
       # the worktree land runs from (20 Nov 2026: a false STOPPED after a good merge from a worktree).
@@ -117,11 +127,20 @@ jobs:
       # 23 Nov 2026: a touched form needs a marked TEST submission on preview before land.
       - name: land's forms gate refuses an undeclared or unproved form
         run: ./tests/test-land-forms.sh
-      # post-land-check RUNS each due outcome check itself, only after its read-only gate passes it (a check that could
-      # write is never run) and in a file-write sandbox on the Mac; it refuses a PASS below the
-      # floor, and an outage, no comment or ai-run down stays DUE, NOT CHECKED, exit non-zero. ENG-CHECK and FORM-PROOF too.
+      # 27 Nov 2026 ("give a root fix to this ---is there a template followed?"; "everything doesnt fucking neeed a
+      # reviewr"): `land --check` lists EVERY missing description line in one run, each with the line to add from the
+      # ONE template (pr-body-template.md; red when land can ask for a line it does not carry); only her list waits on
+      # a reviewer; a missing Review class line is read from the diff's paths, never guessed; an outage is exit 75;
+      # --check makes no write call.
+      - name: land --check lists every missing line at once, from the one template; only her list waits on a reviewer
+        run: ./tests/test-land-check.sh
+      # post-land-check RUNS each due outcome check itself through outcome-read (rebuilt 27 Nov 2026): no shell, none of
+      # her logins, only fixed read tools; a model with NO tools judges the output and code posts its verdict. It
+      # refuses a PASS below the floor, and an outage, no verdict or ai-run down stays DUE, NOT CHECKED, exit non-zero.
       - name: post-land-check never calls an unchecked outcome working
         run: ./tests/test-post-land-check.sh
+      - name: outcome-read runs a check with no shell and no logins, and refuses everything but its read tools
+        run: ./tests/test-outcome-read.sh
       # Tests found with no CI step on 24 Nov 2026 (they guarded nothing): now each has one.
       - name: land names the repo from its GitHub remote
         run: ./tests/test-land-name.sh
@@ -163,6 +182,15 @@ jobs:
         run: ./tests/test-pr-patch-check.sh
       - name: post-land-check turns each DUE line into a verdict, and an engineering FAIL into a fix sheet bannered nightly until it lands
         run: ./tests/test-post-land-check.sh
+      # 27 Nov 2026 (her row #17): the nightly lessons pass only DRAFTS check lines; a model down is never "no failures".
+      - name: lessons-pass sorts the day's failures with a no-tools model, counts repeats in code and never touches a rule
+        run: shellcheck lessons-pass && ./tests/test-lessons-pass.sh
+      # 27 Nov 2026 (her item 3): the weekly skill check. A limit, sign-out or empty answer is never a pass; 0 asks is exit 2.
+      - name: skill-check passes only a right load, and an outage or 0 asks is never a pass
+        run: ./tests/test-skill-check.sh
+
+      - name: chatgpt-searches counts only a captured Temporary Chat; an outage or 0 questions is never a pass
+        run: ./tests/test-chatgpt-searches.sh
       - name: the agent launch gate refuses general agents and full re-reviews of a failed PR, and never caps agents
         run: ./tests/test-brief-gate.sh
       # 1 Nov 2026 (owner: "the listings should show more of OUR REAL WORK"): the photo step of the
@@ -174,6 +202,12 @@ jobs:
       # 9 Nov 2026: the compaction hook overwrote a hand-written Today status in ~/HANDOFF.md.
       - name: handoff-on-compact.sh keeps a same-day hand-written status and replaces only its own note
         run: ./tests/test-handoff-keeps-curated.sh
+      # 27 Nov 2026 (her words: "its not overwrting too much and i still have a complete picture at the end of the
+      # day"): each compaction replaced the session's note with a summary of the last stretch only, and a dropped
+      # or rolled-over note was gone. Notes now build up, every note that leaves is archived by day, the
+      # post-land-check lines live in their own list, and code checks the model's PR numbers and paths.
+      - name: handoff-on-compact.sh builds a session's note up, archives every note that leaves, and never lets an outage or an invented PR number into HANDOFF
+        run: ./tests/test-handoff-day-picture.sh
       # 22 Nov 2026 (her words: "Hand waiting to a script, not an agent"): land-after lands a PASSed PR
       # detached and writes the result to the task sheet. Refuses no-PASS / twice / bad slugs; never PASS
       # on an unread answer or a land that merged nothing; cleanup only done/ and logs/ past 14 days.
@@ -198,6 +232,8 @@ jobs:
         run: ./tests/test-scooter-watch-watchdog.sh
       - name: Partner tail runs with background tasks off
         run: ./tests/test-scooter-watch-foreground.sh
+      - name: Partner tail gets its full 2 h and retries a capped email once
+        run: ./tests/test-scooter-watch-cap.sh
 
   # 22 Nov 2026 (her ask: land faster, same quality): the lane is three parallel jobs, so the merge gate
   # finishes inside her 5-minute rule. Same steps, none removed (each runs in exactly one job).
@@ -234,14 +270,18 @@ jobs:
       - name: ci-sweep-alert-lanes.sh turns every alert type into fix work and never calls an unread list clean
         run: ./tests/test-alert-lanes.sh
 
-      # Owner ruling 3 Nov 2026: Codex does the hands-on work, Claude only the brains, and a
-      # Codex usage limit waits (exit 75, CODEX_LIMIT) — never handed to Claude. Stub binaries only.
+      # Owner ruling 3 Nov 2026: Codex does the hands-on work, Claude only the brains; a Codex usage
+      # limit hands the run to Claude (6 Nov), and a Claude usage limit runs once on the free API
+      # credit, then is the named stop (27 Nov). Stub binaries and a stub vault only: no network, no key.
       # 22 Nov 2026: one Play products tool and one RevenueCat tool for every app (they were copies per repo).
       - name: the store tools write only what is missing and fail loudly on every outage
         run: ./tests/test-store-tools.sh
 
-      - name: ai-run routes worker to Codex, brain to Claude, and a Codex limit never falls back
+      - name: ai-run routes worker to Codex, brain to Claude; a Claude limit runs once on the free API credit, then stops by name
         run: ./tests/test-ai-run.sh
+
+      - name: talk runs a turn on the free API credit only when the month's spend leaves room, shows the cost, never the key
+        run: ./tests/test-talk.sh
 
       # Her design of 2026-09-23 (then once a day at 06:00; Mon+Fri 08:00 since 2 Oct 2026): park per repo, rounds while
       # progress, the sweep merges only what it read green, opus pinned, one summary.

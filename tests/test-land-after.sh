@@ -23,10 +23,10 @@ W="$(mktemp -d)"; STUB=""
 trap '[ -n "$STUB" ] && kill "$STUB" 2>/dev/null; rm -rf "$W"' EXIT
 export HOME="$W/home"; mkdir -p "$HOME"
 T="$HOME/Work/tasks"; FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
-export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0 LAND_AFTER_READ_PATIENCE_SECS=3
+export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0 LAND_AFTER_READ_PATIENCE_SECS=3 LAND_RETRY_SECS=0
 export BOSS_OPEN_LOOPS_TOKEN=olt_testtoken123 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 pass=0; failn=0
-check() { local d="$1"; shift; if "$@"; then pass=$((pass + 1)); echo "  ok  $d"; else failn=$((failn + 1)); echo "  FAIL $d"; fi; }
+check() { local d="$1"; shift; if "$@"; then pass=$((pass + 1)); echo "  ok  $d"; else failn=$((failn + 1)); echo "  FAIL $d"; [ -z "${LA_TEST_SHOW:-}" ] || sed 's/^/    | /' "$W/out" 2>/dev/null | cut -c1-600; fi; }
 
 # --- a stub Open Loops intake: the real poster (open-loops.mjs) would post here; nothing may ---
 cat > "$W/stub.mjs" <<'JS'
@@ -64,10 +64,18 @@ case "$1 $2" in
     # url: the repo the PR is in (default seq23/seq-bin, on the shipped live-repos.json); a Review class: none line
     # is in every body unless no-class.
     body="$(mode body)"; [ -f "$F/no-class" ] || body="$body"$'\n\n''Review class: none — a fixture change in no risk class'
-    jq -n --arg head "$HEADSHA" --arg body "$body" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" --argjson lb "$lb" \
+    # ...and so are the other lines land asks of a code change (land-after runs the real `land --check` first), each
+    # unless its no-<line> file is there: forms, outcome, mutation proof, not built.
+    [ -f "$F/no-forms" ] || body="$body"$'\n''Forms: none — a fixture change touching no form'
+    [ -f "$F/no-outcome" ] || body="$body"$'\n''Outcome: none — a fixture change that runs nothing'
+    [ -f "$F/no-proof" ] || body="$body"$'\n\n## Mutation proof\n- undid the fixture change and the fixture test went red'
+    [ -f "$F/no-notbuilt" ] || body="$body"$'\n\n## Not built\nNothing cut.'
+    fl="$(cat "$F/files" 2>/dev/null || echo '[{"path": "worker/x.ts"}]')"   # the changed files: $F/files, default one code file
+    jq -n --arg head "$HEADSHA" --arg body "$body" --arg st "$st" --argjson mc "$mc" --arg n "$3" --argjson cm "$cm" --argjson lb "$lb" --argjson fl "$fl" \
       --arg url "$(cat "$F/url" 2>/dev/null || echo "https://github.com/seq23/seq-bin/pull/$3")" \
       '{state: $st, body: $body, comments: $cm, headRefOid: $head, headRefName: "feat", title: "A change",
-        url: $url, author: {login: "builder-bot"}, commits: [], mergeCommit: $mc, files: [{path: "worker/x.ts"}]}
+        url: $url, author: {login: "builder-bot"}, commits: [], mergeCommit: $mc, files: $fl,
+        baseRefName: "main", changedFiles: ($fl | length), additions: 1, deletions: 0}
        + (if $lb == null then {} else {labels: $lb} end)' ;;
   "api --paginate") # every label ever added (gh's --jq answer over the issue events): $F/label-events, default none; down = no answer
     [ "$(mode label-events)" = down ] && { echo "error connecting to api.github.com: dial tcp: i/o timeout" >&2; exit 1; }
@@ -112,7 +120,7 @@ chmod +x "$BIN/gh" "$W/fake-land"
 # The checkout: its origin is a real local repo at a path that reads as github.com/t/fixture, so land-after's
 # fresh_pass reads real commits: main, then the PR's one commit on top (HEADSHA, the head the fake gh reports).
 git init -q --bare -b main "$W/github.com/t/fixture.git"
-git init -q -b main "$W/repo" && git -C "$W/repo" remote add origin "$W/github.com/t/fixture.git" && git -C "$W/repo" commit -q --allow-empty -m init
+git init -q -b main "$W/repo" && git -C "$W/repo" remote add origin "$W/github.com/t/fixture.git" && echo fixture > "$W/repo/README.md" && git -C "$W/repo" add README.md && git -C "$W/repo" commit -q -m init
 git -C "$W/repo" push -q origin main && git -C "$W/repo" fetch -q origin
 GIT_COMMITTER_DATE="2026-11-22T12:00:00Z" git -C "$W/repo" commit -q --allow-empty -m "the PR's work"
 HEADSHA="$(git -C "$W/repo" rev-parse HEAD)"; export HEADSHA; git -C "$W/repo" reset -q --hard origin/main
@@ -137,7 +145,7 @@ la 7 --task noeng
 check "a PASS line without '; Engineering: PASS': refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noeng.md" ]'
 reset "Ship-ready: PASS — builder-bot looked at it; Engineering: PASS"
 la 7 --task selfsigned
-check "a PASS signed by the PR's builder: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "signed by its builder" && [ ! -f "$FAKE/land-ran" ]'
+check "a PASS signed by the PR's builder: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "signed by the builder (builder-bot)" && [ ! -f "$FAKE/land-ran" ]'
 reset
 for bad in "../escape" "a/b" "x..y" ".hidden"; do
   la 7 --task "$bad"
@@ -151,6 +159,14 @@ echo "=== Fast PRs (her ruling 23 Nov 2026): the PASS is asked for only of a rev
 reset "Fixes it."; echo '[{"name":"review-required"}]' > "$FAKE/labels"
 la 7 --task fastreview
 check "safety: review-required label and no PASS line: refused, nothing started" eval '[ "$RC" -eq 4 ] && has "Ship-ready: PASS" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/fastreview.md" ]'
+echo "=== protected PRs (#175): a .github/ change starts only on a separate reviewer's comment for its head ==="
+reset "$GOOD"$'\n''Owner override: "ship it all now" (25 Nov 2026 13:07 CT)'; echo '[]' > "$FAKE/labels"; echo '[{"path": ".github/CODEOWNERS"}]' > "$FAKE/files"
+la 7 --task protbody
+check "abuse: a .github/ change whose body carries a PASS and an Owner override: refused rc 4 REVIEW_REQUIRED, nothing started" eval '[ "$RC" -eq 4 ] && has "[REVIEW_REQUIRED]" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/protbody.md" ]'
+reset 'Owner override: "ship it all now" (25 Nov 2026 13:07 CT)'; echo '[]' > "$FAKE/labels"; echo '[{"path": ".github/CODEOWNERS"}]' > "$FAKE/files"
+jq -n --arg c "$GOOD" '[{authorAssociation: "OWNER", body: $c}]' > "$FAKE/comments"
+la 7 --task protcomment
+check "…with a separate reviewer's owner comment naming its head: started (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"
 la 7 --task fastplain
 check "happy path: no review class, no PASS line: started at once (rc 0)" [ "$RC" -eq 0 ]
@@ -166,7 +182,19 @@ check "started from a linked worktree that is removed at once: the worker runs i
 
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
 la 7 --task noclass
-check "safety: no Review class line and no PASS: refused, saying what to add, nothing started" eval '[ "$RC" -eq 4 ] && has "Review class: none — <why>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclass.md" ]'
+check "her list (27 Nov 2026): no Review class line, a diff on no class path, a repo with no data store: read as none from the paths, started at once (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone && [ -f "$FAKE/land-ran" ]'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"; echo '[{"path": "src/billing/charge.ts"}]' > "$FAKE/files"
+la 7 --task noclasspay
+check "safety: no Review class line on a payments path: never read as none; refused (rc 1) with the line to add, nothing started" eval '[ "$RC" -eq 1 ] && has "[REVIEW_CLASS_UNDECLARED]" && has "money (src/billing/charge.ts)" && has "add: Review class: none — <why this is in no review class, 3+ words>" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/noclasspay.md" ]'
+for cls in money private-data delete store launch outreach children; do
+  reset $'Fixes it.\nReview class: '"$cls"' — the fixture says so'; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
+  la 7 --task "cls-$cls"
+  check "safety: 'Review class: $cls' and no PASS: refused (rc 4: needs a reviewer), nothing started" eval '[ "$RC" -eq 4 ] && has "it says Review class: $cls" && has "add: Ship-ready: PASS — " && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/cls-$cls.md" ]'
+done
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-outcome"; : > "$FAKE/no-notbuilt"; : > "$FAKE/no-proof"
+la 7 --task threelines
+check "a PR missing three lines: refused AT ONCE (rc 1), all three listed in one run, each with its line; land never ran, no sheet, no checks read" eval '[ "$RC" -eq 1 ] && has "3 thing(s) to fix (MUTATION_PROOF_MISSING, OUTCOME_UNDECLARED, NOT_BUILT_UNDECLARED)" && has "1. [MUTATION_PROOF_MISSING]" && has "2. [OUTCOME_UNDECLARED]" && has "3. [NOT_BUILT_UNDECLARED]" && has "add: ## Mutation proof" && has "add: Outcome: none — <" && has "add: ## Not built" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/threelines.md" ] && ! grep -q "^pr checks" "$FAKE/gh-log"'
+check "…and land --check wrote nothing to GitHub: no merge, comment, label or edit call" eval '! grep -qE "^pr (merge|comment|edit|close|review)|^issue |^label |-X (POST|PUT|PATCH|DELETE)|--method" "$FAKE/gh-log"'
 reset $'Fixes it.\nReview class: none — log wording only'; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"
 la 7 --task noneclass
 check "happy path: 'Review class: none — log wording only', no PASS: started at once (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone'
@@ -178,7 +206,13 @@ la 7 --task evdown
 check "outage: the label history unread: exit 75 'could not verify', nothing started" eval '[ "$RC" -eq 75 ] && has "label history" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/evdown.md" ]'
 reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo "https://github.com/t/fixture/pull/7" > "$FAKE/url"
 la 7 --task unlisted
-check "new until launched: a repo not on live-repos.json, no PASS: refused, nothing started" eval '[ "$RC" -eq 4 ] && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/unlisted.md" ]'
+check "her list (27 Nov 2026): a repo not on live-repos.json is no class by that alone; 'Review class: none', no PASS: started at once (rc 0)" eval '[ "$RC" -eq 0 ] && lockgone && [ -f "$FAKE/land-ran" ]'
+reset $'Fixes it.\nReview class: launch — the first public site'; echo '[]' > "$FAKE/labels"; : > "$FAKE/no-class"; echo "https://github.com/t/fixture/pull/7" > "$FAKE/url"
+la 7 --task unlistedlaunch
+check "…its ONE launch review still stands: 'Review class: launch' with no PASS is refused (rc 4), nothing started" eval '[ "$RC" -eq 4 ] && has "it says Review class: launch" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/unlistedlaunch.md" ]'
+reset "Fixes it."; echo '[]' > "$FAKE/labels"; echo '[{"path": "live-repos.json"}]' > "$FAKE/files"
+la 7 --task listchange
+check "abuse: a PR that changes live-repos.json, saying 'Review class: none', no PASS: refused (rc 4), nothing started" eval '[ "$RC" -eq 4 ] && has "it changes live-repos.json" && [ ! -f "$FAKE/land-ran" ] && [ ! -e "$T/listchange.md" ]'
 
 echo "=== green, detached: survives the starting shell and its whole process group; only its own sheet is touched ==="
 reset; mkdir -p "$T"
@@ -384,7 +418,7 @@ check "…the refusal says the PASS is voided by the later fail, and when" eval 
 check "…and gives the fix: the PASS again as a new comment, at the head" eval 'has "gh pr comment 35 -R t/fixture" && has " at ${HEADSHA:0:8}; Engineering: PASS"'
 reset "Fixes it."; jq -nc --arg b "$GOOD" '[{authorAssociation: "NONE", createdAt: "2026-11-22T13:00:00Z", body: $b}, {authorAssociation: "OWNER", createdAt: "2026-11-22T14:00:00Z", body: "VERDICT: fail"}]' > "$FAKE/comments"
 la 36 --task voided-stranger
-check "abuse: a stranger's PASS before an owner fail is never named as voided (it never counted): the plain refusal" eval '[ "$RC" -eq 4 ] && has "has no reviewer PASS line" && ! has "does not count" && ! has "session_rev123"'
+check "abuse: a stranger's PASS before an owner fail is never named as voided (it never counted): the plain refusal" eval '[ "$RC" -eq 4 ] && has "no fresh reviewer" && has "Ship-ready PASS line stands for it" && ! has "does not count" && ! has "session_rev123"'
 
 echo "=== F2 (review of #137): the PASS is for this head, checked before anything starts ==="
 SHALESS='Ship-ready: PASS — reviewer session_rev123 looked at the self-test output and a detached land; Engineering: PASS'

@@ -55,7 +55,8 @@ echo "$*" >> "$F/la-log"; k="${3//\//_}-$1"
 case "$(cat "$F/la-$k" 2>/dev/null || echo ok)" in
   ok) case " $* " in *" --dry-run "*) echo "land-after: would land $3#$1 (sheet x); --dry-run, nothing started" ;;
         *) echo "land-after: started (pid 9) — log x" ;; esac; exit 0 ;;
-  review) echo "land-after: REFUSED — $3#$1 needs a review (its body has no \`Review class:\` line (add \`Review class: none — <why>\`, or the class: money)) and has no reviewer PASS line; nothing started. The fresh reviewer adds: x"; exit 4 ;;
+  review) echo "land-after: REFUSED — $3#$1 needs a reviewer: needs a review (it says Review class: money) and changes code (src/pay.ts), and no fresh reviewer's Ship-ready PASS line stands for it: a fresh reviewer looks at the diff, its tests and their mutation proof at head abc12345 and posts the line as a PR comment by the repo's owner account (a later VERDICT: fail voids a PASS in the body); nothing started. All 1 thing(s) to fix, each with its line:"
+          echo "  1. [REVIEW_PASS_MISSING] PR #$1 needs a review (it says Review class: money) and changes code (src/pay.ts)"; echo "       add: Ship-ready: PASS — <fresh reviewer, its session or run id> looked at <the real output> at abc12345; Engineering: PASS"; exit 4 ;;
   unverified) echo "land-after: could not verify $3#$1 (HTTP 502); nothing started"; exit 75 ;;
   refuse) echo "land-after: REFUSED — no checkout of $3 here or at ~/GitHub/x"; exit 1 ;;
 esac
@@ -123,7 +124,7 @@ check "…the block was replaced, not stacked; everything else byte for byte" ev
 rm -f "$F/held-seq23_dailystory-184"; pr seq23/aplayer-mode 101 seq23 false 60 pass 60; echo review > "$F/la-seq23_aplayer-mode-101"
 run
 check "a later run: a banner names only the PR new today" eval '[ "$(wc -l < "$F/banners")" -eq 2 ] && tail -1 "$F/banners" | grep -q "aplayer-mode#101" && ! tail -1 "$F/banners" | grep -q "dailystory#184"'
-check "review class with no PASS (land-after exit 4): needs a reviewer, with the reason only" eval 'hf "aplayer-mode#101 needs a reviewer** (green 60 min): its body has no \`Review class:\` line, and no reviewer PASS" && ! hf "The fresh reviewer adds"'
+check "review class with no PASS (land-after exit 4): needs a reviewer, with the reason only" eval 'hf "aplayer-mode#101 needs a reviewer** (green 60 min): needs a review (it says Review class: money) and changes code (src/pay.ts), and no fresh reviewer" && hf "Ship-ready PASS line stands for it (" && ! hf "a fresh reviewer looks at" && ! hf "add: Ship-ready" && ! hf "thing(s) to fix"'
 reset; pr seq23/dailystory 184 seq23 false 45 pass 40
 printf 'STATUS: FAIL seq23/dailystory#184 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2026-11-23 — land: deploy failed; log x\nGoal: y\n' > "$HOME/Work/tasks/ds.md"
 run

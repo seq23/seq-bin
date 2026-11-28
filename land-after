@@ -30,8 +30,10 @@
 #   land-after --self-test   runs tests/test-land-after.sh.
 #   land-after --holds <owner/repo> <pr>   rc 0 (pid on stdout) while a live land holds that PR; 1 when none does.
 #   land-after <pr> ... --dry-run          every check, then "would land": nothing written, locked or started.
+#   BEFORE ANYTHING STARTS it runs land's read-only `land --check <pr>` and refuses AT ONCE with the full list of
+#   what the PR's description still lacks, each with the line to add (pr-body-template.md carries them all).
 #   A refusal exits 1, except "it needs a fresh reviewer's PASS first" (none, voided, stale, builder-signed,
-#   no Engineering): exit 4, so pr-watch can say "needs a reviewer" without reading the words.
+#   no Engineering, or a protected PR's REVIEW_REQUIRED): exit 4, so pr-watch can say "needs a reviewer" without reading the words.
 #
 #   land-after --sweep       (nightly, housekeeping.sh) a `landing` sheet whose worker is gone (power loss,
 #                            kill -9) becomes FAIL unknown on its sheet, so nothing waits unseen.
@@ -50,6 +52,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 TASKS="${LAND_AFTER_TASKS:-$HOME/Work/tasks}"
 DONE="$TASKS/done"; LOGS="$TASKS/logs"; LOCKS="$TASKS/locks"
+DUE_FILE="$TASKS/post-land-checks.md"   # the post-land-check list (land writes it): in this folder, never a task sheet
 LAND_BIN="${LAND_AFTER_LAND:-$HERE/land}"          # tests point this at a fake lander
 LAND_SRC="$HERE/land"                               # the gates block is read from the real one
 LAND_DIR="${LAND_DIR:-$HERE}"                    # land-surfaces.json sits beside land (the gates read it)
@@ -63,7 +66,6 @@ KEEP_MIN=$((14 * 1440)); STALE_LANDING_MIN=90; STALE_OPEN_MIN=$((7 * 1440))
 
 say() { printf 'land-after: %s\n' "$*"; }
 refuse() { say "REFUSED — $*"; exit 1; }
-refuse_review() { say "REFUSED — $*"; exit 4; }   # exit 4: it needs a fresh reviewer's PASS first (pr-watch reads this code)
 now() { date '+%Y-%m-%dT%H:%M'; }
 age_min() { perl -e '@s = stat $ARGV[0] or exit 1; print int((time - $s[9]) / 60)' "$1"; }
 valid_slug() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] && [[ "$1" != *..* ]]; }
@@ -108,14 +110,13 @@ sheet_owner() { # $1 slug -> the <owner/repo>#<n> its line 1 names (empty when i
   head -1 "$TASKS/$1.md" 2>/dev/null | grep -oE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+' | head -1
 }
 
-# --- the reviewer's PASS line, read with land's own gate functions (one definition, never a copy) ---
+# --- GitHub's rate limit, read with land's own functions (one definition, never a copy); the gates run as `land --check` ---
 load_land_blocks() {
   local block
   block="$(sed -n '/^# --- gates begin/,/^# --- gates end/p' "$LAND_SRC" 2>/dev/null)"
   [ -n "$block" ] || return 1
   eval "$block"
-  LAND_LIVE_REPOS="$(dirname "$LAND_SRC")/live-repos.json"   # the list beside the land whose gates these are
-  declare -F with_label_history pr_repo live_repo review_class review_text voided_pass pass_line covers_engineering pr_owner_override signoff builders is_builder fresh_pass is_rate_limit rate_reset_in >/dev/null
+  declare -F is_rate_limit rate_reset_in >/dev/null
 }
 
 # --- task sheet: only ever $TASKS/<slug>.md (and its move to done/) ---
@@ -181,6 +182,7 @@ status() {
   local f slug line flags pid age n=0
   for f in "$TASKS"/*.md; do
     [ -f "$f" ] || continue
+    [ "$f" = "$DUE_FILE" ] && continue
     n=$((n + 1)); slug="$(basename "$f" .md)"; line="$(head -1 "$f")"; flags=""
     age="$(age_min "$f" || echo 0)"
     case "$line" in
@@ -359,7 +361,7 @@ main() {
   [ -z "$SLUG" ] || valid_slug "$SLUG" || refuse "task slug '$SLUG' must be letters, digits, . _ - (no / and no ..)"
   local c; for c in ${THENS[@]+"${THENS[@]}"}; do [ -n "$c" ] || refuse "--then needs a command"; done
   if [ -z "$DRY" ]; then mkdir -p "$TASKS" "$DONE" "$LOGS" "$LOCKS/slugs" || refuse "cannot create $TASKS"; cleanup; fi
-  load_land_blocks || refuse "land's gate block could not be read from $LAND_SRC, so the PASS line cannot be checked"
+  load_land_blocks || refuse "land's gate block could not be read from $LAND_SRC, so GitHub's rate limit cannot be read"
 
   # The repo: --repo names it (this checkout if it is that repo, else ~/GitHub/<name>); else this checkout.
   local DIR=""
@@ -377,42 +379,42 @@ main() {
   local main_dir; main_dir="$(cd "$DIR" && dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"
   [ -n "$main_dir" ] && [ -d "$main_dir" ] && [ "$(repo_of_dir "$main_dir")" = "$REPO" ] && DIR="$main_dir"
 
-  # The PR and its PASS line. A read that never answers starts nothing (exit 75, "could not verify").
+  # The PR. A read that never answers starts nothing (exit 75, "could not verify").
   # Asked patiently: a spent allowance is slept out to its reset (22 Nov 2026, #134), never "nothing started".
   local VIEW="" ERRF; ERRF="$(mktemp)"
   VIEW="$(patient $(( $(date +%s) + ${LAND_AFTER_RATE_WAIT_SECS:-3900} )) '"state"' pr view "$PR" -R "$REPO" --json state,body,comments,headRefOid,headRefName,title,url,author,commits,labels,files,changedFiles)" \
     || { say "could not verify $REPO#$PR ($(head -1 "$ERRF")); nothing started"; rm -f "$ERRF"; exit 75; }
   rm -f "$ERRF"
-  VIEW="$(with_label_history "$PR" <<<"$VIEW")"
-  jq -e '.label_history | type == "array"' <<<"$VIEW" >/dev/null 2>&1 \
-    || { say "could not verify $REPO#$PR (its label history, GitHub's issue events, did not answer); nothing started"; exit 75; }
-  local state review reviewer HEADSHA
+  local state HEADSHA
   state="$(jq -r .state <<<"$VIEW")"; HEADSHA="$(jq -r '.headRefOid // ""' <<<"$VIEW")"
-  review="$(review_text <<<"$VIEW")"
   [ "$state" != CLOSED ] || refuse "$REPO#$PR is closed without merging"
-  # Fast PRs item 1 (her ruling 23 Nov 2026): only a review-class PR (land's review_class: the review-required
-  # label, a repo not on live-repos.json, a change to that list, or anything unread) needs the PASS before
-  # anything starts. Others start at once; land itself still refuses a first public launch with no PASS.
-  local cls
-  if ! pr_owner_override <<<"$VIEW" && cls="$(review_class <<<"$VIEW")"; then
-    local why
-    reviewer="$(signoff Ship-ready <<<"$review")" \
-      || { why="$(voided_pass Ship-ready <<<"$VIEW")" && refuse_review "$REPO#$PR: $why:  gh pr comment $PR -R $REPO --body 'Ship-ready: PASS — <its session or run id> looked at <the real output> at ${HEADSHA:0:8}; Engineering: PASS'. Nothing started"
-           refuse_review "$REPO#$PR needs a review ($cls) and has no reviewer PASS line; nothing started. The fresh reviewer adds: Ship-ready: PASS — <its session or run id> looked at <the real output> at <head sha>; Engineering: PASS"; }
-    pass_line Ship-ready <<<"$review" | covers_engineering \
-      || refuse_review "$REPO#$PR's PASS line ($reviewer) does not end with '; Engineering: PASS'; nothing started"
-    is_builder "$reviewer" "$(builders <<<"$VIEW")" \
-      && refuse_review "$REPO#$PR's PASS line is signed by its builder ($reviewer); a fresh reviewer signs it. Nothing started"
-    # The PASS must be for this head (land's own fresh_pass), checked now: refused at the start, never after the CI wait (review F2).
-    local fresh frc
-    [[ "$HEADSHA" =~ ^[0-9a-f]{40}$ ]] || { say "could not verify $REPO#$PR (no head commit in GitHub's answer); nothing started"; exit 75; }
-    fresh="$(cd "$DIR" && { git fetch -q origin main 2>/dev/null || git fetch -q origin main 2>/dev/null || { echo "origin/main could not be fetched"; exit 75; }; } \
-      && fresh_pass Ship-ready "$PR" "$HEADSHA" "$VIEW")"; frc=$?
-    case $frc in
-      0) : ;;
-      75) say "could not verify $REPO#$PR ($fresh); nothing started"; exit 75 ;;
-      *) refuse_review "$fresh; nothing started" ;;
-    esac
+  [[ "$HEADSHA" =~ ^[0-9a-f]{40}$ ]] || { say "could not verify $REPO#$PR (no head commit in GitHub's answer); nothing started"; exit 75; }
+  # EVERY DESCRIPTION GATE, BEFORE ANYTHING STARTS (her words 27 Nov 2026: "give a root fix to this"). land's own
+  # read-only `land --check` (never a copy of its gates) reads the PR as land will: the review class and its fresh
+  # reviewer's PASS, mutation proof, patch or rebuild, forms, outcome, not built, click-through. A description that
+  # lacks three lines is told all three here, at once, never one per run after a CI wait. Only a PR in a review
+  # class waits on a reviewer (land's list: money, private-data, delete, store, launch, outreach, a review-required
+  # label ever, a change to live-repos.json, and a protected PR: a noelle/ branch or a .github/ change, REVIEW_REQUIRED,
+  # read by land's own trusted_review_required, which no Owner override clears); everything else starts on its own.
+  local CHK crc list codes n why
+  CHK="$(cd "$DIR" && "$LAND_SRC" --check "$PR" </dev/null 2>&1 | sed $'s/\033\\[[0-9;]*m//g'; exit "${PIPESTATUS[0]}")"; crc=$?
+  if [ "$crc" -eq 75 ]; then
+    why="$(sed -nE 's/^STOPPED: could not verify \([a-z ]+\) — (.*)\. Nothing was merged by this step.*/\1/p' <<<"$CHK" | tail -1 | cut -c1-300)"
+    say "could not verify $REPO#$PR (${why:-land --check got no answer from GitHub}); nothing started"; exit 75
+  elif [ "$crc" -ne 0 ]; then
+    list="$(grep -E '^  [0-9]+\. \[[A-Z_]+\] |^       add: ' <<<"$CHK")"
+    codes="$(sed -nE 's/^  [0-9]+\. \[([A-Z_]+)\] .*/\1/p' <<<"$list")"; n="$(grep -c . <<<"$codes")"
+    [ -n "$codes" ] || refuse "land --check stopped on $REPO#$PR: $(grep -E 'STOPPED:|NAMED STOP' <<<"$CHK" | tail -1 | sed 's/^STOPPED: //' | cut -c1-400); nothing started"
+    if grep -qxE 'REVIEW_PASS_MISSING|REVIEW_REQUIRED|STALE_PASS|LAUNCH_PASS_MISSING' <<<"$codes"; then
+      why="$(sed -nE 's/^  [0-9]+\. \[(REVIEW_PASS_MISSING|REVIEW_REQUIRED|STALE_PASS|LAUNCH_PASS_MISSING)\] (PR #[0-9]+(.s)? )?//p' <<<"$list" | head -1)"
+      say "REFUSED — $REPO#$PR needs a reviewer: $why; nothing started. All $n thing(s) to fix, each with its line:"
+      printf '%s\n' "$list"
+      say "the fresh reviewer posts its line with: gh pr comment $PR -R $REPO --body '<the add: line above, filled in>'"
+      exit 4   # pr-watch reads this code: "needs a reviewer"
+    fi
+    say "REFUSED — $REPO#$PR's description has $n thing(s) to fix ($(paste -sd',' - <<<"$codes" | sed 's/,/, /g')); nothing started. Each with the line to add (pr-body-template.md carries them all):"
+    printf '%s\n' "$list"
+    exit 1
   fi
 
   SHEET_REPO="$REPO"; SHEET_PR="$PR"

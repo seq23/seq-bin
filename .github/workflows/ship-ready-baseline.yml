@@ -52,3 +52,5 @@ jobs:
           name: ship-ready-baseline
           path: ship-ready-out
           if-no-files-found: warn
+          # Screenshots are only read while the PR is open; 90-day default filled the 0.5 GB free quota (27 Nov 2026).
+          retention-days: 5

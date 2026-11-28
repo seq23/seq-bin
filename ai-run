@@ -15,12 +15,24 @@
 # does it wait for the reset: exit 75 and NAMED STOP [CODEX_LIMIT] resets <time from Codex's own message>.
 # Codex missing or not logged in with ChatGPT (callers such as ci-sweep hand that to Claude themselves):
 #   NAMED STOP [CODEX_UNAVAILABLE] ...   (exit 69)
-# A Claude usage limit (her plan's 5-hour or weekly window, 23 Nov 2026: "she can use claude and stop when
-# credits run out...no need for free bad llms here") is exit 76 and
-#   NAMED STOP [CLAUDE_LIMIT] resets <time from Claude's own message>
-# It never hands off to Codex or any free route: the caller saves where it was and the next slot resumes.
+# A Claude usage limit (her plan's 5-hour or weekly window) runs the SAME prompt ONCE more on the free
+# $200/month API credit (her words 27 Nov 2026: "background jobs for free $200 api credit. ----only after
+# plan runs out"). The plan is always asked first; the key is the Boss OS vault's ANTHROPIC_API_KEY, read
+# by `npm run -s vault:run` for that one run and never held, printed or exported by this script. The
+# credit stops at $0 (no auto-reload, nothing bought), so this can never bill her.
+#   · The credit run answers: its answer is the job's output, exit 0, and the usage log gets its line
+#     (engine=claude-credit, cost_usd=<what the run reported>, prompt=restarted: the prompt starts again,
+#     so a limit that struck after partial output redoes that part).
+#   · The credit run does not answer (vault locked or unreadable, no key, credit at $0, key refused,
+#     network down, a limit of its own), or the caller set AI_RUN_NO_CREDIT=1: exit 76 and
+#       NAMED STOP [CLAUDE_LIMIT] resets <time from Claude's own message>
+#     with one line above it saying the free credit was tried once and why it did not run. Never a second
+#     try, never Codex or a free model (23 Nov 2026: "she can use claude and stop when credits run
+#     out...no need for free bad llms here"): the caller saves where it was and the next slot resumes.
 # `claude -p` may print the notice and exit 0 ("[result:success] You've hit your weekly limit · resets 9am"),
 # so the notice is read from the output: a short run (<= 600 chars) that is the notice, on any exit code.
+# On a key, claude.ai connectors (Gmail, Calendar, Drive) and Claude in Chrome are OFF: a job that needs
+# them sets AI_RUN_NO_CREDIT=1 and keeps the named stop.
 #
 # THE INTERFACE IS SHARED. boss-os and west-peek-os call this file with exactly the flags above;
 # change them only together. Optional knobs, all additive (none changes the interface):
@@ -32,7 +44,35 @@
 #                          "--chrome --allowedTools=mcp__claude-in-chrome__*"). Split on spaces, no globbing.
 #   AI_RUN_ADD_DIRS        colon-separated extra writable directories for the worker (a job's state dir).
 #   AI_RUN_CALLER          name logged as the caller (default: the parent process's script).
+#   AI_RUN_NO_CREDIT=1     a Claude usage limit is the named stop at once; the free API credit is never
+#                          tried (for a job that needs her claude.ai sign-in: connectors, Claude in Chrome).
+#   AI_RUN_VAULT_REPO      the checkout whose `npm run -s vault:run` reads the key (default ~/GitHub/boss-os).
+#   AI_RUN_TEST_PLAN_LIMITED=1   TEST ONLY: the plan is not asked and is treated as limited, so the
+#                          credit path runs. Refused (exit 64, NAMED STOP [TEST_ONLY]) unless AI_RUN_CALLER
+#                          starts with `test-`.
+#   AI_RUN_CREDIT_NOW=1    HER `talk` command only (AI_RUN_CALLER=talk, or test-*): the plan is not asked; the
+#                          prompt runs once on the free API credit. When it does not answer: exit 76 and
+#                          NAMED STOP [CREDIT_STOP] the free API credit did not answer: <why>. Any other caller: exit 64.
+#   AI_RUN_LIVE=<file>     with AI_RUN_CREDIT_NOW: the credit run's event stream, the key's value replaced, is
+#                          appended to <file> line by line as Claude prints it (talk shows the reply from it).
 #   AI_RUN_LOG             usage log (default ~/Library/Logs/ai-run.log).
+#   AI_RUN_MCP=none        Claude starts with NO connectors or MCP servers (a checker that only reads a diff or a
+#                          command's output needs none; each one loaded is start-up tokens paid on every run).
+#   AI_RUN_BARE=1          Claude answers from its prompt alone: NO tools (no shell, no file reads), no connectors
+#                          and none of her settings, hooks or rules files. For a judge that is handed everything it
+#                          needs in the prompt (post-land-check's outcome check). AI_RUN_CLAUDE_ARGS is ignored.
+#   AI_RUN_MAX_SECS        Claude runs only: wall-clock cap in seconds (default 3600; 0 = none). At the cap the run is
+#                          stopped: exit 124 and NAMED STOP [TIME_CAP]. Codex runs have no cap here (her ChatGPT plan).
+#   AI_RUN_MAX_RUNS        Claude runs only: most runs one caller may make in a day (default 100; 0 = none), counted
+#                          from the usage log. Past it: exit 75 and NAMED STOP [RUN_CAP]. This is what stops a retry
+#                          loop that would otherwise spend her plan all night.
+#   AI_RUN_IGNORE_PAUSE=1  a run SHE starts by hand (a build queue, a one-off) ignores the pause below.
+#
+# ONE PAUSE FOR EVERY SCHEDULED AI JOB (her yes 25 Nov 2026: "yea add that to the open loops for friday"; built
+# 27 Nov 2026). `ai-pause 2026-11-29` (or `ai-pause 1` for one day) writes a date to ~/.boss-os/ai-pause-until.
+# Until that date every ai-run call, Codex or Claude, ends at once with exit 75 and NAMED STOP [PAUSED]: the same
+# "the work waits" code as a usage limit, so each caller keeps its place and the first slot after the date runs it.
+# The file expires by its own date; `ai-pause off` removes it. post-land-check reads the same file.
 #   AI_RUN_CODEX_BIN / AI_RUN_CLAUDE_BIN   the binaries (default: PATH, then /opt/homebrew/bin).
 #
 # OUTPUT. With --out, everything the engine prints (stdout and stderr) is APPENDED to FILE as it
@@ -43,15 +83,97 @@
 # but never commit (proved 3 Nov 2026: `git add` -> index.lock: Operation not permitted). The git
 # directories of --cwd's repo and of each repo directly under --cwd are added as writable roots.
 #
-# Every run appends one line to the usage log: time, role, engine, caller, exit.
-# Exit: the engine's own code; 75 CODEX_LIMIT; 76 CLAUDE_LIMIT; 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
+# Every run appends one line to the usage log: time, role, engine, caller, exit, then bytes= (the prompt's size)
+# and secs= (how long the engine ran), so a job whose start-up or run time grows shows up in the log. A run
+# that moved to the free API credit appends two: the plan's (stop=CLAUDE_LIMIT_TO_CREDIT) and the credit run's
+# (engine=claude-credit, with cost_usd and key_source when it answered; credit=<why> when it did not, and
+# then cost_usd too if claude had started on the key: the number it reported, or "unknown").
+# Exit: the engine's own code; 75 CODEX_LIMIT / PAUSED / RUN_CAP; 76 CLAUDE_LIMIT; 124 TIME_CAP;
+# 69 CODEX_UNAVAILABLE / CLAUDE_UNAVAILABLE; 64 usage.
 set -uo pipefail
+
+# --- the credit child: the ONE process that holds the key (started by vault:run, see credit_run) ----
+# vault:run puts EVERY vault secret in its child's environment. This drops each name the caller did not
+# already have, except ANTHROPIC_API_KEY, so `claude` starts with the plan run's environment plus that one
+# key. Claude's raw output stays in a private directory; the answer handed back has the key's value
+# replaced, so a run that printed its own key cannot put it in a log (the model can still read its own
+# environment, as in any run: this stops the verbatim value, nothing cleverer).
+if [ "${1:-}" = --credit-child ]; then
+  # $2 private directory  $3 the names to keep, colon-joined  $4 PATH  $5 the run's directory  $6 node
+  # $7 1 = hand back Claude's raw output  $8 a live copy file, or "" for none  $9 --  $10… the claude command.
+  # ONLY the arguments are used, never a variable of this script's own: npm exports NODE, and a vault may
+  # hold any name. Dropping such a name also drops a shell variable called the same (27 Nov 2026: `unset
+  # NODE` took this block's own $NODE with it, and the first real credit run was thrown away unread).
+  [ $# -ge 10 ] && [ "$9" = -- ] || { echo "ai-run: --credit-child is internal (vault:run starts it)" >&2; exit 64; }
+  for _airun_name in $(compgen -e); do
+    [ "$_airun_name" = ANTHROPIC_API_KEY ] && continue
+    case ":$3" in *":$_airun_name:"*) ;; *) unset "$_airun_name" 2>/dev/null ;; esac
+  done
+  unset _airun_name
+  export PATH="$4"
+  [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo nokey > "$2/state"; exit 0; }
+  cd "$5" 2>/dev/null || { echo nocwd > "$2/state"; exit 0; }
+  if [ -z "$8" ]; then
+    "${@:10}" <&0 > "$2/raw" 2> "$2/err" &   # in the background so its pid can be written down: a kill of ai-run goes to that pid (forward)
+    echo "$!" > "$2/pid"; echo started > "$2/state"
+    wait "$!"; echo "$?" > "$2/rc"
+  else
+    # A live copy (talk): each line Claude prints goes, with the key's value replaced, to raw AND to the
+    # caller's file as it comes, so the caller can show the answer while it is written. Line by line, so a
+    # value can never be split across two writes; the pid written down is claude's own, as above. It ends
+    # once claude has (its rc is written) or ai-run has gone (its directory removed), even when a process claude left behind still holds the pipe open.
+    read -r -d '' _airun_tee <<'JS'
+const fs = require("fs"), [raw, live, rc] = process.argv.slice(1);
+const key = process.env.ANTHROPIC_API_KEY || "";
+const clean = (s) => (key ? s.split(key).join("[key removed]") : s);
+const r = fs.openSync(raw, "a"), l = fs.openSync(live, "a");
+let buf = "";
+const put = (s) => { const c = clean(s); fs.writeSync(r, c); fs.writeSync(l, c); };
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => { buf += d; const i = buf.lastIndexOf("\n"); if (i >= 0) { put(buf.slice(0, i + 1)); buf = buf.slice(i + 1); } });
+const end = () => { if (buf) put(buf); buf = ""; process.exit(0); };
+process.stdin.on("end", end);
+setInterval(() => { if (fs.existsSync(rc) || !fs.existsSync(require("path").dirname(rc))) setTimeout(end, 500); }, 200);
+JS
+    ( "${@:10}" <&0 2> "$2/err" & echo "$!" > "$2/pid"; echo started > "$2/state"; wait "$!"; echo "$?" > "$2/rc" ) |
+      "$6" -e "$_airun_tee" "$2/raw" "$8" "$2/rc"
+  fi
+  # Claude's own result event says whether it answered and what the run cost; nothing here guesses.
+  read -r -d '' _airun_reader <<'JS'
+const fs = require("fs"), [dir, rawAnswer] = process.argv.slice(1);
+const key = process.env.ANTHROPIC_API_KEY || "";
+const clean = (s) => (key ? String(s).split(key).join("[key removed]") : String(s));
+const read = (f) => { try { return fs.readFileSync(`${dir}/${f}`, "utf8"); } catch { return ""; } };
+const raw = read("raw"), err = read("err");
+let events = [];
+try { const j = JSON.parse(raw); events = Array.isArray(j) ? j : [j]; }
+catch { for (const l of raw.split("\n")) { try { events.push(JSON.parse(l)); } catch {} } }
+events = events.filter((e) => e && typeof e === "object");
+const init = events.find((e) => e.type === "system" && e.subtype === "init");
+const res = events.filter((e) => e.type === "result").pop();
+const text = res && typeof res.result === "string" ? res.result : "";
+const kind = !res ? "none" : res.is_error !== false ? "refused" : text.trim() === "" ? "empty" : "ok";
+const one = (s) => clean(s).replace(/\s+/g, " ").trim().slice(0, 160);
+const c = res ? res.total_cost_usd : null;
+const cost = typeof c === "number" && Number.isFinite(c) && c >= 0 ? c.toFixed(6) : "unknown";
+const src = init && /^[A-Za-z0-9_.\/-]{1,40}$/.test(String(init.apiKeySource)) ? String(init.apiKeySource) : "unknown";
+const why = res
+  ? one(text || res.subtype || "an error with no text") + (res.api_error_status ? ` (HTTP ${Number(res.api_error_status)})` : "")
+  : one(err || raw || "it printed nothing");
+fs.writeFileSync(`${dir}/answer`, clean(rawAnswer === "1" ? raw : text.replace(/\n*$/, "\n")));
+fs.writeFileSync(`${dir}/meta`, `kind=${kind}\ncost=${cost}\nkey_source=${src}\nwhy=${why}\n`);
+JS
+  "$6" -e "$_airun_reader" "$2" "$7" 2> /dev/null
+  rm -f "$2/raw" "$2/err"
+  exit 0
+fi
 
 usage() {
   echo 'usage: ai-run --role worker|brain [--cwd DIR] [--network] [--out FILE] -- "<prompt>"   (or the prompt on stdin)' >&2
   exit "${1:-64}"
 }
 
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"   # absolute: vault:run starts it from boss-os
 ROLE="" CWD="" NETWORK=0 OUT="" PROMPT="" HAVE_PROMPT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,11 +218,11 @@ caller_name() { # the job that ran us, climbing past wrappers (timeout, nohup, c
   echo unknown
 }
 CALLER="$(caller_name)"
-ENGINE=""
-log_line() { # log_line <exit> [stop]
+ENGINE="" LOG_EXTRA=""
+log_line() { # log_line <exit> [stop]; LOG_EXTRA (tab-separated name=value fields) goes before bytes= and secs=
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
-  printf '%s\trole=%s\tengine=%s\tcaller=%s\texit=%s%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$ROLE" "${ENGINE:-none}" \
-    "$CALLER" "$1" "${2:+	stop=$2}" >> "$LOG" 2>/dev/null
+  printf '%s\trole=%s\tengine=%s\tcaller=%s\texit=%s%s%s\tbytes=%s\tsecs=%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$ROLE" "${ENGINE:-none}" \
+    "$CALLER" "$1" "${2:+	stop=$2}" "${LOG_EXTRA:+	$LOG_EXTRA}" "${#PROMPT}" "$(( SECONDS - ${T0:-$SECONDS} ))" >> "$LOG" 2>/dev/null
 }
 stop() { # stop <code> <NAME> <text>
   local line="NAMED STOP [$2] $3"
@@ -120,6 +242,39 @@ case "$ROLE" in
       *) echo "ai-run: AI_RUN_WORKER must be unset, codex or claude (got '$AI_RUN_WORKER')" >&2; exit 64 ;;
     esac ;;
 esac
+# TEST ONLY: treat the plan as limited without asking it. A real job can never take this road to the credit.
+TEST_LIMITED=0
+if [ -n "${AI_RUN_TEST_PLAN_LIMITED:-}" ]; then
+  case "${AI_RUN_CALLER:-}" in
+    test-*) TEST_LIMITED=1 ;;
+    *) echo "NAMED STOP [TEST_ONLY] AI_RUN_TEST_PLAN_LIMITED is a test-only switch (AI_RUN_CALLER must start with test-); nothing ran."
+       log_line 64 TEST_ONLY; exit 64 ;;
+  esac
+fi
+# HER `talk` COMMAND ONLY: straight to the free API credit, the plan not asked (she types `talk` once her plan is
+# out; her words 27 Nov 2026: "keep working with Claude on the free $200 API credit when her plan runs out").
+# Every other caller keeps the plan first (tests/test-ai-run.sh fails if any other tracked file sets this).
+CREDIT_NOW=0 LIVE=""
+if [ -n "${AI_RUN_CREDIT_NOW:-}" ]; then
+  case "${AI_RUN_CALLER:-}" in
+    talk|test-*) CREDIT_NOW=1 ;;
+    *) echo "NAMED STOP [CREDIT_NOW_ONLY] AI_RUN_CREDIT_NOW is for her talk command only (AI_RUN_CALLER=talk); nothing ran."
+       log_line 64 CREDIT_NOW_ONLY; exit 64 ;;
+  esac
+  [ "$ENGINE_KIND" = claude ] && [ -z "${AI_RUN_NO_CREDIT:-}" ] ||
+    { echo "NAMED STOP [CREDIT_NOW_ONLY] AI_RUN_CREDIT_NOW needs a Claude run with the credit allowed; nothing ran."; log_line 64 CREDIT_NOW_ONLY; exit 64; }
+fi
+# AI_RUN_LIVE=<file> (with AI_RUN_CREDIT_NOW): the credit run's event stream, the key's value replaced, is
+# appended to that file line by line as Claude prints it, so `talk` can show the reply while it is written.
+if [ -n "${AI_RUN_LIVE:-}" ]; then
+  case "$AI_RUN_LIVE" in /*) ;; *) false ;; esac && [ "$CREDIT_NOW" -eq 1 ] && [ -f "$AI_RUN_LIVE" ] && [ -w "$AI_RUN_LIVE" ] ||
+    { echo "NAMED STOP [NO_LIVE_FILE] AI_RUN_LIVE must be an existing writable file given with an absolute path, with AI_RUN_CREDIT_NOW; nothing ran."; exit 64; }
+  LIVE="$AI_RUN_LIVE"
+fi
+# THE PLAN FIRST, ALWAYS. A caller started under vault:run carries the vault's ANTHROPIC_API_KEY, and
+# `claude -p` would bill that key before her plan and switch her connectors off. This process drops it;
+# the only run that gets a key is the one credit_run starts, and that key comes from the vault itself.
+[ "$ENGINE_KIND" = claude ] && unset ANTHROPIC_API_KEY
 
 # --- where the output goes ----------------------------------------------------------------------
 if [ -n "$OUT" ]; then
@@ -131,7 +286,38 @@ if [ -n "$OUT" ]; then
 else
   DEST="$(mktemp "${TMPDIR:-/tmp}/ai-run.XXXXXX")"
   START_BYTES=0
-  trap 'rm -f "$DEST"' EXIT
+fi
+CREDIT_DIR=""   # the credit run's private directory (credit_run); only the files this script put there are removed
+# shellcheck disable=SC2329  # invoked by the trap below
+cleanup() {
+  [ -n "$OUT" ] || rm -f "$DEST"
+  [ -n "$CREDIT_DIR" ] || return 0
+  (cd "$CREDIT_DIR" 2>/dev/null && rm -f state pid rc raw err answer meta vault.out)
+  rmdir "$CREDIT_DIR" 2>/dev/null
+}
+trap cleanup EXIT
+
+# --- her pause, then the run cap: both end the run before any model starts ------------------------
+PAUSE_FILE="${AI_RUN_PAUSE_FILE:-$HOME/.boss-os/ai-pause-until}"
+if [ "${AI_RUN_IGNORE_PAUSE:-}" != 1 ] && [ -r "$PAUSE_FILE" ]; then
+  PAUSE_UNTIL="$(tr -d '[:space:]' < "$PAUSE_FILE")"
+  if [[ "$PAUSE_UNTIL" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    [[ "$(date +%Y-%m-%d)" < "$PAUSE_UNTIL" ]] &&
+      stop 75 PAUSED "by the owner until $PAUSE_UNTIL ($PAUSE_FILE) — no model ran; this work waits and runs on the first slot after."
+  else
+    # A pause file that cannot be read as a date is NOT "no pause": she asked for a pause and the date was lost.
+    stop 75 PAUSED "the pause file $PAUSE_FILE does not hold a date (YYYY-MM-DD) — no model ran. Fix it with: ai-pause <date> or ai-pause off"
+  fi
+fi
+if [ "$ENGINE_KIND" = claude ]; then
+  MAX_RUNS="${AI_RUN_MAX_RUNS:-100}"
+  [[ "$MAX_RUNS" =~ ^[0-9]+$ ]] || { echo "ai-run: AI_RUN_MAX_RUNS must be a whole number (got '$MAX_RUNS')" >&2; exit 64; }
+  if [ "$MAX_RUNS" -gt 0 ] && [ -r "$LOG" ]; then
+    RUNS_TODAY="$(awk -F'\t' -v d="$(date +%Y-%m-%d)" -v c="caller=$CALLER" \
+      'index($1, d) == 1 && $3 ~ /^engine=claude/ && $4 == c && $0 !~ /stop=(PAUSED|RUN_CAP)/ { n++ } END { print n + 0 }' "$LOG" 2>/dev/null)"
+    [ "${RUNS_TODAY:-0}" -ge "$MAX_RUNS" ] &&
+      stop 75 RUN_CAP "$CALLER has already made $RUNS_TODAY Claude runs today (cap $MAX_RUNS, AI_RUN_MAX_RUNS) — no model ran; this work waits for tomorrow."
+  fi
 fi
 
 # --- build the command --------------------------------------------------------------------------
@@ -171,35 +357,73 @@ else
   else
     EXTRA=(--dangerously-skip-permissions)
   fi
+  case "${AI_RUN_BARE:-}" in
+    "") ;;
+    1) EXTRA=(--tools "" --setting-sources ""); AI_RUN_MCP=none ;;
+    *) echo "ai-run: AI_RUN_BARE must be unset or 1 (got '$AI_RUN_BARE')" >&2; exit 64 ;;
+  esac
   CMD=("$CLAUDE" -p --model "${AI_RUN_CLAUDE_MODEL:-opus}" ${EXTRA[@]+"${EXTRA[@]}"})
+  case "${AI_RUN_MCP:-}" in
+    "") ;;
+    none) CMD+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}') ;;
+    *) echo "ai-run: AI_RUN_MCP must be unset or none (got '$AI_RUN_MCP')" >&2; exit 64 ;;
+  esac
 fi
 
 # --- run it, forwarding a kill to the engine (a watchdog or a cap kills THIS pid) ----------------
-CHILD=""
-# shellcheck disable=SC2329  # invoked by the trap below
-forward() { [ -n "$CHILD" ] && kill -TERM "$CHILD" 2>/dev/null; }
-trap forward TERM INT HUP
+CHILD="" RC=0 CAPPED=""
+MAX_SECS="${AI_RUN_MAX_SECS:-3600}"
+[[ "$MAX_SECS" =~ ^[0-9]+$ ]] || MAX_SECS=3600
+# shellcheck disable=SC2329  # invoked by the traps below and by the time cap in wait_child
+forward() { # the credit run's claude sits under npm and vault:run, which pass no signal on, so it is killed by its own pid
+  [ -n "$CHILD" ] && kill -TERM "$CHILD" 2>/dev/null
+  [ -n "$CREDIT_DIR" ] && [ -s "$CREDIT_DIR/pid" ] && kill -TERM "$(cat "$CREDIT_DIR/pid")" 2>/dev/null
+}
+wait_child() { # waits for $CHILD to end, through any trap; sets RC, and CAPPED when the time cap stopped it
+  local watch="" marker=""
+  CAPPED=""
+  # The time cap (Claude runs only, the plan's and the credit's alike): a watchdog stops the engine at the cap
+  # and leaves a marker, so a capped run is named as one, never mistaken for the engine's own failure.
+  if [ "$ENGINE_KIND" = claude ] && [ "$MAX_SECS" -gt 0 ]; then
+    marker="$(mktemp "${TMPDIR:-/tmp}/ai-run-cap.XXXXXX")"; rm -f "$marker"
+    ( sleep "$MAX_SECS" & SL=$!; trap 'kill $SL 2>/dev/null; exit 0' TERM; wait $SL
+      kill -0 "$CHILD" 2>/dev/null && { : > "$marker"; forward; } ) &
+    watch=$!
+  fi
+  wait "$CHILD"; RC=$?
+  [ -n "${AI_RUN_TEST_FOREIGN_PID:-}" ] && CHILD="$AI_RUN_TEST_FOREIGN_PID"   # tests only: the PID got reused
+  # A trap can end `wait` early while the engine still runs, so wait again while it lives. But a PID
+  # that exists and is NOT our child (macOS reused it after the engine exited) makes `wait` return 127
+  # at once: that is the end, not a reason to spin. 9 Nov 2026: this loop spun at 100% CPU for 50
+  # minutes and cost the Monday CI sweep its first round.
+  while kill -0 "$CHILD" 2>/dev/null; do
+    wait "$CHILD"; r=$?
+    [ "$r" -eq 127 ] && break
+    RC=$r
+  done
+  trap - TERM INT HUP
+  [ -n "$watch" ] && { kill -TERM "$watch" 2>/dev/null; wait "$watch" 2>/dev/null; }
+  if [ -n "$marker" ] && [ -e "$marker" ]; then rm -f "$marker"; CAPPED=1; fi
+}
 if [ -n "$CWD" ]; then cd "$CWD" || exit 64; fi
+T0=$SECONDS
+trap forward TERM INT HUP
 if [ "$ENGINE_KIND" = codex ]; then
   "${CMD[@]}" < /dev/null >> "$DEST" 2>&1 &
-else
+  CHILD=$!; wait_child
+elif [ "$TEST_LIMITED" -eq 0 ] && [ "$CREDIT_NOW" -eq 0 ]; then
   printf '%s' "$PROMPT" | "${CMD[@]}" >> "$DEST" 2>&1 &   # $! is claude itself, the last in the pipe
+  CHILD=$!; wait_child
 fi
-CHILD=$!
-wait "$CHILD"; RC=$?
-[ -n "${AI_RUN_TEST_FOREIGN_PID:-}" ] && CHILD="$AI_RUN_TEST_FOREIGN_PID"   # tests only: the PID got reused
-# A trap can end `wait` early while the engine still runs, so wait again while it lives. But a PID
-# that exists and is NOT our child (macOS reused it after the engine exited) makes `wait` return 127
-# at once: that is the end, not a reason to spin. 9 Nov 2026: this loop spun at 100% CPU for 50
-# minutes and cost the Monday CI sweep its first round.
-while kill -0 "$CHILD" 2>/dev/null; do
-  wait "$CHILD"; r=$?
-  [ "$r" -eq 127 ] && break
-  RC=$r
-done
 trap - TERM INT HUP
+END_BYTES="$(wc -c < "$DEST" | tr -d ' ')"
 
-[ -n "$OUT" ] || cat "$DEST"
+# Claude's output is printed further down, once it is known not to be a limit notice that the credit run replaces.
+[ -n "$OUT" ] || [ "$ENGINE_KIND" = claude ] || cat "$DEST"
+if [ -n "$CAPPED" ]; then
+  [ -n "$OUT" ] || cat "$DEST"
+  stop 124 TIME_CAP "the Claude run for $CALLER was stopped at its $MAX_SECS-second cap (AI_RUN_MAX_SECS) — what it printed before then is kept."
+fi
 
 # --- a Codex usage limit: the work waits for the reset -------------------------------------------
 # Only Codex's own error line counts, and only on a failed exit, near the end: a run that merely
@@ -223,23 +447,121 @@ if [ "$ENGINE_KIND" = codex ] && [ "$RC" -ne 0 ]; then
   fi
 fi
 
-# --- a Claude usage limit: a named stop, never a fallback --------------------------------------
+# --- a Claude usage limit: ONCE more on the free API credit, then the named stop ------------------
 # Only a SHORT run counts (a real answer that discusses limits runs to paragraphs), and only Claude's
 # own wording: "You've hit your weekly limit · resets Oct 30 at 9am (America/New_York)", "5-hour limit
 # reached ∙ resets 3pm", "Claude AI usage limit reached|1759071600". The same list as boss-os
 # scripts/lib/seat-usage-limit.mjs.
+claude_limit() { # stdin: a run's output -> rc 0, and the notice on one line, when it IS Claude's limit notice
+  local t
+  t="$(tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
+  [ "${#t}" -le 600 ] && printf '%s' "$t" |
+    grep -qiE "(hit|reached) your ([a-z0-9-]+ ){0,2}limit|(5-hour|five-hour|weekly|session|daily|opus) (usage )?limit (reached|hit)|usage limit reached" &&
+    printf '%s' "$t"
+}
+# ONE run of the same prompt on the vault's key, started again from the top. No loop and no second try:
+# this is called once, below. rc 0: $CREDIT_DIR/answer holds a real answer (never empty). Otherwise
+# CREDIT (a short code for the usage log) and CREDIT_WHY (one plain line) say why it did not run.
+# The key never passes through this process: vault:run puts it in the environment of the credit child
+# (the top of this file), which is the only thing that starts `claude` with it.
+credit_run() {
+  local repo="${AI_RUN_VAULT_REPO:-$HOME/GitHub/boss-os}" dir="$PWD" path0="$PATH" raw=0 npm node keep a gate crc
+  local fmt=(--output-format stream-json --verbose)
+  CREDIT="" CREDIT_WHY="" CREDIT_COST=unknown CREDIT_SRC=unknown CREDIT_RAN=""
+  npm="$(command -v npm || echo /opt/homebrew/bin/npm)"
+  node="$(command -v node || echo /opt/homebrew/bin/node)"
+  if [ ! -d "$repo" ] || [ ! -x "$npm" ] || [ ! -x "$node" ]; then
+    CREDIT=VAULT_UNREADABLE; CREDIT_WHY="the Boss OS vault cannot be run on this machine (it needs $repo, npm and node)."; return 1
+  fi
+  CREDIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-run-credit.XXXXXX")" ||
+    { CREDIT_DIR=""; CREDIT=VAULT_UNREADABLE; CREDIT_WHY="no private directory could be made for the run."; return 1; }
+  # A job that set its own --output-format gets Claude's output back in that format, untouched. Any other
+  # run is asked for its event stream (the only place the cost is) and handed the answer text, as -p prints it.
+  for a in "${CMD[@]}"; do case "$a" in --output-format|--output-format=*) fmt=(); raw=1 ;; esac; done
+  keep="$(compgen -e | tr '\n' ':')"   # NAMES only: what the credit child may keep from vault:run's environment
+  T0=$SECONDS   # the credit run's own time in the usage log, and its own time cap
+  trap forward TERM INT HUP
+  printf '%s' "$PROMPT" | ( cd "$repo" && PATH="$(dirname "$npm"):$(dirname "$node"):$PATH" exec "$npm" run -s vault:run -- \
+      "$SELF" --credit-child "$CREDIT_DIR" "$keep" "$path0" "$dir" "$node" "$raw" "$LIVE" -- "${CMD[@]}" ${fmt[@]+"${fmt[@]}"} ) > "$CREDIT_DIR/vault.out" 2>&1 &
+  CHILD=$!; wait_child   # $! is npm itself (exec), the last in the pipe
+  [ "$(cat "$CREDIT_DIR/state" 2>/dev/null)" != started ] || CREDIT_RAN=1   # claude started on the key: from here the run may have cost something
+  [ -z "$CAPPED" ] || { CREDIT=TIME_CAP; CREDIT_WHY="the run on the key was stopped at its $MAX_SECS-second cap (AI_RUN_MAX_SECS)."; return 1; }
+  case "$(cat "$CREDIT_DIR/state" 2>/dev/null)" in
+    started) ;;
+    nokey) CREDIT=NO_KEY; CREDIT_WHY="the Boss OS vault holds no ANTHROPIC_API_KEY."; return 1 ;;
+    nocwd) CREDIT=NO_ANSWER; CREDIT_WHY="the run's directory $dir could not be entered."; return 1 ;;
+    *) gate="$(grep -m1 'VAULT GATE:' "$CREDIT_DIR/vault.out" 2>/dev/null | cut -c1-160)"
+       CREDIT=VAULT_UNREADABLE; CREDIT_WHY="the Boss OS vault did not open (vault:run exit $RC${gate:+: $gate})."; return 1 ;;
+  esac
+  crc="$(cat "$CREDIT_DIR/rc" 2>/dev/null)"
+  meta() { sed -n "s/^$1=//p" "$CREDIT_DIR/meta" 2>/dev/null | head -1; }
+  if [ ! -s "$CREDIT_DIR/meta" ]; then
+    CREDIT=NO_ANSWER; CREDIT_WHY="the run on the key was stopped before it answered (exit ${crc:-unknown})."; return 1
+  fi
+  CREDIT_COST="$(meta cost)"; CREDIT_SRC="$(meta key_source)"
+  case "$(meta kind)" in
+    ok) ;;
+    refused) CREDIT=REFUSED; CREDIT_WHY="Claude on the key said: $(meta why)"; return 1 ;;   # credit used up, a refused key or org, no network: its own words
+    empty) CREDIT=NO_ANSWER; CREDIT_WHY="Claude on the key handed back an empty answer."; return 1 ;;
+    *) CREDIT=NO_ANSWER; CREDIT_WHY="Claude on the key gave no answer (exit ${crc:-unknown}): $(meta why)"; return 1 ;;
+  esac
+  [ "$crc" = 0 ] || { CREDIT=NO_ANSWER; CREDIT_WHY="Claude on the key answered but ended with exit ${crc:-unknown}, so its answer is not used."; return 1; }
+  if [ "$raw" -eq 0 ] && claude_limit < "$CREDIT_DIR/answer" > /dev/null; then
+    CREDIT=LIMIT; CREDIT_WHY="the run on the key reported a limit of its own: $(meta why)"; return 1
+  fi
+  grep -q '[^[:space:]]' "$CREDIT_DIR/answer" 2>/dev/null ||
+    { CREDIT=NO_ANSWER; CREDIT_WHY="the run on the key handed back an empty answer."; return 1; }
+  CREDIT=ok
+}
+
 if [ "$ENGINE_KIND" = claude ]; then
-  NEW_OUT="$(tail -c +"$((START_BYTES + 1))" "$DEST")"
-  TRIMMED="$(printf '%s' "$NEW_OUT" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
-  if [ "${#TRIMMED}" -le 600 ] && printf '%s' "$TRIMMED" |
-      grep -qiE "(hit|reached) your ([a-z0-9-]+ ){0,2}limit|(5-hour|five-hour|weekly|session|daily|opus) (usage )?limit (reached|hit)|usage limit reached"; then
+  LIMITED=0 TRIMMED="" RESET=""
+  if [ "$TEST_LIMITED" -eq 1 ]; then
+    LIMITED=1; RESET="unknown (test-only switch: the plan was not asked)"
+  elif [ "$CREDIT_NOW" -eq 1 ]; then
+    LIMITED=1; RESET="n/a (talk: the plan was not asked)"
+  elif TRIMMED="$(tail -c +"$((START_BYTES + 1))" "$DEST" | claude_limit)"; then
+    LIMITED=1
     RESET="$(printf '%s' "$TRIMMED" | grep -oiE 'resets? (at |in )?[^|]{1,60}' | head -1 | sed -E 's/^[Rr]esets? (at )?//; s/[[:space:]]+$//')"
     if [ -z "$RESET" ]; then
       EPOCH="$(printf '%s' "$TRIMMED" | grep -oE '\|[[:space:]]*[0-9]{10}' | grep -oE '[0-9]{10}' | head -1)"
       [ -n "$EPOCH" ] && RESET="$(date -r "$EPOCH" '+%b %-d at %-I:%M%p %Z' 2>/dev/null || date -d "@$EPOCH" '+%b %-d at %-I:%M%p %Z' 2>/dev/null)"
     fi
-    stop 76 CLAUDE_LIMIT "resets ${RESET:-unknown (Claude gave no reset time: $(printf '%s' "$TRIMMED" | cut -c1-160))} — the work waits for the reset; no Codex or free fallback."
   fi
+  if [ "$LIMITED" -eq 1 ]; then
+    WAITS="resets ${RESET:-unknown (Claude gave no reset time: $(printf '%s' "$TRIMMED" | cut -c1-160))} — the work waits for the reset; no Codex or free fallback."
+    if [ -n "${AI_RUN_NO_CREDIT:-}" ]; then   # the job needs her claude.ai sign-in, which a key does not carry
+      [ -n "$OUT" ] || cat "$DEST"
+      stop 76 CLAUDE_LIMIT "$WAITS"
+    fi
+    [ "$CREDIT_NOW" -eq 1 ] || log_line "$RC" "$([ "$TEST_LIMITED" -eq 1 ] && echo TEST_PLAN_LIMITED_TO_CREDIT || echo CLAUDE_LIMIT_TO_CREDIT)"
+    ENGINE=claude-credit
+    if credit_run; then
+      # The answer IS the job's output. The plan's notice goes: the caller's own limit check would read it
+      # as a limit. In --out it is cut only while the file still ends with exactly what this run's plan
+      # try wrote; if anything else has been added since, nothing is cut and the answer is appended.
+      if [ -n "$OUT" ]; then
+        [ "$(wc -c < "$OUT" | tr -d ' ')" = "$END_BYTES" ] && dd if=/dev/null of="$OUT" bs=1 seek="$START_BYTES" 2>/dev/null
+        cat "$CREDIT_DIR/answer" >> "$OUT"
+      else
+        cat "$CREDIT_DIR/answer"
+      fi
+      LOG_EXTRA="$(printf 'cost_usd=%s\tkey_source=%s\tprompt=restarted' "$CREDIT_COST" "$CREDIT_SRC")"
+      log_line 0
+      exit 0
+    fi
+    # A run that started on the key may have spent some of the credit: its cost goes in the record too, as
+    # the number Claude reported or "unknown" (a stopped run reports none), never as nothing.
+    LOG_EXTRA="credit=$CREDIT"
+    [ -z "$CREDIT_RAN" ] || LOG_EXTRA="$(printf 'credit=%s\tcost_usd=%s' "$CREDIT" "$CREDIT_COST")"
+    [ "$CREDIT_NOW" -eq 0 ] || stop 76 CREDIT_STOP "the free API credit did not answer: $CREDIT_WHY"
+    [ -n "$OUT" ] || cat "$DEST"
+    NOTE="The free API credit was tried once and did not run: $CREDIT_WHY"
+    echo "$NOTE"
+    [ -n "$OUT" ] && echo "$NOTE" >> "$OUT"
+    stop 76 CLAUDE_LIMIT "$WAITS"
+  fi
+  [ -n "$OUT" ] || cat "$DEST"
 fi
 
 log_line "$RC"

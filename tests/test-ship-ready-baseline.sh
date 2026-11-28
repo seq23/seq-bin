@@ -116,4 +116,7 @@ d="$W/webapp-nosignin"; mkdir -p "$d"; echo '{ "kind": "web-app", "serve": "x", 
 { [ "$rc" = 2 ] && grep -q 'web-app needs sign_in' "$d/log"; } && ok "a web-app with no sign_in is a named stop (exit 2)" || bad "web-app no sign_in (rc $rc)"
 d="$W/badcfg"; mkdir -p "$d"; echo '{ "kind": "poster" }' > "$d/ship-ready.json"
 rc=$(judge "$d"); { [ "$rc" = 2 ] && grep -q 'SHIP_READY_CONFIG' "$d/log"; } && ok "a bad config is a named stop (exit 2)" || bad "bad config (rc $rc)"
+# Every upload in the shared workflows sets retention-days, or the 90-day default fills the free Actions storage (27 Nov 2026).
+up=$(grep -c 'uses: actions/upload-artifact' .github/workflows/*.yml | awk -F: '{s+=$2} END{print s+0}'); ret=$(grep -A8 'uses: actions/upload-artifact' .github/workflows/*.yml | grep -c 'retention-days: [1-9]')
+{ [ "$up" -ge 1 ] && [ "$ret" = "$up" ]; } && ok "every artifact upload ($up) expires within days, not the 90-day default" || bad "uploads $up, with retention-days $ret"
 [ "$fails" = 0 ] && echo "test-ship-ready-baseline: every automatic fail is caught and a clean page passes" || exit 1

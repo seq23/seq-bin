@@ -1,0 +1,165 @@
+{
+  "_what": "skill-check's asks: for each of the most-used skills in ~/.claude/skills, 3 real-style asks that must load it (\"expect\": any one of these loading is right; a second name is there only when both skills fit the ask) and 1 ask that must NOT load it (\"not\"). Written 27 Nov 2026 from her past messages, rephrased, with no private data: every repo is public. A skill in the weekly top 20 with no entry here is reported as NOT COVERED.",
+  "skills": {
+    "ship-ready": {
+      "asks": [
+        { "ask": "the keepmyproof pricing page looks off on my phone, make it calm and check it before it goes live", "expect": ["ship-ready"] },
+        { "ask": "do a hostile review of the new porch and party booking confirmation email before it ships", "expect": ["ship-ready"] },
+        { "ask": "run a search readiness check on approvalprep.com, the seo aeo geo stuff too", "expect": ["ship-ready"] }
+      ],
+      "not": "how many open PRs does seq-bin have right now?"
+    },
+    "repo-conventions": {
+      "asks": [
+        { "ask": "add a D1 migration to boss os that adds a notes column to the sponsors table", "expect": ["repo-conventions"] },
+        { "ask": "schedule a launchd job for mondays at 6am central that runs the backup script", "expect": ["repo-conventions", "new-job"] },
+        { "ask": "update the spry brain with this week's KDP royalty number", "expect": ["repo-conventions"] }
+      ],
+      "not": "rename the variable totalCount to rowCount in this one function"
+    },
+    "rule-zero-shapes": {
+      "asks": [
+        { "ask": "this validator passed even though it looked at zero files, make it impossible for that to happen again", "expect": ["rule-zero-shapes", "fix-and-report"] },
+        { "ask": "the nightly sweep says done but it wrote nothing, how should the script prove it actually ran", "expect": ["rule-zero-shapes", "new-job"] },
+        { "ask": "write a --self-test for the brains validator so it proves it catches broken input", "expect": ["rule-zero-shapes"] }
+      ],
+      "not": "change the button color on the dream wedding builder to the brand gold"
+    },
+    "design-every-tongue": {
+      "asks": [
+        { "ask": "redo the psalm nights cover art in peace be still, it looks too stock", "expect": ["design-every-tongue"] },
+        { "ask": "the morning word screen in pbs feels loud, make the type calmer", "expect": ["design-every-tongue"] },
+        { "ask": "draft the app store screenshots for peace be still", "expect": ["design-every-tongue"] }
+      ],
+      "not": "make the a player mode onboarding screen calmer"
+    },
+    "porch-and-party-ops": {
+      "asks": [
+        { "ask": "on the porch and party site the price my porch area should say from $350 not from $450", "expect": ["porch-and-party-ops"] },
+        { "ask": "send the p&p invoice for saturday's hotel room setup booking", "expect": ["porch-and-party-ops"] },
+        { "ask": "post a new marketplace listing for the p&p balloon garland package", "expect": ["porch-and-party-ops"] }
+      ],
+      "not": "draft a sponsor pitch email for the west peek rooms event"
+    },
+    "search-loop": {
+      "asks": [
+        { "ask": "turn the search loop on for the keepmyproof site", "expect": ["search-loop"] },
+        { "ask": "why did the search loop stop with NO_FREE_MODEL last night", "expect": ["search-loop", "fix-and-report"] },
+        { "ask": "throttle the question pages on approvalprep to 2 a week", "expect": ["search-loop"] }
+      ],
+      "not": "what's the keyword difficulty for porch decorating ideas"
+    },
+    "fix-and-report": {
+      "asks": [
+        { "ask": "the ci sweep says main is red on how-we-know, fix it", "expect": ["fix-and-report"] },
+        { "ask": "there's a dead link on the dream wedding checklist page", "expect": ["fix-and-report"] },
+        { "ask": "one of yesterday's outreach emails bounced, deal with it", "expect": ["fix-and-report"] }
+      ],
+      "not": "what's in flight"
+    },
+    "design-a-player-mode": {
+      "asks": [
+        { "ask": "the millionaire one should be the lead screenshot for aplayermode, redo the store screenshots", "expect": ["design-a-player-mode"] },
+        { "ask": "make a pin for a player mode about morning routines", "expect": ["design-a-player-mode"] },
+        { "ask": "redesign the aplayermode.com homepage hero", "expect": ["design-a-player-mode"] }
+      ],
+      "not": "redesign the keepmyproof homepage hero"
+    },
+    "design-dream-wedding": {
+      "asks": [
+        { "ask": "the wedding checklist pdf landing page needs a calmer layout", "expect": ["design-dream-wedding"] },
+        { "ask": "make a pinterest pin for the dream wedding budget tool", "expect": ["design-dream-wedding"] },
+        { "ask": "the email popup on weddingchecklistpdf.com looks cheap, fix the design", "expect": ["design-dream-wedding"] }
+      ],
+      "not": "redesign the approvalprep pricing page"
+    },
+    "private-data-routing": {
+      "asks": [
+        { "ask": "add gemini as a fallback model in the west peek os router", "expect": ["private-data-routing"] },
+        { "ask": "the deck summarizer should mask LP names before any free model sees them", "expect": ["private-data-routing"] },
+        { "ask": "time 2 read wants to send the kids' stories to a new model for feedback, set that up", "expect": ["private-data-routing"] }
+      ],
+      "not": "fix the typo in the spry.vc footer"
+    },
+    "design-approvalprep": {
+      "asks": [
+        { "ask": "redo the approvalprep kdp cover so it looks less templated", "expect": ["design-approvalprep"] },
+        { "ask": "make the approvalprep app's checklist screen look cleaner", "expect": ["design-approvalprep"] },
+        { "ask": "design three pins for approvalprep", "expect": ["design-approvalprep"] }
+      ],
+      "not": "design three pins for dream wedding"
+    },
+    "new-job": {
+      "asks": [
+        { "ask": "add a weekly job that emails me the KDP sales every monday", "expect": ["new-job"] },
+        { "ask": "add a worker cron to boss os that refreshes the sponsor list every night", "expect": ["new-job"] },
+        { "ask": "change the ci sweep so it also runs on tuesdays", "expect": ["new-job", "repo-conventions"] }
+      ],
+      "not": "fix the css on the join west peek form"
+    },
+    "design-keepmyproof": {
+      "asks": [
+        { "ask": "screenshot #1 for keepmyproof workplace problems should say something about HR keeping incidents, rework it", "expect": ["design-keepmyproof"] },
+        { "ask": "the kmp onboarding screen feels busy, calm it down", "expect": ["design-keepmyproof"] },
+        { "ask": "make the keepmyproof.com pricing page match the brand", "expect": ["design-keepmyproof"] }
+      ],
+      "not": "redo the whisper almanac thumbnail for the rain video"
+    },
+    "brand-pitch": {
+      "asks": [
+        { "ask": "a brand replied asking for our sponsor deck for the TLC rooms, handle it", "expect": ["brand-pitch"] },
+        { "ask": "one of the brands said unsubscribe, make sure we never email them again", "expect": ["brand-pitch"] },
+        { "ask": "update the run of show for the next west peek rooms event", "expect": ["brand-pitch"] }
+      ],
+      "not": "write a cold email to a seller about their secondaries position"
+    },
+    "living-map": {
+      "asks": [
+        { "ask": "the schedule page in boss os is missing some jobs, make it so it can't drift from the plists", "expect": ["living-map"] },
+        { "ask": "make a page that lists every email boss os sends", "expect": ["living-map"] },
+        { "ask": "i added a new sender, add it to the email map", "expect": ["living-map", "new-job"] }
+      ],
+      "not": "what's on my calendar tomorrow"
+    },
+    "in-flight-report": {
+      "asks": [
+        { "ask": "whats running right now", "expect": ["in-flight-report"] },
+        { "ask": "where are we with everything", "expect": ["in-flight-report"] },
+        { "ask": "whats still left before it all lands", "expect": ["in-flight-report"] }
+      ],
+      "not": "explain how land-after works"
+    },
+    "agent-brief": {
+      "asks": [
+        { "ask": "write the brief for a builder to add dark mode to the keepmyproof app", "expect": ["agent-brief"] },
+        { "ask": "launch an agent to fix the failing p-n-p tests", "expect": ["agent-brief"] },
+        { "ask": "hand codex the build for the new search loop throttle", "expect": ["agent-brief"] }
+      ],
+      "not": "what's still running?"
+    },
+    "handoff": {
+      "asks": [
+        { "ask": "update the handoff", "expect": ["handoff"] },
+        { "ask": "im about to start a new session, clean up the handoff and the task sheets", "expect": ["handoff"] },
+        { "ask": "carefully put together a handoff, im starting a new week", "expect": ["handoff"] }
+      ],
+      "not": "what's still running?"
+    },
+    "outreach-voice": {
+      "asks": [
+        { "ask": "draft a first email to a family office about the fund", "expect": ["outreach-voice"] },
+        { "ask": "write follow up #2 for the sellers who didnt reply", "expect": ["outreach-voice"] },
+        { "ask": "draft the email to the dental office about partnering on the guide", "expect": ["outreach-voice"] }
+      ],
+      "not": "write a caption for an instagram post about porch decor"
+    },
+    "design-whisper-almanac": {
+      "asks": [
+        { "ask": "make a thumbnail for the new whisper almanac rain video", "expect": ["design-whisper-almanac"] },
+        { "ask": "rewrite the title and description for the latest whisper almanac upload", "expect": ["design-whisper-almanac"] },
+        { "ask": "the whisper almanac channel art looks dated, redo it", "expect": ["design-whisper-almanac"] }
+      ],
+      "not": "pick the music for the porch and party reel"
+    }
+  }
+}

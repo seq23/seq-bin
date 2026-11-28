@@ -445,7 +445,7 @@ PROMPT
   printf '%s\n' "$PENDING" | awk -F'\t' '{print $1}' >> "$TAILED_FILE"
   printf '%s\n' "$PENDING" | awk -F'\t' '{print $1}' > "$FIXLOCK/ids"   # un-tailed again if Codex has to wait
 
-  nohup "$HOME_DIR/bin/scooter-watch-run-fix.sh" "$PROMPT_FILE" "$TAIL_LOG" "$FIXLOCK" "$AI_RUN" "$REPORT_FILE" "$SUBJECT_LINE" \
+  SCOOTER_WATCH_FIX_CAP="$FIX_CAP_SECONDS" nohup "$HOME_DIR/bin/scooter-watch-run-fix.sh" "$PROMPT_FILE" "$TAIL_LOG" "$FIXLOCK" "$AI_RUN" "$REPORT_FILE" "$SUBJECT_LINE" \
     </dev/null >/dev/null 2>&1 &
   AGENT_PID=$!
   echo "$AGENT_PID" > "$FIXLOCK/pid"

@@ -47,13 +47,15 @@ $(cat "$REAL/list.txt" 2>/dev/null || echo "REAL WORK ON THIS MAC: none could be
 # A Claude usage limit never ends the day's run (her word 13 Nov 2026: "not get stopped b/c of usage
 # again"): a limit on the first model moves straight to the next model, and a limit on both waits an
 # hour and starts over, until 9 pm. Only Claude can drive her Chrome, so the ladder is Claude's models.
+# AI_RUN_NO_CREDIT=1: the free API credit is never tried here. A run on a key has no claude.ai sign-in,
+# so no Claude in Chrome; it would spend the credit on a session that cannot reach Marketplace.
 LIMIT_RE='usage limit|limit reached|hit your [a-z ]*limit|out of (extra )?usage|rate.?limit|overloaded'
 WAIT=${LISTINGS_LIMIT_WAIT:-3600}
 last=""; model=opus; try=0; plain=0
 while :; do
   try=$((try + 1))
   mark=$(wc -l < "$LOG" 2>/dev/null || echo 0)
-  printf "%s" "$PROMPT" | AI_RUN_CLAUDE_MODEL=$model AI_RUN_CLAUDE_ARGS='--chrome --allowedTools=mcp__claude-in-chrome__*' \
+  printf "%s" "$PROMPT" | AI_RUN_NO_CREDIT=1 AI_RUN_CLAUDE_MODEL=$model AI_RUN_CLAUDE_ARGS='--chrome --allowedTools=mcp__claude-in-chrome__*' \
     ~/bin/ai-run --role brain --cwd ~ --out "$LOG" > /dev/null 2>&1
   new=$(tail -n +$((mark + 1)) "$LOG")
   last=$(printf "%s\n" "$new" | grep -E "^(RESULT|STOP):" | tail -1)

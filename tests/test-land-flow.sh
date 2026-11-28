@@ -36,17 +36,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LAND="${LAND_UNDER_TEST:-$HERE/../land}"
 [ -f "$LAND" ] || { echo "FAIL: no land at $LAND"; exit 1; }
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
-# her bypass writes ENG-CHECK DUE into HANDOFF: never her real ~/HANDOFF.md from a test (case 21 points it elsewhere)
-export LAND_HANDOFF="$W/HANDOFF.md"
+# land writes its post-land-check lines into a list (27 Nov 2026: ~/Work/tasks/post-land-checks.md, no longer
+# HANDOFF's Today): never her real list from a test (case 21 points it elsewhere)
+export LAND_DUE_FILE="$W/post-land-checks.md"
 # land reads live-repos.json beside itself (LAND_DIR = $W, where its fixture copy runs): o/r has launched, so its
 # PRs land on green CI unless a case makes them review-class.
 printf '{"live": ["o/r", "seq23/boss-os"]}\n' > "$W/live-repos.json"
+cp "$HERE/../pr-body-template.md" "$W/"   # the ONE template beside land (same LAND_DIR): every "add:" line land prints comes from it
 FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 # The build-first shape (staging on every land, a named e2e workflow, promote.yml on a green e2e)
 # has no live repo since both creator dashboards retired (3 Nov 2026), so these cases run against a
 # copy of land carrying one fixture route of exactly that shape, inserted before the catch-all.
 FIXTURE_ROUTE='  build-first-fixture) DEPLOY="npm run deploy:production" ; SELF="" ; STAGING="npm run deploy:staging" ; E2E_WF="e2e" ; SMOKE="https://build-first-fixture.invalid/healthz" ;;'
-awk -v r="$FIXTURE_ROUTE" '/^  \*\) die "\$NAME has no deploy route recorded/ && !done { print r; done=1 } { print }' "$LAND" > "$W/land-with-fixture"
+awk -v r="$FIXTURE_ROUTE" '/^  \*\) .*die "\$NAME has no deploy route recorded/ && !done { print r; done=1 } { print }' "$LAND" > "$W/land-with-fixture"
+grep -q "$(head -1 <<<"$FIXTURE_ROUTE" | cut -c1-12)" "$W/land-with-fixture" || { echo "FAIL: the fixture route was not put into land's routes case"; exit 1; }
 grep -q '^  build-first-fixture)' "$W/land-with-fixture" || { echo "FAIL: could not add the build-first fixture route"; exit 1; }
 LAND="$W/land-with-fixture"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -221,9 +224,12 @@ fixture() {
   git -C "$W/pusher" commit -qm "the PR"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
   git -C "$W/pusher" push -q origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
 }
+export LAND_STOPS_DIR="$W/stops"   # land's record of each PR's last stop ("tried before"), kept inside the test
 run_land() { # name [flags...] -> sets OUT, RC
   local name="$1"; shift
+  [ -n "${KEEP_STOPS:-}" ] || LAND_STOPS_DIR="$(mktemp -d "$W/stops.XXXXXX")"   # a fresh PR history per scenario, unless it tests "tried before"
   OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 PAGES_APPEAR_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" 7 "$@" 2>&1)"; RC=$?
+  printf '%s\n\0' "$OUT" >> "$W/every-out"   # every stop of every run is read for its three parts at the end
   [ -z "${LAND_TEST_SHOW:-}" ] || printf '%s\n' "$OUT" | sed 's/^/    | /'   # LAND_TEST_SHOW=1: print what land said
 }
 npm_log() { cat "$FAKE/npm-log" 2>/dev/null || true; }
@@ -235,11 +241,12 @@ SMALL_REASON="small change: 12 lines, 1 files; shipped on the fast check, e2e on
 run_promote() { # name [flags...] -> sets OUT, RC   (LAND_WAIT_FLOOR_SECS from the caller, default 360)
   local name="$1"; shift
   OUT="$(cd "$W/$name" && PATH="$BIN:$PATH" LAND_RETRY_SECS=0 LAND_PROMOTE_APPEAR_SECS=5 bash "$LAND" --promote "$@" 2>&1)"; RC=$?
+  printf '%s\n\0' "$OUT" >> "$W/every-out"
 }
 fails=0; passes=0
 check() { # label, command...
   local label="$1"; shift
-  if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${LAND_TEST_DEBUG:-}" ] || { printf "%s\n" "$OUT" | tail -25 | sed "s/^/    | /"; grep -n "DUE" "$LAND_HANDOFF" | sed "s/^/    H /"; }; fi
+  if "$@"; then echo "  ok   $label"; passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${LAND_TEST_DEBUG:-}" ] || { printf "%s\n" "$OUT" | tail -25 | sed "s/^/    | /"; grep -n "DUE" "$LAND_DUE_FILE" | sed "s/^/    H /"; }; fi
 }
 has() { grep -qF -- "$1" <<<"$OUT"; }
 merge_called() { grep -q '^pr merge' "$FAKE/calls"; }
@@ -342,13 +349,16 @@ echo "{\"files\":[{\"path\":\"src/client/boss/pages/Updates.tsx\"}],\"labels\":[
 run_land approvalprep
 check "item 4: a fresh reviewer's PASS whose own line says rendered: needs no Clicked through line: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called && has "rendered by the reviewer: "'
 
-echo "=== 1f. the review class is written and sticky, and new until launched (eng check of #155, 23 Nov 2026) ==="
+echo "=== 1f. the review class: her final list (27 Nov 2026), written or read from the paths, and sticky ==="
 code_pr() { # body [extra jq] -> a code PR in o/r with no PASS line, labels []
   jq -nc --arg b "$1" '{files: [{path: "worker/x.ts"}], labels: [], body: $b, comments: []}' | jq -c "${2:-.}" > "$FAKE/pr-meta"
 }
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.$(printf "$MP")"
 run_land approvalprep
-check "safety: a code PR with labels [] and no Review class line is refused (rc 1, not merged), saying what to add" eval '[ "$RC" -eq 1 ] && has "no \`Review class:\` line" && has "Review class: none — <why>" && ! merge_called'
+check "her list (27 Nov 2026): a code PR with labels [] and NO Review class line, on no class path in a repo with no data store, is read as none from its paths: lands with no PASS (rc 0, merged), no reviewer asked" eval '[ "$RC" -eq 0 ] && merge_called && ! has "needs a review" && ! has "REVIEW_CLASS_UNDECLARED"'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the charge.$(printf "$MP")" '.files = [{path: "src/billing/charge.ts"}]'
+run_land approvalprep
+check "safety: no Review class line on a payments path is NEVER read as none: NAMED STOP [REVIEW_CLASS_UNDECLARED] (rc 1, not merged), naming the path and the line to add" eval '[ "$RC" -eq 1 ] && has "STOPPED: NAMED STOP [REVIEW_CLASS_UNDECLARED]" && has "no \`Review class:\` line" && has "money (src/billing/charge.ts)" && has "add: Review class: none — <why this is in no review class, 3+ words>" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes the sync.
 Review class: none — log wording only$(printf "$MP")"
 run_land approvalprep
@@ -358,9 +368,9 @@ Review class: money — changes how payouts are sent$(printf "$MP")"
 run_land approvalprep
 check "safety: 'Review class: money' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "Review class: money" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Fixes it.
-Review class: none — <why>$(printf "$MP")"
+Review class: none — <why>$(printf "$MP")" '.files = [{path: "src/billing/charge.ts"}]'
 run_land approvalprep
-check "abuse: a placeholder none is no reason: refused, not merged" eval '[ "$RC" -eq 1 ] && has "gives no reason" && ! merge_called'
+check "abuse: a placeholder none is no reason, so on a payments path it is no line at all: refused, not merged" eval '[ "$RC" -eq 1 ] && has "gives no reason" && has "[REVIEW_CLASS_UNDECLARED]" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.labels = [{name: "bug"}]'
 echo '["review-required","bug"]' > "$FAKE/label-events"
 run_land approvalprep
@@ -370,17 +380,34 @@ run_land approvalprep
 check "outage: the label history unread: exit 75 'could not verify', not merged" eval '[ "$RC" -eq 75 ] && has "label history" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
 run_land approvalprep
-check "new until launched: a code-only PR in a repo not on live-repos.json is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "o/brand-new has not launched" && ! merge_called'
+check "her list (27 Nov 2026): a code-only PR in a repo NOT on live-repos.json is no class by that alone: lands on green CI with no reviewer PASS (rc 0, merged), and nothing is added to the list" eval '[ "$RC" -eq 0 ] && merge_called && ! has "has not launched" && ! has "needs a review" && [ ! -f "$FAKE/live-put" ]'
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "The first site.
+Review class: launch — the first public launch of this site$(printf "$MP")" '.url = "https://github.com/o/brand-new/pull/7"'
+run_land approvalprep
+check "…its ONE launch review still stands: 'Review class: launch' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "STOPPED: NAMED STOP [REVIEW_PASS_MISSING]" && has "it says Review class: launch" && ! merge_called'
+for cls in private-data delete store outreach; do
+  fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; code_pr "Does the thing.
+Review class: $cls — the brief put it in this class$(printf "$MP")"
+  run_land approvalprep
+  check "safety: 'Review class: $cls' with no PASS is refused (rc 1, not merged)" eval '[ "$RC" -eq 1 ] && has "it says Review class: $cls" && has "add: Ship-ready: PASS — " && ! merge_called'
+done
+fixture approvalprep fast; : > "$FAKE/same-tree"; : > "$FAKE/no-class"; : > "$FAKE/no-outcome"; : > "$FAKE/no-notbuilt"; code_pr "Fixes the sync." '.files = [{path: "src/billing/charge.ts"}]'
+run_land approvalprep
+check "ONE pass (27 Nov 2026): a description lacking four lines is told ALL four in one run, each with its line, then stopped ONCE, not merged" eval '[ "$RC" -eq 1 ] && has "4 problem(s) to fix" && has "1. [REVIEW_CLASS_UNDECLARED]" && has "2. [MUTATION_PROOF_MISSING]" && has "3. [OUTCOME_UNDECLARED]" && has "4. [NOT_BUILT_UNDECLARED]" && has "add: ## Mutation proof" && has "add: Outcome: none — <" && has "add: ## Not built" && [ "$(grep -c "STOPPED:" <<<"$OUT")" -eq 1 ] && has "And 3 more (MUTATION_PROOF_MISSING, OUTCOME_UNDECLARED, NOT_BUILT_UNDECLARED)" && ! merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")" '.url = "https://github.com/O/R/pull/7"'
 run_land approvalprep
 check "promise: a listed repo is not slowed, whatever GitHub's case (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called'
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"
 cp "$W/live-repos.json" "$W/live-repos.keep"; echo '{"live": [' > "$W/live-repos.json"
 run_land approvalprep
-check "outage: live-repos.json unreadable: NAMED STOP [LIVE_REPOS_UNREAD], refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+check "live-repos.json unreadable no longer holds a PR that is in no class (the list decides no review since 27 Nov 2026): rc 0, merged, nothing written to the list" eval '[ "$RC" -eq 0 ] && merge_called && ! has "LIVE_REPOS_UNREAD" && [ ! -f "$FAKE/live-put" ]'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Lists my repo.$(printf "$MP")" '.files = [{path: "live-repos.json"}]'
+run_land approvalprep
+check "…while a PR that CHANGES the list is still refused with the list unreadable (fail closed), not merged" eval '[ "$RC" -eq 1 ] && has "changes live-repos.json" && ! merge_called'
+fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"
 rm -f "$W/live-repos.json"
 run_land approvalprep
-check "outage: live-repos.json missing: the same named stop, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [LIVE_REPOS_UNREAD]" && ! merge_called'
+check "live-repos.json missing: the same, a PR in no class lands (rc 0, merged)" eval '[ "$RC" -eq 0 ] && merge_called && ! has "LIVE_REPOS_UNREAD"'
 mv "$W/live-repos.keep" "$W/live-repos.json"
 fixture approvalprep fast; : > "$FAKE/same-tree"; code_pr "Fixes the sync.$(printf "$MP")"; : > "$FAKE/no-url"
 run_land approvalprep
@@ -503,6 +530,22 @@ echo ',{"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/run
 LAND_PENDING_WAIT=2 run_land approvalprep   # bounded: a land that ignored the failure would wait, then stop as pending
 check "a failure beside a pending check stops at once: rc 1, not green — lint: fail" eval '[ "$RC" -eq 1 ] && has "lint: fail"'
 check "…after one read, no waiting" [ "$(grep -c '^pr checks' "$FAKE/calls")" -eq 1 ]
+check "…it says a test failed (not 'never ran') and points at that check's own run" eval 'has "lint: fail (a test failed)" && has "where to look: https://github.com/o/r/actions/runs/555/job/2"'
+check "…and names what was expected" eval 'has "expected:      every check on PR #7 to run on its head and pass"'
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+echo ',{"name":"e2e","bucket":"cancel","link":"https://github.com/o/r/actions/runs/556/job/3"}' > "$FAKE/pending-also"
+LAND_PENDING_WAIT=2 run_land approvalprep
+check "a CANCELLED check is told apart from a failed test: 'never ran to the end, so no test result exists'" eval '[ "$RC" -eq 1 ] && has "e2e: cancel (the check never ran to the end, so no test result exists)" && ! has "(a test failed)"'
+echo "=== tried before (her yes 25 Nov 2026): a second stop of the same PR says what the first one was ==="
+fixture approvalprep; echo forever > "$FAKE/pending-reads"
+echo ',{"name":"lint","bucket":"fail","link":"https://github.com/o/r/actions/runs/555/job/2"}' > "$FAKE/pending-also"
+LAND_PENDING_WAIT=2 run_land approvalprep
+check "a first stop says nothing was tried before" eval '! has "tried before:"'
+KEEP_STOPS=1 LAND_PENDING_WAIT=2 run_land approvalprep
+check "the same stop again says it was tried, that it stopped the SAME way, and to change something first" eval 'has "tried before:" && has "stopped the SAME way" && has "change what is named above first"'
+echo ',{"name":"e2e","bucket":"cancel","link":"https://github.com/o/r/actions/runs/556/job/3"}' > "$FAKE/pending-also"
+KEEP_STOPS=1 LAND_PENDING_WAIT=2 run_land approvalprep
+check "a different stop of the same PR quotes what the last attempt stopped with" eval 'has "tried before:" && has "it stopped with: PR #7 is not green — lint: fail (a test failed)"'
 check "…and nothing was merged" eval '! merge_called'
 
 echo "=== 10f. no checks on a conflicted PR is named a merge conflict (22 Nov 2026, boss-os #539) ==="
@@ -933,7 +976,7 @@ LAND="$BROKEN" run_promote build-first-fixture
 check "the broken land raced the run and deployed (this harness catches it)" [ -f "$FAKE/npm-ran" ]
 check "…without ever watching run 777" eval '! grep -q "^api repos/{owner}/{repo}/actions/runs/777" "$FAKE/calls"'
 
-echo "=== 21. her bypass: ENG-CHECK DUE goes into HANDOFF Today, never a row on her Open Loops list (22 Nov 2026) ==="
+echo "=== 21. her bypass: ENG-CHECK DUE goes into the post-land-check list, never into HANDOFF.md, never a row on her Open Loops list ==="
 # A stub intake stands where Boss OS would be, with a token and the real poster beside land, so a land that
 # posted anything at all would be counted here. Every case below must leave it at zero posts.
 cat > "$W/stub.mjs" <<'JS'
@@ -945,17 +988,20 @@ http.createServer((req, res) => { let b = ""; req.on("data", (d) => (b += d)); r
 }); }).listen(0, "127.0.0.1", function () { fs.writeFileSync(`${dir}/port`, String(this.address().port)); });
 JS
 cp "$HERE/../open-loops.mjs" "$W/"   # the poster beside land: LAND_DIR is $W when land re-runs from its temp copy
-cp "$HERE/../post-land-check" "$W/"   # its read-only gate, which land asks about every Outcome check (same LAND_DIR)
+cp "$HERE/../outcome-read" "$W/"   # the one reader, which land asks about every Outcome check (same LAND_DIR)
 mkdir -p "$W/api"; node "$W/stub.mjs" "$W/api" & STUB=$!
 trap 'kill $STUB 2>/dev/null; rm -rf "$W"' EXIT
 for _ in $(seq 1 50); do [ -s "$W/api/port" ] && break; sleep 0.1; done
 OPEN_LOOPS_URL="http://127.0.0.1:$(cat "$W/api/port")/intake"
 export BOSS_OPEN_LOOPS_TOKEN=olt_test OPEN_LOOPS_URL
 no_posts() { [ ! -s "$W/api/posts.jsonl" ]; }
-# A HANDOFF shaped like hers: PINNED above, a Jobs list and a hand-written line in Today, a session note below.
-mkdir -p "$W/hh"; export LAND_HANDOFF="$W/hh/HANDOFF.md"
+# A home shaped like hers: HANDOFF.md with PINNED above, a Jobs list and a hand-written line in Today, a session
+# note below (land must not touch it), and the list where the real one lives, ~/Work/tasks/post-land-checks.md.
+# Each case starts with no list: land makes it.
+mkdir -p "$W/hh"; HH="$W/hh/HANDOFF.md"; export LAND_DUE_FILE="$W/hh/Work/tasks/post-land-checks.md"
 handoff_fixture() {
-  cat > "$LAND_HANDOFF" <<MD
+  rm -rf "$W/hh/Work"
+  cat > "$HH" <<MD
 # HANDOFF
 ## PINNED
 PINNED-STAYS
@@ -978,37 +1024,47 @@ NOTE-BODY
 AFTER-TODAY-STAYS
 MD
 }
-due_lines() { grep -c '^- ENG-CHECK DUE ' "$LAND_HANDOFF" 2>/dev/null || true; }
-# Today's region only (between the markers), so a line written outside it never counts.
-today_region() { sed -n '/<!-- TODAY:START -->/,/<!-- TODAY:END -->/p' "$LAND_HANDOFF"; }
-handoff_fixture; cp "$LAND_HANDOFF" "$W/hh/before"; fixture approvalprep
+in_list() { local n; n="$(grep -c -- "$1" "$LAND_DUE_FILE" 2>/dev/null)"; echo "${n:-0}"; }   # no list yet is 0 lines
+due_lines() { in_list '^- ENG-CHECK DUE '; }
+due_list() { cat "$LAND_DUE_FILE" 2>/dev/null; }
+today_region() { sed -n '/<!-- TODAY:START -->/,/<!-- TODAY:END -->/p' "$HH"; }
+handoff_fixture; cp "$HH" "$W/hh/before"; fixture approvalprep
 echo '{"files":[{"path":"src/client/boss/pages/Updates.tsx"}],"body":"Adds the page.","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=the important thing is our rules dont allow things to be built cheaply'
 check "a changed screen with no review, under --owner: rc 0, merged" eval '[ "$RC" -eq 0 ] && merge_called'
 check "…her words went on the PR" eval 'jq -r .body "$FAKE/pr-meta" | grep -q "^Owner override: \"the important thing is our rules"'
 check "…NOTHING was posted to Open Loops (stub intake: zero posts)" no_posts
-check "…ONE line, ENG-CHECK DUE <repo>#<pr> <merge sha>, inside Today" eval '[ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed under her bypass "'
-check "…right after the Jobs list, above the hand-written status" eval 'today_region | grep -A1 "^<!-- JOBS:END -->" | tail -1 | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 "'
-check "…every other line of HANDOFF exactly as it was" eval 'diff <(grep -v "^- ENG-CHECK DUE " "$LAND_HANDOFF") "$W/hh/before" >/dev/null'
+check "…ONE line, ENG-CHECK DUE <repo>#<pr> <merge sha>, in the list" eval '[ "$(due_lines)" -eq 1 ] && due_list | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed under her bypass "'
+check "…the list and its folder did not exist: land made them, the line under a heading that says what the list is" eval 'head -1 "$LAND_DUE_FILE" | grep -qx "# Post-land checks" && tail -1 "$LAND_DUE_FILE" | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 " && [ -z "$(ls "$W/hh/Work/tasks" | grep -v "^post-land-checks.md$")" ]'
+check "…HANDOFF.md is not touched: byte for byte as it was" cmp -s "$HH" "$W/hh/before"
 check "…and land prints the line" has "ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA"
-# The real PreCompact hook rewrites Today on every compaction: the line must survive it the same day.
+# post-land-check (the real one) reads the line land just wrote, from the same file: its one batched engineering
+# run is given this PR and merge sha. No verdict comes back from the stub, so the line stays DUE and it exits 1.
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/hh/ai-calls"\n' "$W" > "$W/hh/ai-stub"; chmod +x "$W/hh/ai-stub"
+export PLC_RC=0   # exported: it is read inside the eval of the check below
+PATH="$BIN:$PATH" POST_LAND_DUE_FILE="$LAND_DUE_FILE" POST_LAND_AI_RUN="$W/hh/ai-stub" POST_LAND_LOG="$W/hh/plc.log" POST_LAND_LOCKS="$W/hh/plc-locks" \
+  POST_LAND_NOTIFY=true POST_LAND_NOTICE=true POST_LAND_TASKS="$W/hh/plc-tasks" POST_LAND_SKIP="$W/hh/no-skip" \
+  bash "$HERE/../post-land-check" </dev/null >"$W/hh/plc-out" 2>&1 || PLC_RC=$?
+check "…post-land-check reads land's line from the list: its engineering run names this PR and merge sha" eval 'grep -q -- "- seq23/approvalprep#7 (merge $MERGESHA): landed under her bypass" "$W/hh/ai-calls"'
+check "…with no verdict it exits 1 and the line stays DUE in the list (never DONE on silence)" eval '[ "$PLC_RC" -eq 1 ] && [ "$(due_lines)" -eq 1 ]'
+# The real PreCompact hook rewrites Today on every compaction: the list is not its to rewrite, and Today names it.
 printf '#!/bin/bash\necho "land-after: no open task sheets"\n' > "$W/hh/la-stub"; chmod +x "$W/hh/la-stub"
 echo '{"session_id":"sess-2","trigger":"auto"}' | HOME="$W/hh" LAND_AFTER_BIN="$W/hh/la-stub" HANDOFF_TEST_SUMMARY="## In flight
 - SESS-2-NOTE" bash "$HERE/../handoff-on-compact.sh" >/dev/null 2>&1
-check "…a same-day compaction (the real hook) keeps the line in Today" eval 'grep -q SESS-2-NOTE "$LAND_HANDOFF" && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA "'
+check "…a same-day compaction (the real hook) leaves the line in the list, and Today says 1 DUE and where" eval 'grep -q SESS-2-NOTE "$HH" && [ "$(due_lines)" -eq 1 ] && due_list | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA " && [ "$(today_region | grep -c "^- \*\*Post-land checks\*\*: 1 DUE at .*~/Work/tasks/post-land-checks.md")" -eq 1 ] && ! grep -q "^- ENG-CHECK DUE " "$HH"'
 fixture approvalprep; : > "$FAKE/merged"
 echo '{"files":[{"path":"README.md"}],"body":"x\n\nOwner override: \"ship it now please\" (21 Nov 2026 10:00 CT)","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=ship it now please'
 check "a re-run on the already-merged bypass PR: rc 0, still ONE line, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && no_posts'
-perl -pi -e 's{^- ENG-CHECK DUE (seq23/approvalprep#7 )}{- ENG-CHECK DONE $1}' "$LAND_HANDOFF"   # the reviewer ran
+perl -pi -e 's{^- ENG-CHECK DUE (seq23/approvalprep#7 )}{- ENG-CHECK DONE $1}' "$LAND_DUE_FILE"   # the reviewer ran
 run_land approvalprep '--owner=ship it now please'
-check "a re-run after the check was marked DONE: rc 0, no new DUE line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && grep -c "^- ENG-CHECK DONE seq23/approvalprep#7 " "$LAND_HANDOFF" | grep -qx 1'
+check "a re-run after the check was marked DONE: rc 0, no new DUE line" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 0 ] && grep -c "^- ENG-CHECK DONE seq23/approvalprep#7 " "$LAND_DUE_FILE" | grep -qx 1'
 # Fast PRs (her ruling 23 Nov 2026): EVERY land with no fresh reviewer's PASS joins the day's batched
 # engineering check, not only her bypass. A PR a reviewer passed for its head needs none.
 handoff_fixture; fixture approvalprep
 run_land approvalprep
-check "a Fast PR on green CI with no reviewer's PASS: rc 0, ONE ENG-CHECK DUE line saying so, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed on green CI with no reviewer.s PASS (Fast PRs) " && no_posts'
-check "…every other line of HANDOFF exactly as it was" eval 'diff <(grep -v "^- ENG-CHECK DUE " "$LAND_HANDOFF") <(grep -v "^- ENG-CHECK DUE " "$W/hh/before") >/dev/null'
+check "a Fast PR on green CI with no reviewer's PASS: rc 0, ONE ENG-CHECK DUE line saying so, nothing posted" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && due_list | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA — landed on green CI with no reviewer.s PASS (Fast PRs) " && no_posts'
+check "…HANDOFF.md is not touched: byte for byte as it was" cmp -s "$HH" "$W/hh/before"
 # Her ruling 24 Nov 2026: a small PR (under 200 changed lines) gets no engineering line, even with no
 # reviewer or under her bypass; a size that cannot be read counts as big (the cases above have none).
 handoff_fixture; fixture approvalprep
@@ -1027,21 +1083,22 @@ handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"Review class: none — wording of a log line only\nShip-ready: PASS — hostile-review session_01REVIEW looked at the diff at @HEAD@; Engineering: PASS","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "a PR with a fresh reviewer's Ship-ready PASS for its head: rc 0, no ENG-CHECK line" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(due_lines)" -eq 0 ]'
-printf '# HANDOFF\n## PINNED\nPINNED-STAYS\n' > "$LAND_HANDOFF"; fixture approvalprep
+handoff_fixture; rm -f "$HH"; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "a HANDOFF with no Today section yet: one is added at the end, with the line inside it" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 " && head -3 "$LAND_HANDOFF" | grep -q PINNED-STAYS'
-handoff_fixture; perl -0pi -e 's{<!-- JOBS:START -->.*?<!-- JOBS:END -->\n\n}{}s' "$LAND_HANDOFF"; fixture approvalprep
+check "no HANDOFF.md at all: the line is still in the list, and land creates no HANDOFF.md" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && [ ! -e "$HH" ]'
+handoff_fixture; mkdir -p "$W/hh/Work/tasks"; printf '# Post-land checks\n\n- ENG-CHECK DUE seq23/other#3 0000000 — an older line\n- FORM-PROOF DONE seq23/approvalprep#7 1111111 — forms: x → https://x' > "$LAND_DUE_FILE"; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "a Today with no Jobs list yet: the line goes right under the date line, above the hand-written status" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 1 ] && today_region | grep -A1 "^_.*_$" | tail -1 | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 " && grep -q HAND-WRITTEN-STATUS "$LAND_HANDOFF"'
-# Outage: HANDOFF cannot be written. The PR IS landed; the land must not end a silent 0.
-handoff_fixture; chmod 555 "$W/hh"; chmod 444 "$LAND_HANDOFF"; fixture approvalprep
+check "a list that already has lines (the last with no line end): the new line is added at the END on its own line, the old ones exactly as they were" eval '[ "$RC" -eq 0 ] && [ "$(due_lines)" -eq 2 ] && tail -1 "$LAND_DUE_FILE" | grep -q "^- ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA " && [ "$(sed -n 3p "$LAND_DUE_FILE")" = "- ENG-CHECK DUE seq23/other#3 0000000 — an older line" ] && [ "$(sed -n 4p "$LAND_DUE_FILE")" = "- FORM-PROOF DONE seq23/approvalprep#7 1111111 — forms: x → https://x" ] && [ "$(wc -l < "$LAND_DUE_FILE" | tr -d " ")" -eq 5 ]'
+# Outage: the list cannot be written. The PR IS landed; the land must not end a silent 0.
+handoff_fixture; mkdir -p "$W/hh/Work/tasks"; printf '# Post-land checks\n\n' > "$LAND_DUE_FILE"; chmod 555 "$W/hh/Work/tasks"; chmod 444 "$LAND_DUE_FILE"; fixture approvalprep
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-chmod 755 "$W/hh"; chmod 644 "$LAND_HANDOFF"
-check "HANDOFF unwritable: merged, but exit 4, never 0" eval 'merge_called && [ "$RC" -eq 4 ]'
-check "…NAMED STOP [ENG_CHECK_NOT_NOTED] saying it LANDED, with the line to add by hand" eval 'has "NAMED STOP [ENG_CHECK_NOT_NOTED] #7 LANDED" && has "  - ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA"'
+chmod 755 "$W/hh/Work/tasks"; chmod 644 "$LAND_DUE_FILE"
+check "the list unwritable: merged, but exit 4, never 0" eval 'merge_called && [ "$RC" -eq 4 ] && [ "$(due_lines)" -eq 0 ]'
+check "…NAMED STOP [ENG_CHECK_NOT_NOTED] saying it LANDED, naming the list, with the line to add by hand" eval 'has "NAMED STOP [ENG_CHECK_NOT_NOTED] #7 LANDED" && has "was NOT written to $LAND_DUE_FILE" && has "  - ENG-CHECK DUE seq23/approvalprep#7 $MERGESHA"'
+check "…and HANDOFF.md is still byte for byte as it was" cmp -s "$HH" "$W/hh/before"
 check "…and still nothing posted to Open Loops" no_posts
 # Failures under her bypass: refused with their STOPPED line, non-zero, no line, nothing posted.
 handoff_fixture; fixture approvalprep; echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
@@ -1062,22 +1119,39 @@ check "land and land-after name no Open Loops poster or intake" eval '! grep -nE
 # Forms (her words 23 Nov 2026: "after theee fixes u need to test them"): no Forms: line is refused by name; her
 # bypass records it instead of stopping; a touched form notes FORM-PROOF and starts post-land-check on that PR.
 printf '#!/bin/bash\necho "$*" >> "%s/plc-calls"\n' "$W" > "$W/plc"; chmod +x "$W/plc"; export LAND_POST_CHECK="$W/plc"
-form_lines() { grep -c '^- FORM-PROOF DUE ' "$LAND_HANDOFF"; }
+form_lines() { in_list '^- FORM-PROOF DUE '; }
 handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
 echo '{"files":[{"path":"README.md"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "forms: no Forms: line is refused rc 1 by NAMED STOP [FORMS_UNDECLARED] saying what to add, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [FORMS_UNDECLARED]" && has "Forms: none — " && ! merge_called && [ "$(form_lines)" -eq 0 ]'
+check "forms: no Forms: line on a PR whose diff touches no form is NOT stopped for it: no FORMS_UNDECLARED, no FORM-PROOF line, no form test" eval '! has "FORMS_UNDECLARED" && has "the diff touches no form, so no form test runs" && [ "$(form_lines)" -eq 0 ] && [ ! -s "$W/plc-calls" ]'
 handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
 echo '{"files":[{"path":"README.md"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
 sleep 1
-check "forms under her bypass: lands rc 0 with ONE FORM-PROOF DUE line marked undeclared" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 1 ] && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: undeclared (landed under her bypass)"'
+check "forms under her bypass, diff touches no form: lands rc 0, NO FORM-PROOF line, no form test started" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 0 ] && has "the diff touches no form, so no form test runs" && [ ! -s "$W/plc-calls" ]'
+# The same bypass on a PR whose head adds a page with a <form>: the form test is owed and started.
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+git -C "$W/pusher" checkout -q pr; mkdir -p "$W/pusher/site"; echo '<form method="post" action="/api/lead"></form>' > "$W/pusher/site/contact.html"
+git -C "$W/pusher" add -A; git -C "$W/pusher" commit -qm "a form"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+git -C "$W/pusher" push -q -f origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
+echo '{"files":[{"path":"site/contact.html"}],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+sleep 1
+check "forms under her bypass, diff touches a form: ONE FORM-PROOF DUE line naming the file" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(form_lines)" -eq 1 ] && due_list | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: undeclared (landed under her bypass; the diff touches site/contact.html)"'
 check "…and post-land-check was started for that PR alone" eval 'grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
+# The same PR with NO bypass and no Forms: line: the diff touches a form, so this one IS stopped, by name, not merged.
+handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
+git -C "$W/pusher" checkout -q pr; mkdir -p "$W/pusher/site"; echo '<form method="post" action="/api/lead"></form>' > "$W/pusher/site/contact.html"
+git -C "$W/pusher" add -A; git -C "$W/pusher" commit -qm "a form"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+git -C "$W/pusher" push -q -f origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
+echo '{"files":[{"path":"site/contact.html"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "forms: no Forms: line on a PR whose diff touches a form is refused rc 1 by NAMED STOP [FORMS_UNDECLARED] naming the file, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [FORMS_UNDECLARED] the diff touches a form (site/contact.html)" && has "Forms: none — " && ! merge_called && [ "$(form_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"; touch "$FAKE/no-forms"
 echo '{"files":[{"path":"functions/api/lead.js"}],"labels":[],"body":"Forms: request form — preview: TEST submission 200, row recTEST stored\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the lead handler fix | tests/lead.test.js goes red |","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 sleep 1
-check "a touched form proven on the preview: lands rc 0, FORM-PROOF DUE names it, post-land-check started" eval '[ "$RC" -eq 0 ] && merge_called && today_region | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: request form;" && grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
+check "a touched form proven on the preview: lands rc 0, FORM-PROOF DUE names it, post-land-check started" eval '[ "$RC" -eq 0 ] && merge_called && due_list | grep -q "^- FORM-PROOF DUE seq23/approvalprep#7 $MERGESHA — forms: request form;" && grep -qx -- "--now seq23/approvalprep#7" "$W/plc-calls"'
 handoff_fixture; fixture approvalprep; rm -f "$W/plc-calls"
 run_land approvalprep
 sleep 1
@@ -1087,7 +1161,7 @@ rm -f "$FAKE/no-forms"; unset LAND_POST_CHECK
 # no Not built, an Outcome with no check or no expect, and "Outcome: none" on a plist are each refused by name and
 # not merged; a real Outcome lands and writes ONE OUTCOME-CHECK DUE line carrying the task slug; her bypass is never
 # blocked by them and still writes a check the checker infers. The Not built section is printed word for word.
-outcome_lines() { grep -c '^- OUTCOME-CHECK DUE ' "$LAND_HANDOFF"; }
+outcome_lines() { in_list '^- OUTCOME-CHECK DUE '; }
 OMP='\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the plist schedule fix | tests/test-launchd-central.sh goes red |'
 export LAND_TODAY=2026-11-24 LAND_TASK=noelle-levers
 handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome"
@@ -1107,35 +1181,95 @@ echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Mov
 run_land approvalprep
 check "outcome: 'Outcome: none' on a PR that changes a launchd plist is refused by name, naming the plist, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "launchd/com.seq.noelle.plist" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome"
-echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
 check "outcome: an Outcome with a check but no 'expect: >= N' is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'expect: >= <N>'"'"'" && ! merge_called'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions every night'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: an Outcome with no 'check:' command is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'check: <a read-only shell command>'"'"'" && ! merge_called'
+check "outcome: an Outcome with no 'check:' command is refused, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_UNDECLARED]" && has "no '"'"'check: <one read and its pipes>'"'"'" && ! merge_called'
 handoff_fixture; fixture approvalprep
-echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log — expect: >= 3\n\n## Not built\n- the job-target lever (G1)\n- G19, the sales reader'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
+echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log — expect: >= 3\n\n## Not built\n- the job-target lever (G1)\n- G19, the sales reader'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line with the task slug, day, floor, outcome and check" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(outcome_lines)" -eq 1 ] && today_region | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:>=3 — outcome: Noelle acts on her decisions — check: grep -c acted ~/noelle.log"'
+check "outcome: a real Outcome lands rc 0 and writes ONE OUTCOME-CHECK DUE line with the task slug, day, floor, outcome and check" eval '[ "$RC" -eq 0 ] && merge_called && [ "$(outcome_lines)" -eq 1 ] && due_list | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:>=3 — outcome: Noelle acts on her decisions — check: grep -c acted ~/Library/Logs/noelle.log"'
 check "…and prints the Not built section word for word between its markers" eval 'sed -n "/^--- NOT BUILT (PR #7, word for word) ---$/,/^--- END NOT BUILT ---$/p" <<<"$OUT" | sed "1d;\$d" | diff - <(printf "%s\n" "- the job-target lever (G1)" "- G19, the sales reader") >/dev/null'
 run_land approvalprep
 check "…a re-run on the merged PR adds no second OUTCOME-CHECK line" eval '[ "$(outcome_lines)" -eq 1 ]'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: echo ok && curl -s -d x=1 https://e.x/api | wc -l — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep
-check "outcome: a check that could write (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "curl -d sends data" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
+check "outcome: a check that is more than one read (curl -d after &&) is refused rc 1 by NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY], naming it, not merged, no DUE line" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [OUTCOME_CHECK_NOT_READ_ONLY]" && has "& or &&" && ! merge_called && [ "$(outcome_lines)" -eq 0 ]'
 handoff_fixture; fixture approvalprep
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"Outcome: Noelle acts — check: gh issue create -t x -b y — expect: >= 1\n\n## Not built\nNothing cut.'"$OMP"'","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "…under her bypass: never blocked, says the check was refused, and writes no DUE line carrying that command" eval '[ "$RC" -eq 0 ] && merge_called && has "outcome check refused, never run" && has "Outcome: UNDECLARED (owner bypass)" && ! today_region | grep -q "gh issue create"'
+check "…under her bypass: never blocked, says the check was refused, and writes no DUE line carrying that command" eval '[ "$RC" -eq 0 ] && merge_called && has "outcome check refused, never run" && has "Outcome: UNDECLARED (owner bypass)" && ! due_list | grep -q "gh issue create"'
 handoff_fixture; fixture approvalprep; touch "$FAKE/no-outcome" "$FAKE/no-notbuilt"
 echo '{"files":[{"path":"launchd/com.seq.noelle.plist"}],"labels":[],"body":"","comments":[]}' > "$FAKE/pr-meta"
 run_land approvalprep '--owner=land it deploy it finish it'
-check "outcome under her bypass: never blocked; records UNDECLARED and writes a check the checker infers" eval '[ "$RC" -eq 0 ] && merge_called && has "Outcome: UNDECLARED (owner bypass)" && today_region | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:infer — outcome: UNDECLARED (owner bypass) — check: infer" && sed -n "/^--- NOT BUILT/,/^--- END/p" <<<"$OUT" | grep -qx "UNDECLARED (owner bypass)"'
+check "outcome under her bypass: never blocked; records UNDECLARED and writes a check the checker infers" eval '[ "$RC" -eq 0 ] && merge_called && has "Outcome: UNDECLARED (owner bypass)" && due_list | grep -qF -- "- OUTCOME-CHECK DUE seq23/approvalprep#7 $MERGESHA — task:noelle-levers by:2026-11-25 expect:infer — outcome: UNDECLARED (owner bypass) — check: infer" && sed -n "/^--- NOT BUILT/,/^--- END/p" <<<"$OUT" | grep -qx "UNDECLARED (owner bypass)"'
 rm -f "$FAKE/no-outcome" "$FAKE/no-notbuilt"; unset LAND_TODAY LAND_TASK
 unset BOSS_OPEN_LOOPS_TOKEN OPEN_LOOPS_URL
-export LAND_HANDOFF="$W/HANDOFF.md"
+export LAND_DUE_FILE="$W/post-land-checks.md"
+
+echo "=== 22. protected PRs (#175): a noelle/ branch or a .github/ change lands only on a separate reviewer's comment for its head ==="
+edited() { grep -q '^pr edit' "$FAKE/calls"; }
+NPASS='Ship-ready: PASS — hostile-review session_01REVIEW looked at the diff and its tests at @HEAD@; Engineering: PASS'
+NBODY='Moves the CI file.\n'"$NPASS"'\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the gate in land | tests/x.test.sh goes red |\nOwner override: \"ship it all now\" (25 Nov 2026 13:07 CT)'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"headRefName":"noelle/levers","labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "abuse: a noelle/ PR with a body PASS, an Owner override AND --owner: rc 1, NAMED STOP [REVIEW_REQUIRED], not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [REVIEW_REQUIRED]" && ! merge_called'
+check "…her words were not written onto it (no pr edit), and land says the bypass does not apply" eval '! edited && has "owner override: does not apply to PR #7"'
+check "…no ENG-CHECK DUE bypass line was written" eval '! grep -q "landed under her bypass" "$LAND_DUE_FILE" 2>/dev/null'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+jq -c --arg c "$NPASS" '.comments = [{authorAssociation: "OWNER", body: $c}]' <<<'{"files":[{"path":"pr.txt"}],"headRefName":"noelle/levers","labels":[],"body":"Moves the CI file.\n## Mutation proof\n| Mutation | Red |\n|---|---|\n| undo the gate in land | tests/x.test.sh goes red |","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep '--owner=land it deploy it finish it'
+check "a noelle/ PR with a separate reviewer's owner comment for its head, under --owner: rc 0, merged, nothing written onto it" eval '[ "$RC" -eq 0 ] && merge_called && ! edited && ! grep -q "landed under her bypass" "$LAND_DUE_FILE" 2>/dev/null'
+# A .github file renamed out in the REAL head commit, while GitHub's file list names only the new path.
+handoff_fixture; fixture approvalprep promote; rm -f "$LAND_DUE_FILE"
+git -C "$W/pusher" checkout -q pr; mkdir -p "$W/pusher/ci"; git -C "$W/pusher" mv .github/workflows/promote.yml ci/promote.yml
+git -C "$W/pusher" commit -qm "move the workflow out"; HEADSHA="$(git -C "$W/pusher" rev-parse HEAD)"; export HEADSHA
+git -C "$W/pusher" push -q -f origin HEAD:refs/pull/7/head; git -C "$W/pusher" checkout -q main
+echo '{"files":[{"path":"ci/promote.yml"},{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "edge: a .github workflow renamed out (GitHub lists only ci/promote.yml), Owner override in the body: rc 1, REVIEW_REQUIRED, not merged" eval '[ "$RC" -eq 1 ] && has "NAMED STOP [REVIEW_REQUIRED]" && ! merge_called'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+run_land approvalprep
+check "control: the same body on a normal branch with no .github change lands on its Owner override (rc 0)" eval '[ "$RC" -eq 0 ] && merge_called'
+handoff_fixture; fixture approvalprep; rm -f "$LAND_DUE_FILE"
+echo '{"files":[{"path":"pr.txt"}],"labels":[],"body":"'"$NBODY"'","comments":[]}' > "$FAKE/pr-meta"
+echo 0123456789abcdef0123456789abcdef01234567 > "$FAKE/head"
+run_land approvalprep
+check "outage: a head git cannot fetch (so whether it changes .github/ is unknown): rc 75 could not verify, not merged" eval '[ "$RC" -eq 75 ] && has "whether it changes .github/ is unknown" && ! merge_called'
+rm -f "$FAKE/head"
+
+echo "=== EVERY STOP SAYS THREE THINGS (her yes 25 Nov 2026): expected, what happened, where to look ==="
+# Read every stop land printed in every run above. A part missing or empty on ANY stop is red, so a new stop
+# added without its stage's expect line, or a die() that drops a part, fails here.
+SHAPE="$(python3 - "$W/every-out" <<'PY'
+import re, sys
+outs = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\0")
+stops = bad = never = failed = 0
+for out in outs:
+    lines = re.sub(r"\x1b\[[0-9;]*m", "", out).split("\n")
+    for i, l in enumerate(lines):
+        if not l.startswith("STOPPED: "): continue
+        stops += 1
+        nxt = lines[i + 1:i + 5]
+        for part in ("  expected:", "  what happened:", "  where to look:"):
+            m = [x for x in nxt if x.startswith(part)]
+            if not m or not m[0][len(part):].strip():
+                bad += 1; print(f"MISSING{part.strip()} after: {l[:120]}")
+        if "is not green" in l:
+            if "(a test failed)" in l: failed += 1
+            elif "(the check never ran to the end" in l: never += 1
+            else: bad += 1; print(f"NOT-GREEN WITHOUT KIND: {l[:120]}")
+print(f"stops={stops} bad={bad} failed={failed} never={never}")
+PY
+)"
+check "every stop in every run carries expected, what happened and where to look ($(tail -1 <<<"$SHAPE"))" eval '[ "$(grep -c "^MISSING\|^NOT-GREEN" <<<"$SHAPE")" -eq 0 ] && [ "$(sed -nE "s/.*stops=([0-9]+).*/\1/p" <<<"$SHAPE")" -ge 20 ]'
+[ "$(grep -c "^MISSING\|^NOT-GREEN" <<<"$SHAPE")" -eq 0 ] || head -5 <<<"$SHAPE"
 
 # Rule 0: this must have examined something.
 [ "$passes" -ge 160 ] || { echo "FAIL: only $passes checks ran — the harness examined too little"; exit 1; }

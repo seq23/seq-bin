@@ -69,6 +69,8 @@ key=unset; [ -n "${ANTHROPIC_API_KEY:-}" ] && key="$(printf '%s' "$ANTHROPIC_API
 path=own; [ "${PATH#/fake/node_modules/.bin:}" = "$PATH" ] || path=npm
 env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -vxE '_|SHLVL|PWD|OLDPWD' | sort -u | tr '\n' ' ' >> "$FAKE/claude-names.log"; echo >> "$FAKE/claude-names.log"
 printf 'key=%s other=%s npm=%s path=%s\n' "$key" "${FAKE_OTHER_SECRET:+set}" "${npm_lifecycle_event:+set}" "$path" >> "$FAKE/claude-env.log"
+tok=unset; [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && tok="$(printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" | cksum | tr ' ' '-')"
+echo "$tok" >> "$FAKE/claude-token.log"   # the sign-in this call could see, as a checksum (never its value)
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then   # a run on a key: Claude's event stream, as --output-format stream-json prints it
   res() { # res <is_error> <result> <cost> [api_error_status]
     printf '{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY","model":"m"}\n'
@@ -92,6 +94,8 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then   # a run on a key: Claude's event stre
     *)       res false "CREDIT-DONE line one\\nline two" 0.0032; exit 0 ;;
   esac
 fi
+# The Mac's own sign-in has ended: Claude's real notice ("Not logged in · Please run /login"), unless a sign-in token came with the call.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ "$(cat "$FAKE/mac-login" 2>/dev/null)" = ended ]; then echo "Not logged in · Please run /login"; exit 1; fi
 case "$(cat "$FAKE/claude-mode" 2>/dev/null)" in
   weekly0) echo "You've hit your weekly limit · resets Oct 30 at 9am (America/New_York)"; exit 0 ;;
   weekly1) echo "You've hit your weekly limit · resets 9am (America/New_York)"; exit 1 ;;
@@ -119,7 +123,11 @@ export npm_lifecycle_event=vault:run PATH="/fake/node_modules/.bin:$PATH"
 export NODE=/fake/node INIT_CWD=/fake S=x KEEP=x DIR=/fake PATH0=x RAW_ANSWER=x READER=x CPID=x v=x
 case "$(cat "$FAKE/vault-mode" 2>/dev/null)" in
   open)  ANTHROPIC_API_KEY="$(cat "$FAKE/vault/key")" FAKE_OTHER_SECRET="$(cat "$FAKE/vault/other")"; export ANTHROPIC_API_KEY FAKE_OTHER_SECRET
+         # Her one-year Claude sign-in, when the vault holds it, under its vault name AND the CLI's (boss-os #608 maps it).
+         [ -s "$FAKE/vault/token" ] && { ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN="$(cat "$FAKE/vault/token")"; CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-$ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN}"
+           export ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN; }
          "$@"; exit $? ;;   # a child, never exec: like the real npm and vault, a kill of this process is NOT passed on
+  hang)  sleep 60 & wait $!; exit 1 ;;   # a vault that never answers (a Keychain that waits for a person)
   nokey) FAKE_OTHER_SECRET="$(cat "$FAKE/vault/other")"; export FAKE_OTHER_SECRET; "$@"; exit $? ;;
   *)     echo "VAULT GATE: No vault master key in Keychain. Run \`vault:init\` first." >&2; exit 1 ;;
 esac
@@ -130,12 +138,15 @@ mkdir -p "$TMP/boss-os" "$TMP/vault" "$TMP/tmp" "$TMP/home"
 export TMPDIR="$TMP/tmp"   # ai-run's own temp files land inside what the key search reads
 KEY="sk-ant-api03-FAKE-test-only-9f3c1e"; printf '%s' "$KEY" > "$TMP/vault/key"
 OTHER="other-vault-secret-7b2d"; printf '%s' "$OTHER" > "$TMP/vault/other"
+TOKEN="sk-ant-oat01-FAKE-signin-test-only-4e8a2c"; printf '%s' "$TOKEN" > "$TMP/vault/token"
+TOKSUM="$(printf '%s' "$TOKEN" | cksum | tr ' ' '-')"
 KEYSUM="$(printf '%s' "$KEY" | cksum | tr ' ' '-')"
-reset() { rm -f "$TMP"/codex-* "$TMP"/claude-* "$TMP"/npm-* "$TMP/out.log" "$TMP/vault-mode" "$TMP/credit-mode" "$TMP/credit-started" "$TMP/so" "$TMP/se"; }
+reset() { rm -f "$TMP"/codex-* "$TMP"/claude-* "$TMP"/npm-* "$TMP/out.log" "$TMP/vault-mode" "$TMP/credit-mode" "$TMP/credit-started" "$TMP/so" "$TMP/se" "$TMP/mac-login"; }
 run() { env PATH="$BIN:$PATH" "$@"; }
 npm_calls() { calls npm; }
 no_vault() { [ ! -s "$TMP/npm-args.log" ]; }
 env_of() { sed -n "${1}p" "$TMP/claude-env.log" 2>/dev/null; }   # what claude call N could see
+token_of() { sed -n "${1}p" "$TMP/claude-token.log" 2>/dev/null; }   # the sign-in claude call N could see (a checksum, or unset)
 names_of() { sed -n "${1}p" "$TMP/claude-names.log" 2>/dev/null | tr ' ' '\n' | grep .; }   # the environment NAMES claude call N had
 last_log() { tail -n "${1:-1}" "$AI_RUN_LOG" | head -1; }
 STOP_WEEKLY0="NAMED STOP [CLAUDE_LIMIT] resets Oct 30 at 9am (America/New_York) — the work waits for the reset; no Codex or free fallback."
@@ -515,6 +526,77 @@ out="$(run env AI_RUN_TEST_PLAN_LIMITED=1 AI_RUN_CALLER=test-credit "$AI" --role
 check "a test- caller with the vault locked: exit 76 and claude never ran (rc=$rc)" [ "$rc|$(claude_calls)" = "76|0" ]
 check "…the stop says the plan was not asked" grep -q 'NAMED STOP \[CLAUDE_LIMIT\] resets unknown (test-only switch: the plan was not asked)' <<<"$out"
 
+echo "=== 13b. the Mac's Claude sign-in has ended: ONCE more on her PLAN through the vault's one-year sign-in, never the key ==="
+keep_signin() { for f in out.log so se claude-args.log npm-args.log claude-names.log ai-run.log; do [ -e "$TMP/$f" ] && cp "$TMP/$f" "$TMP/kept-signin-$1-$f"; done; }
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; echo "earlier line" > "$TMP/out.log"
+run env ANTHROPIC_API_KEY="caller-carried-key" "$AI" --role brain --out "$TMP/out.log" -- "plan the week" > "$TMP/so" 2> "$TMP/se"; rc=$?
+keep_signin ok
+check "signed out, vault open: exit 0 (rc=$rc)" [ "$rc" -eq 0 ]
+check "…--out is the earlier line and the answer: the not-signed-in notice is gone" [ "$(cat "$TMP/out.log")" = "$(printf 'earlier line\nBRAIN-DONE')" ]
+check "claude ran twice (the Mac's sign-in, then once on the vault's), the vault was asked once" [ "$(claude_calls)|$(npm_calls)" = "2|1" ]
+check "the first run had NO sign-in token and no key ($(token_of 1), $(env_of 1))" [ "$(token_of 1)|$(env_of 1)" = "unset|key=unset other= npm= path=own" ]
+check "the second run had the vault's token ($(token_of 2)) and NO key, though the caller carried one ($(env_of 2))" [ "$(token_of 2)|$(env_of 2)" = "$TOKSUM|key=unset other= npm= path=own" ]
+check "…its environment is the first run's, name for name, plus CLAUDE_CODE_OAUTH_TOKEN alone" \
+  [ "$(names_of 2 | grep -vx CLAUDE_CODE_OAUTH_TOKEN)|$(names_of 2 | grep -cx CLAUDE_CODE_OAUTH_TOKEN)|$(names_of 1 | grep -c .)" = "$(names_of 1)|1|$(names_of 2 | grep -vcx CLAUDE_CODE_OAUTH_TOKEN)" ]
+check "…and that comparison saw real environments (PATH and HOME are in both)" [ "$(names_of 1 | grep -cxE 'PATH|HOME')$(names_of 2 | grep -cxE 'PATH|HOME')" = "22" ]
+check "…the same prompt both times" [ "$(grep -c '^plan the week$' "$TMP/claude-stdins.log")" -eq 2 ]
+check "the usage log has ONE line for it, signin=vault" grep -qE $'\tengine=claude\tcaller=[^\t]+\texit=0\tsignin=vault\tbytes=[1-9][0-9]*\tsecs=[0-9]+$' <<<"$(last_log)"
+check "…and stdout and stderr are empty (the answer went to --out)" [ "$(cat "$TMP/so" "$TMP/se")" = "" ]
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "without --out, stdout is the answer alone (rc=$rc)" [ "$rc|$out" = "0|BRAIN-DONE" ]
+reset; echo open > "$TMP/vault-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "the Mac's sign-in works: one run as today, NO token" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|unset" ]
+check "…and the vault never opened" no_vault
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"
+out="$(run env CLAUDE_CODE_OAUTH_TOKEN="caller-token-1234567890abc" "$AI" --role brain -- "x")"; rc=$?
+check "a token the caller set is used first: one run on it (rc=$rc)" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|$(printf '%s' caller-token-1234567890abc | cksum | tr ' ' '-')" ]
+check "…and the vault never opened" no_vault
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; echo hour5 > "$TMP/claude-mode"
+out="$(run "$AI" --role brain -- "x")"; rc=$?
+check "the token's run hits the plan's limit: then ONE run on the free credit, as for any plan limit (rc=$rc)" [ "$rc|$out|$(claude_calls)" = "$(printf '0|CREDIT-DONE line one\nline two|3')" ]
+check "…the credit run had the key and NO sign-in token, though the vault maps one to CLAUDE_CODE_OAUTH_TOKEN ($(token_of 3))" [ "$(token_of 3)|$(env_of 3)|$(names_of 3 | grep -cE '^(ANTHROPIC_)?CLAUDE_CODE_OAUTH_TOKEN$')" = "unset|key=$KEYSUM other= npm= path=own|0" ]
+reset; echo open > "$TMP/vault-mode"; echo weekly0 > "$TMP/claude-mode"
+out="$(run env CLAUDE_CODE_OAUTH_TOKEN="caller-token-1234567890abc" ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN="caller-token-1234567890abc" "$AI" --role brain -- "x")"; rc=$?
+check "a caller's token never rides along on the credit run: the key alone ($(token_of 2))" [ "$rc|$(token_of 2)|$(names_of 2 | grep -cE '^(ANTHROPIC_)?CLAUDE_CODE_OAUTH_TOKEN$')" = "0|unset|0" ]
+signin_fails() { # signin_fails <label> <vault-mode> <log code> <why regex>
+  run env AI_RUN_VAULT_SECS=1 "$AI" --role brain --out "$TMP/out.log" -- "x" > "$TMP/so" 2> "$TMP/se"; rc=$?
+  check "$1: the run ends as it did, exit 1, never success (rc=$rc)" [ "$rc" -eq 1 ]
+  check "…claude ran once, with no token and no key ($(token_of 1), $(env_of 1))" [ "$(claude_calls)|$(token_of 1)|$(env_of 1)" = "1|unset|key=unset other= npm= path=own" ]
+  check "…--out keeps Claude's notice" grep -qE "^Not logged in · Please run /login$" "$TMP/out.log"
+  check "…and one line saying why" grep -qE "^The Mac's Claude sign-in has ended and the vault's one-year sign-in was not used: $4\.$" "$TMP/out.log"
+  check "…the usage log says signin=$3" grep -qE $'\texit=1\tsignin='"$3"$'\tbytes=' <<<"$(last_log)"
+}
+reset; echo ended > "$TMP/mac-login"
+signin_fails "vault locked" locked VAULT_UNREADABLE 'the Boss OS vault did not open or did not answer within 1 s'
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; mv "$TMP/vault/token" "$TMP/vault-token.away"
+signin_fails "the vault holds no token" open NO_TOKEN 'the Boss OS vault holds no ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN'
+mv "$TMP/vault-token.away" "$TMP/vault/token"
+reset; echo hang > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; t0=$SECONDS
+signin_fails "a vault that never answers" hang VAULT_UNREADABLE 'the Boss OS vault did not open or did not answer within 1 s'
+check "…and it was given up on within its bound, not waited on ($((SECONDS - t0)) s)" [ "$((SECONDS - t0))" -lt 10 ]
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; mv "$TMP/vault/token" "$TMP/vault-token.away"; printf 'not a token' > "$TMP/vault/token"
+signin_fails "the vault's sign-in is not a token" open BAD_TOKEN "the vault's Claude sign-in is not a token"
+mv "$TMP/vault-token.away" "$TMP/vault/token"
+reset; echo ended > "$TMP/mac-login"
+AI_RUN_VAULT_REPO="$TMP/no-such-checkout" signin_fails "no vault checkout on this machine" none VAULT_UNREADABLE 'the Boss OS vault cannot be run on this machine \(it needs [^)]*\)'
+check "…and nothing was run in its place" no_vault
+out="$(run env ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" "$AI" --signin-child extra 2>&1)"; rc=$?
+check "the sign-in child is internal: refused with any argument (rc=$rc)" [ "$rc" -eq 64 ]
+absent "…and says nothing of the token" grep -qF -- "$TOKEN" <<<"$out"
+reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; echo slow > "$TMP/claude-mode"
+env PATH="$BIN:$PATH" "$AI" --role brain --out "$TMP/out.log" -- "long" > /dev/null 2>&1 & AIPID=$!
+for _ in $(seq 1 100); do grep -q STARTED "$TMP/out.log" 2>/dev/null && break; sleep 0.1; done
+check "the token's run started" grep -q STARTED "$TMP/out.log"
+absent "…and the token is in NO process's arguments while it runs" grep -qF -- "$TOKEN" <<<"$(ps -A -ww -o args= 2>/dev/null)"
+check "…the process list was really read (the stub is in it)" grep -qF -- "$BIN/claude -p" <<<"$(ps -A -ww -o args= 2>/dev/null)"
+kill -TERM "$AIPID"; wait "$AIPID" 2>/dev/null; sleep 0.3
+absent "a kill during the token's run reaches claude" pgrep -f "$BIN/claude -p"
+absent "ai-run never exports or stores the token, and puts it in one claude's environment by one prefix assignment only" \
+  grep -nE '(export|declare -x|launchctl setenv|defaults write)[^#]*CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN=[^"]' "$AI"
+check "…and that one assignment is there" [ "$(grep -c 'CLAUDE_CODE_OAUTH_TOKEN="$SIGNIN" "${CMD\[@\]}" >> "$DEST" 2>&1 &' "$AI")" -eq 1 ]
+
 echo "=== 14. the key's value is in nothing the run leaves, even when claude itself prints it ==="
 : > "$AI_RUN_LOG"
 leaks() { grep -rlF -- "$1" "$TMP" 2>/dev/null | grep -v "^$TMP/vault/"; }
@@ -531,6 +613,8 @@ check "…in the reason line too, when the error text carried it" grep -q 'Claud
 check "…and when a crash printed it on stderr" grep -q 'gave no answer (exit 2): fatal: bad key \[key removed\]' "$TMP/kept-so2-crashleak"
 check "the key's value is in NO file: --out, stdout, stderr, usage log, argument logs, temp files ($(leaks "$KEY" | head -3 | tr '\n' ' '))" [ -z "$(leaks "$KEY")" ]
 check "the vault's other secret is in no file either" [ -z "$(leaks "$OTHER")" ]
+check "the vault's one-year sign-in is in NO file either: the 13b runs' --out, stdout, stderr, logs and arguments, and these ($(leaks "$TOKEN" | head -3 | tr '\n' ' '))" [ -z "$(leaks "$TOKEN")" ]
+check "…and that search had the 13b runs' files to read" [ "$(find "$TMP" -maxdepth 1 -name 'kept-signin-ok-*' | grep -c .)" -ge 6 ]
 check "the usage log of these runs never names more than cost, source and a reason code" \
   [ "$(grep -cvE $'\texit=[0-9]+(\tstop=[A-Z_]+)?(\tcost_usd=[0-9.]+\tkey_source=[A-Za-z_]+\tprompt=restarted|\tcredit=[A-Z_]+(\tcost_usd=(unknown|[0-9.]+))?)?\tbytes=[1-9][0-9]*\tsecs=[0-9]+$' "$AI_RUN_LOG")|$(grep -c 'engine=claude-credit' "$AI_RUN_LOG")" = "0|10" ]
 absent "ai-run itself never assigns, exports or stores the key (the vault's child process is the only holder)" \

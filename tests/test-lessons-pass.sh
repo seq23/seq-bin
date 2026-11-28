@@ -144,7 +144,7 @@ mkdir -p "$W/plc"
 printf '#!/bin/bash\necho "called $*" >> "%s/lessons-calls"; exit "${FAKE_LESSONS_RC:-0}"\n' "$W/plc" > "$W/bin/lessons"; chmod +x "$W/bin/lessons"
 printf '#!/bin/bash\necho "$1" >> "%s/banners"\n' "$W/plc" > "$W/bin/notify"; chmod +x "$W/bin/notify"
 plc() { POST_LAND_SKIP="$W/plc/no-skip" POST_LAND_DUE_FILE="$W/plc/due.md" POST_LAND_LOG="$W/plc/log" POST_LAND_LOCKS="$W/plc/locks" \
-  POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/plc/tasks" POST_LAND_LESSONS="$W/bin/lessons" POST_LAND_AI_RUN="$W/bin/ai-run" \
+  POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/plc/tasks" POST_LAND_LESSONS="$W/bin/lessons" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_SYNC=true \
   PATH="$W/bin:$PATH" "$PLC" "$@" </dev/null >/dev/null 2>&1; echo $?; }
 lcalls() { [ -f "$W/plc/lessons-calls" ] && wc -l < "$W/plc/lessons-calls" | tr -d ' ' || echo 0; }
 mkdir -p "$W/plc/tasks"; printf '# Post-land checks\n\n- nothing due here\n' > "$W/plc/due.md"

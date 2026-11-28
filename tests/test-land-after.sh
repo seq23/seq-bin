@@ -24,6 +24,9 @@ trap '[ -n "$STUB" ] && kill "$STUB" 2>/dev/null; rm -rf "$W"' EXIT
 export HOME="$W/home"; mkdir -p "$HOME"
 T="$HOME/Work/tasks"; FAKE="$W/fake"; BIN="$W/bin"; mkdir -p "$FAKE" "$BIN"
 export FAKE_DIR="$FAKE" PATH="$BIN:$PATH" LAND_AFTER_LAND="$W/fake-land" LAND_AFTER_POLL_SECS=0 LAND_AFTER_RETRY_SECS=0 LAND_AFTER_READ_PATIENCE_SECS=3 LAND_RETRY_SECS=0
+# The Open Loops sync (28 Nov 2026) is a stand-in: no run here reaches the live list.
+export LAND_AFTER_LOOPS_SYNC="$W/fake-sync"
+printf '#!/bin/bash\nprintf "%%s\\n" "$1" >> "%s/sync-calls"\n[ -z "${SYNC_DOWN:-}" ] || { echo "NAMED STOP [OPEN_LOOPS_UNREACHABLE] down"; exit 75; }\necho "OPEN_LOOPS SYNC 1 due, 1 made, 0 had a row"\n' "$W" > "$W/fake-sync"; chmod +x "$W/fake-sync"
 export BOSS_OPEN_LOOPS_TOKEN=olt_testtoken123 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 pass=0; failn=0
 check() { local d="$1"; shift; if "$@"; then pass=$((pass + 1)); echo "  ok  $d"; else failn=$((failn + 1)); echo "  FAIL $d"; [ -z "${LA_TEST_SHOW:-}" ] || sed 's/^/    | /' "$W/out" 2>/dev/null | cut -c1-600; fi; }
@@ -483,11 +486,19 @@ la 40 --task outjob; lockgone
 check "an Outcome with a live check: line 1 LANDED-UNCHECKED with the due day, the sheet stays open (not in done/)" \
   eval 'line1 "$T/outjob.md" | grep -q "^STATUS: LANDED-UNCHECKED t/fixture#40 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb .* outcome check due 2026-11-25" && [ ! -e "$T/done/outjob.md" ]'
 check "…land ran with the sheet's slug in LAND_TASK (the DUE line carries it)" grep -qx 'task=outjob' "$FAKE/land-task"
+check "…its Open Loops row is synced at once, from the post-land-check list" eval '[ "$(cat "$W/sync-calls")" = "$T/post-land-checks.md" ] && grep -q "OPEN_LOOPS SYNC 1 due" "$T/logs/outjob-40.log"' 
 check "…the PR's Not built is copied under line 1, word for word, the rest of the sheet kept" \
   eval '[ "$(sed -n 2,5p "$T/outjob.md")" = "$(printf "## Not built (PR #40, from land)\n- the job-target lever (G1)\n- G19, the sales reader\n## End Not built")" ] && grep -q "^- built (abc123)$" "$T/outjob.md"'
 sed -i.bak '1s/.*/STATUS: review t\/fixture#40 x 2026-11-24/' "$T/outjob.md"; rm -f "$T/outjob.md.bak"; : > "$W/api/posts.jsonl"
 la 40 --task outjob; lockgone
 check "…a second land of the same sheet keeps ONE Not built block" eval '[ "$(grep -c "^## Not built (PR #40" "$T/outjob.md")" -eq 1 ]'
+sed -i.bak '1s/.*/STATUS: review t\/fixture#40 x 2026-11-24/' "$T/outjob.md"; rm -f "$T/outjob.md.bak"; : > "$W/api/posts.jsonl"
+SYNC_DOWN=1 la 40 --task outjob; lockgone
+check "a failed Open Loops sync never fails the land: still LANDED-UNCHECKED, the log names the stop" \
+  eval 'line1 "$T/outjob.md" | grep -q "^STATUS: LANDED-UNCHECKED t/fixture#40 " && grep -q "NAMED STOP \[OPEN_LOOPS_SYNC_FAILED\]" "$T/logs/outjob-40.log"'
+: > "$W/sync-calls"; reset; printf 'STATUS: review t/fixture#41 x 2026-11-24\nGoal: g\n' > "$T/nojob.md"
+la 41 --task nojob; lockgone
+check "an Outcome of none (no DUE line) starts no sync" eval '[ ! -s "$W/sync-calls" ]' 
 LAND_AFTER_TODAY=2026-11-26 "$LA" --status > "$W/out" 2>&1
 check "--status, a day after the due day: 'landed, not yet proven', never running or FAIL" \
   eval 'grep "^outjob " "$W/out" | grep -q "\[landed, not yet proven: outcome check due 2026-11-25\]" && ! grep "^outjob " "$W/out" | grep -qiE "running|\[stale: landing|FAIL"'

@@ -78,6 +78,9 @@ printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; 
 # Open Loops (27 Nov 2026): a stand-in for open-loops-proof.mjs, so no run here ever reaches the live list.
 printf '#!/bin/bash\n[ -z "${LOOPS_DOWN:-}" ] || { echo "NAMED STOP [OPEN_LOOPS_UNREACHABLE] down"; exit 75; }\nprintf "%%s|%%s|%%s|%%s\\n" "$1" "$2" "$3" "$4" >> "%s/store/loops"\necho "OPEN_LOOPS CLOSED olp_test"\n' "$W" > "$W/bin/loops"; chmod +x "$W/bin/loops"
 export POST_LAND_LOOPS="$W/bin/loops"
+# The rows' birth (28 Nov 2026): a stand-in for open-loops-proof.mjs --sync, so no run here ever reaches the live list.
+printf '#!/bin/bash\nprintf "%%s\\n" "$1" >> "%s/store/sync"\n[ -z "${SYNC_DOWN:-}" ] || { echo "NAMED STOP [OPEN_LOOPS_UNREACHABLE] could not reach Open Loops"; exit 75; }\necho "OPEN_LOOPS SYNC 1 due, 1 made, 0 had a row"\n' "$W" > "$W/bin/sync"; chmod +x "$W/bin/sync"
+export POST_LAND_SYNC="$W/bin/sync"
 fails=0; passes=0
 check() { local label="$1"; shift; if "$@"; then passes=$((passes+1)); else echo "  FAIL $label"; fails=$((fails+1)); [ -z "${PLC_DEBUG:-}" ] || sed "s/^/    | /" "$W/out" 2>/dev/null | tail -8; fi; }
 reset() { rm -rf "$W/store" "$W/locks" "$W/tasks"; mkdir -p "$W/store"; unset VERDICT_1 VERDICT_2 VERDICT_3 VERDICT_4 VERDICT_5 INFER_5 COMMENT_USER COMMENT_AT; }
@@ -165,7 +168,8 @@ check "--dry-run runs no model" [ ! -f "$W/store/ai-calls" ]
 
 echo "=== OUTCOME-CHECK (rebuilt 27 Nov 2026): no shell, no logins; code reads, a model with NO tools judges, code posts ==="
 export POST_LAND_NOTICE="$W/bin/notice" POST_LAND_TODAY=2026-11-25
-printf '#!/bin/bash\n[ -z "${NOTICE_FAIL:-}" ] || exit 1\nprintf "%%s\\t%%s\\n" "$1" "$2" >> "%s/store/notices"\n' "$W" > "$W/bin/notice"; chmod +x "$W/bin/notice"
+# The stand-in keeps outcome-notice.mjs's own rule: --text is ONE line of 1 to 300 characters, else it refuses.
+printf '#!/bin/bash\n[ -z "${NOTICE_FAIL:-}" ] || exit 1\nn="$(printf "%%s" "$2" | python3 -c "import sys; t=sys.stdin.read(); print(len(t) if 0 < len(t) <= 300 and chr(10) not in t else 0)")"\n[ "$n" -gt 0 ] || { echo "outcome-notice: --text is one line of 1 to 300 characters"; exit 2; }\nprintf "%%s\\t%%s\\n" "$1" "$2" >> "%s/store/notices"\n' "$W" > "$W/bin/notice"; chmod +x "$W/bin/notice"
 cat > "$W/bin/ai-run-down" <<'AI'
 #!/bin/bash
 echo x >> "$PLC_STORE/ai-calls"; echo "Claude usage limit reached" >&2; exit 1
@@ -313,6 +317,31 @@ check "COULDNT-CHECK: no Open Loops row is touched" eval '[ "$(orun)" = 1 ] && [
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on"
 check "Open Loops down on a PASS: the verdict stands (DONE, exit 0), NAMED STOP in the log" eval '[ "$(LOOPS_DOWN=1 orun)" = 0 ] && grep -q "^- OUTCOME-CHECK DONE o/app#5 " "$W/post-land-checks.md" && grep -q "NAMED STOP \[OPEN_LOOPS_UNREACHABLE\] the Open Loops rows waiting on o/app#5 were not updated" "$W/out"'
 check "…and her Notices line says the row was left as it was" grep -q "working — saw 4 of 4 decisions acted on (Open Loops could not be reached: a row waiting on this PR was left as it was)" "$W/store/notices"
+echo "=== Notices (28 Nov 2026): a long, two-line reason is sent as ONE line of at most 300 characters, its link kept ==="
+reset; osheet; due_list "$(oline "$FOUR")"
+LONG="$(python3 -c 'print("the output lists files but not their contents " * 7)')"
+export VERDICT_5="Outcome check (live): COULDNT-CHECK — $LONG
+second line of the reason"
+check "a 600-character reason: the Notices line is written (no NOTICE_UNWRITTEN), one line, at most 300 characters" \
+  eval '[ "$(orun)" = 1 ] && ! grep -q "NOTICE_UNWRITTEN" "$W/out" && [ "$(notices)" = 1 ] && [ "$(cut -f2 "$W/store/notices" | python3 -c "import sys; print(len(sys.stdin.read().rstrip(chr(10))))")" -le 300 ]'
+check "…it keeps where to look and marks the cut with …" eval 'cut -f2 "$W/store/notices" | grep -qE "NOT CHECKED — the check never gave a reading: the output lists files.*…; look: https://github.com/o/app/pull/5#code$"'
+check "…the full text stays in the local log" grep -q "Notices (full text, sent cut to one line of" "$W/log"
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on"
+check "…a short line is sent exactly as written" eval '[ "$(orun)" = 0 ] && grep -qx $'"'"'outcome:o/app#5:working\tapp #5 Noelle acts on her decisions: working — saw 4 of 4 decisions acted on'"'"' "$W/store/notices"'
+
+echo "=== Open Loops rows' birth (28 Nov 2026): each nightly run syncs the list first; --now never; a failed sync is exit 1, never silent ==="
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+check "nightly: the sync is handed the list's path, and runs before the first check" \
+  eval '[ "$(orun)" = 0 ] && [ "$(cat "$W/store/sync")" = "$W/post-land-checks.md" ] && [ "$(grep -n "open-loops sync: 1 due" "$W/log" | head -1 | cut -d: -f1)" -lt "$(grep -n "outcome: o/app#5" "$W/log" | head -1 | cut -d: -f1)" ]'
+reset; due_list "$F1"; export VERDICT_1="Form proof (production): PASS — ok"
+check "--now (land's form proof) never syncs" eval '[ "$(orun --now o/site#1)" = 0 ] && [ ! -e "$W/store/sync" ]'
+reset; due_list "$F1"
+check "--dry-run never syncs" eval '[ "$(orun --dry-run)" = 0 ] && [ ! -e "$W/store/sync" ] && grep -q "\[dry-run\] would give each DUE outcome check its Open Loops row" "$W/out"'
+reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
+check "sync down: the checks still run (DONE), the night exits 1 with NAMED STOP [OPEN_LOOPS_SYNC_FAILED] and a banner" \
+  eval '[ "$(SYNC_DOWN=1 orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DONE o/app#5 " "$W/post-land-checks.md" && grep -q "NAMED STOP \[OPEN_LOOPS_SYNC_FAILED\].*OPEN_LOOPS_UNREACHABLE" "$W/out" && grep -q "Landed, not yet proven rows could not all be made" "$W/store/banners"'
+reset; due_list "- something else"
+check "sync down on a night with nothing due: exit 1, never a quiet 0" eval '[ "$(SYNC_DOWN=1 orun)" = 1 ] && grep -q "OPEN_LOOPS_SYNC_FAILED" "$W/out"'
 rm -f "$W/skip"
 unset POST_LAND_TASKS POST_LAND_NOTICE POST_LAND_TODAY
 

@@ -20,6 +20,10 @@
 #                               and stays open; post-land-check turns it DONE (moved to done/) only on the live
 #                               outcome PASS, or FAIL ("outcome NOT WORKING"). The PR's `## Not built` is copied
 #                               word for word under line 1 on every land, so nothing cut is hidden.
+#                               A LANDED-UNCHECKED land then runs open-loops-proof.mjs --sync (env LAND_AFTER_LOOPS_SYNC,
+#                               tests), so the PR's "Landed, not yet proven" row exists at once (28 Nov 2026). That is
+#                               a row on HER list's proving section only, never the main list; a failed sync never
+#                               fails the land (tonight's post-land-check sync retries it).
 #   ~/Work/tasks/logs/<slug>-<pr>.log   everything land printed, secrets masked.
 #
 #   land-after --status      one line per open sheet (its line 1 and path), for HANDOFF's Jobs list; a
@@ -320,7 +324,17 @@ worker() {
   if [ -n "$due" ]; then
     set_status "$SLUG" "STATUS: LANDED-UNCHECKED $REPO#$PR $MERGE_SHA $(now) — landed, not yet proven: outcome check due $due (post-land-check 23:15)"
     add_not_built "$SLUG" "$PR" "$nb"
-    echo "OUTPUT land-after $REPO#$PR LANDED-UNCHECKED $MERGE_SHA — outcome check due $due; sheet $SHEET"
+    # Its "Landed, not yet proven" row on Open Loops, now rather than at 23:15 (her words 28 Nov 2026). The land
+    # stands whatever this does: a failed sync is said here and tonight's post-land-check sync makes the row.
+    local sync_out src loopnote
+    echo "=== open-loops sync ($(now))"
+    if [ -n "${LAND_AFTER_LOOPS_SYNC:-}" ]; then sync_out="$("$LAND_AFTER_LOOPS_SYNC" "$DUE_FILE" </dev/null 2>&1)"; src=$?
+    else sync_out="$(cd "$HOME/.boss-os/runtime" 2>/dev/null && npm run --silent vault:run -- node "$HERE/open-loops-proof.mjs" --sync "$DUE_FILE" </dev/null 2>&1)"; src=$?
+    fi
+    printf '%s\n' "$sync_out" | redact
+    if [ "$src" -eq 0 ]; then loopnote="its Open Loops row is made"
+    else loopnote="NAMED STOP [OPEN_LOOPS_SYNC_FAILED] its Open Loops row was not made (exit $src); tonight's post-land-check makes it"; fi
+    echo "OUTPUT land-after $REPO#$PR LANDED-UNCHECKED $MERGE_SHA — outcome check due $due; $loopnote; sheet $SHEET"
     exit 0
   fi
   set_status "$SLUG" "STATUS: PASS $REPO#$PR $MERGE_SHA $(now)"

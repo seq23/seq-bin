@@ -1043,7 +1043,7 @@ check "…and land prints the line" has "ENG-CHECK DUE seq23/approvalprep#7 $MER
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/hh/ai-calls"\n' "$W" > "$W/hh/ai-stub"; chmod +x "$W/hh/ai-stub"
 export PLC_RC=0   # exported: it is read inside the eval of the check below
 PATH="$BIN:$PATH" POST_LAND_DUE_FILE="$LAND_DUE_FILE" POST_LAND_AI_RUN="$W/hh/ai-stub" POST_LAND_LOG="$W/hh/plc.log" POST_LAND_LOCKS="$W/hh/plc-locks" \
-  POST_LAND_NOTIFY=true POST_LAND_NOTICE=true POST_LAND_TASKS="$W/hh/plc-tasks" POST_LAND_SKIP="$W/hh/no-skip" \
+  POST_LAND_NOTIFY=true POST_LAND_NOTICE=true POST_LAND_SYNC=true POST_LAND_TASKS="$W/hh/plc-tasks" POST_LAND_SKIP="$W/hh/no-skip" \
   bash "$HERE/../post-land-check" </dev/null >"$W/hh/plc-out" 2>&1 || PLC_RC=$?
 check "…post-land-check reads land's line from the list: its engineering run names this PR and merge sha" eval 'grep -q -- "- seq23/approvalprep#7 (merge $MERGESHA): landed under her bypass" "$W/hh/ai-calls"'
 check "…with no verdict it exits 1 and the line stays DUE in the list (never DONE on silence)" eval '[ "$PLC_RC" -eq 1 ] && [ "$(due_lines)" -eq 1 ]'
@@ -1115,7 +1115,11 @@ echo ratelimit > "$FAKE/checks"
 OUT="$(cd "$W/approvalprep" && PATH="$BIN:$PATH" LAND_SURFACES="$HERE/../land-surfaces.json" LAND_RETRY_SECS=0 LAND_RATE_WAIT=1 bash "$LAND" 7 '--owner=land it deploy it finish it' 2>&1)"; RC=$?
 check "rate limited past the bound under --owner: exit 75 'STOPPED: could not verify (rate limit)', not merged, no line, nothing posted" eval '[ "$RC" -eq 75 ] && has "STOPPED: could not verify (rate limit)" && ! merge_called && [ "$(due_lines)" -eq 0 ] && no_posts'
 # The land path never names the intake at all (the old poster block is gone, not kept beside the new line).
-check "land and land-after name no Open Loops poster or intake" eval '! grep -nE "open-loops|open_loops|/intake|OPEN_LOOPS" "$HERE/../land" "$HERE/../land-after"'
+check "land names no Open Loops poster or intake" eval '! grep -nE "open-loops|open_loops|/intake|OPEN_LOOPS" "$HERE/../land"'
+# land-after's ONE Open Loops call (her words 28 Nov 2026: a list on Open Loops "for landed not yet proven"): the
+# proving-row sync, open-loops-proof.mjs --sync. Never the intake, its token, the poster or any other mode.
+check "land-after's only Open Loops call is open-loops-proof.mjs --sync: never the intake, its token or the poster" \
+  eval '! grep -nE "/intake|open-loops\.mjs|BOSS_OPEN_LOOPS_TOKEN|open_loops|api/boss" "$HERE/../land-after" && [ "$(grep -cE "node \"\\\$HERE/open-loops-proof\.mjs\" --sync " "$HERE/../land-after")" -eq 1 ] && ! grep -E "open-loops-proof\.mjs" "$HERE/../land-after" | grep -qv -- "--sync"'
 # Forms (her words 23 Nov 2026: "after theee fixes u need to test them"): no Forms: line is refused by name; her
 # bypass records it instead of stopping; a touched form notes FORM-PROOF and starts post-land-check on that PR.
 printf '#!/bin/bash\necho "$*" >> "%s/plc-calls"\n' "$W" > "$W/plc"; chmod +x "$W/plc"; export LAND_POST_CHECK="$W/plc"

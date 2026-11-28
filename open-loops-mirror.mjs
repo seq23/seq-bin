@@ -4,8 +4,11 @@
 // Publishing needs the claude.ai artifact tools, which only an interactive Claude session has (claude -p cannot, tested 5 Nov 2026).
 // So: any session that changes Open Loops runs this, then publish_files to slug bff28f87-655d-4829-9bc1-ea23e70a2fac when it prints CHANGED.
 import fs from "node:fs"; import crypto from "node:crypto"; import os from "node:os";
-// "Landed, waiting on proof" (her words 27 Nov 2026: "move it off the main list"): rows in section `proving` sit in
-// their own folded section between the dated list and Parked, and no header count but "N waiting on proof" counts them.
+// Two always-open lists sit directly under the summary line, before any dated heading (her words 28 Nov 2026: "there
+// should be a fucking list on open loops and the artifact mirror for landed not yet proven and a list for things
+// parked with no date"; until then both sat folded shut under ~70 dated rows): "Landed, not yet proven (N)" (section
+// `proving`: what it proves, its PR, its check date) and "Parked, no date (N)" (section `parked`, never a date shown).
+// Neither is counted as open, overdue or yours.
 // Env (tests): OPEN_LOOPS_MIRROR_DIR, BOSS_ORIGIN.
 const DIR = process.env.OPEN_LOOPS_MIRROR_DIR || `${os.homedir()}/.boss-os/open-loops-mirror`; fs.mkdirSync(DIR, { recursive: true });
 const O = process.env.BOSS_ORIGIN || "https://boss.sequoiataylor.com";
@@ -30,18 +33,23 @@ const row = (l) => {
 };
 const active = L.filter((l) => l.section === "not_finished").sort((a, b) => (a.next_date || "9").localeCompare(b.next_date || "9") || a.title.localeCompare(b.title));
 const parked = L.filter((l) => l.section === "parked").sort((a, b) => a.title.localeCompare(b.title));
-const proving = L.filter((l) => l.section === "proving").sort((a, b) => a.title.localeCompare(b.title));
-const proofRow = (l) => `<li class="${l.owner === "sequoia" ? "mine" : ""}"><details><summary><span class="t">${esc(l.title)}</span><span class="s">waiting on ${esc(l.proof_pr ?? "its PR")}'s live check</span></summary>
+const proving = L.filter((l) => l.section === "proving").sort((a, b) => (a.next_date || "9").localeCompare(b.next_date || "9") || a.title.localeCompare(b.title));
+const prWords = (p) => { const m = /^[^/]+\/([^#]+)#(\d+)$/.exec(String(p ?? "")); return m ? `${m[1]} #${m[2]}` : "no PR named"; };
+const proofRow = (l) => `<li class="${l.owner === "sequoia" ? "mine" : ""}"><details><summary><span class="t">${esc(l.title)}</span><span class="s">${esc(prWords(l.proof_pr))} · ${l.next_date ? `live check ${day(l.next_date)}` : "live check date not set"}</span></summary>
 <p><b>Done when:</b> ${esc(l.finish_line ?? "")}</p></details></li>`;
+// A parked row shows no date, whatever its next_date holds.
+const parkRow = (l) => `<li class="${l.owner === "sequoia" ? "mine" : ""}"><details><summary><span class="t">${esc(l.title)}</span><span class="s">${esc(WHO[l.owner] ?? l.owner)} · ${esc(BIZ[l.business] ?? l.business)}</span></summary>
+<p><b>Next:</b> ${esc(l.next_step ?? "")}</p><p><b>Done when:</b> ${esc(l.finish_line ?? "")}</p></details></li>`;
 const overdue = active.filter((l) => l.next_date && l.next_date < today);
 const groups = new Map();
 for (const l of active.filter((l) => !(l.next_date && l.next_date < today))) { const k = l.next_date || "no date"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(l); }
 const yours = active.filter((l) => l.owner === "sequoia").length;
-let body = `<p class="sum">${active.length} open · ${overdue.length} overdue · ${yours} yours · ${proving.length} waiting on proof · ${parked.length} parked</p>`;
+let body = `<p class="sum">${active.length} open · ${overdue.length} overdue · ${yours} yours · ${proving.length} landed, not yet proven · ${parked.length} parked</p>`;
+body += `<h2 class="list">Landed, not yet proven <small>${proving.length}</small></h2><p class="meta">Each fix landed; its next-day live check decides. A pass closes it, a fail brings it back marked NOT WORKING.</p><ul>${proving.map(proofRow).join("") || '<li class="none">Nothing waiting on a live check.</li>'}</ul>`;
+body += `<h2 class="list">Parked, no date <small>${parked.length}</small></h2><ul>${parked.map(parkRow).join("") || '<li class="none">Nothing parked.</li>'}</ul>`;
+body += `<h2 class="list">Open, by date <small>${active.length}</small></h2>`;
 if (overdue.length) body += `<h2 class="late">Overdue</h2><ul>${overdue.map(row).join("")}</ul>`;
 for (const [k, rows] of groups) body += `<h2>${k === "no date" ? "No date" : day(k) + (k === today ? " · today" : "")} <small>${rows.length}</small></h2><ul>${rows.map(row).join("")}</ul>`;
-body += `<details class="park"><summary><h2>Landed, waiting on proof <small>${proving.length}</small> ▾</h2></summary><p class="meta">The fix landed; the next-day live check decides. A pass closes it, a fail brings it back marked NOT WORKING.</p><ul>${proving.map(proofRow).join("")}</ul></details>`;
-body += `<details class="park"><summary><h2>Parked <small>${parked.length}</small> ▾</h2></summary><ul>${parked.map(row).join("")}</ul></details>`;
 const content = body; const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 const stamp = new Date().toLocaleString("en-US", { timeZone: tz, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open Loops</title>
@@ -55,7 +63,7 @@ h2{font:600 18px "Cormorant Garamond",Georgia,serif;margin:22px 0 6px;display:in
 ul{list-style:none;margin:0;padding:0}li{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:6px 0}li.mine{border-left:3px solid var(--gold)}
 summary{cursor:pointer;padding:11px 14px;min-height:44px;list-style:none;display:block}summary::-webkit-details-marker{display:none}
 .t{display:block;font-weight:600;overflow-wrap:anywhere}.s{display:block;font-size:13px;color:var(--muted)}.tag{display:inline-block;font-size:12px;color:var(--gold-deep);margin-top:2px}
-details p{margin:0 14px 10px;font-size:14px;overflow-wrap:anywhere}.park>summary{padding:0}.park>summary h2{margin-top:26px}</style></head>
+details p{margin:0 14px 10px;font-size:14px;overflow-wrap:anywhere}h2.list{display:block;margin-top:26px;padding-bottom:4px;border-bottom:1px solid var(--line)}li.none{padding:11px 14px;color:var(--muted);font-size:14px}</style></head>
 <body><div class="wrap"><h1>Open Loops</h1>${body.replace(/^<p class="sum">/, '<p class="sum">')}
 <p class="meta">A read-only copy, refreshed from Boss OS when the list changes. Last refresh ${esc(stamp)} CT. Gold edge = yours. <a href="https://boss.sequoiataylor.com/?tab=loops">Open the live list in Boss OS ›</a></p>
 </div></body></html>`;

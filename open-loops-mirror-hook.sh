@@ -5,6 +5,8 @@
 input=$(cat)
 cmd=$(printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' 2>/dev/null)
 case "$cmd" in *open-loops-mirror*) exit 0 ;; esac
+# Reading files about loops changes nothing (28 Nov 2026: it fired on every grep/sed of the scripts).
+case "$cmd" in cat\ *|sed\ *|grep\ *|head\ *|tail\ *|wc\ *|ls\ *|git\ *|cd\ ~/bin\ \&\&\ git*) exit 0 ;; esac
 # Only commands that call the API, or run a script that does.
 if ! printf '%s' "$cmd" | grep -q "open-loops"; then
   hit=0
@@ -15,7 +17,7 @@ if ! printf '%s' "$cmd" | grep -q "open-loops"; then
 fi
 out=$(cd "$HOME/GitHub/boss-os" && npm run -s vault:run -- node "$HOME/bin/open-loops-mirror.mjs" 2>&1 | tail -1)
 case "$out" in
-  CHANGED*) msg="Open Loops changed. Republish the mirror now: copy ~/.boss-os/open-loops-mirror/index.html into the scratchpad, publish it with the Artifact tool to url https://claude.ai/artifact/QhkCPRzzuNm9Kd1ystTuDd, then copy pending.hash over published.hash in that folder." ;;
+  CHANGED*) msg="Open Loops changed. Republish: copy ~/.boss-os/open-loops-mirror/index.html into the scratchpad and publish it with the Artifact tool to url https://claude.ai/artifact/QhkCPRzzuNm9Kd1ystTuDd. Nothing else." ;;
   UNCHANGED*) exit 0 ;;
   NAMED*) msg="Open Loops mirror could not read Boss OS: $out" ;;
   # Anything else (vault, network or node failure) is an outage, never "nothing changed": the page may be stale.

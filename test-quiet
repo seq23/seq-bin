@@ -1,0 +1,38 @@
+#!/bin/bash
+# test-quiet — run a test command and hand back ONE line, never the whole log (28 Nov 2026, token cuts).
+# The full output goes to a log file whose path is in the line; the command's exit code is passed through.
+#
+#   test-quiet <cmd> [args...]          "passed (exit 0): <its last line> — log <path>"
+#                                       "FAILED (exit 1): first failure: <line> — log <path>"
+#   test-quiet --full <cmd> [args...]   the whole output as well, then the line
+#   TEST_QUIET_SECS (default 1800) bounds the run: a run past it is "TIMED OUT (exit 124)".
+#
+# A failure is never hidden: a non-zero exit is always FAILED with its exit code and a line from the log
+# (the first failing line, else its last line). A run that printed nothing says so; it is never "passed: all ok".
+set -uo pipefail
+HERE="$(dirname "$(realpath "$0")")"
+# shellcheck source=quiet-lib.sh
+. "$HERE/quiet-lib.sh"
+
+FULL=""; [ "${1:-}" = "--full" ] && { FULL=1; shift; }
+[ $# -gt 0 ] || { echo "usage: test-quiet [--full] <cmd> [args...]" >&2; exit 64; }
+DIR="${TEST_QUIET_DIR:-$HOME/Library/Logs/test-quiet}"
+mkdir -p "$DIR" || { echo "NAMED STOP [TEST_QUIET_NO_LOG_DIR] cannot make $DIR; nothing was run" >&2; exit 73; }
+# Logs older than 7 days go; this folder is test-quiet's own and holds nothing else.
+find "$DIR" -name '*.log' -mtime +7 -delete 2>/dev/null
+log="$DIR/$(date +%Y%m%d-%H%M%S)-$$.log"
+
+timeout "${TEST_QUIET_SECS:-1800}" "$@" >"$log" 2>&1 </dev/null
+rc=$?
+[ -n "$FULL" ] && cat "$log"
+last="$(grep -v '^[[:space:]]*$' "$log" | tail -1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | cut -c1-220)"
+lines="$(wc -l < "$log" | tr -d ' ')"
+if [ "$rc" -eq 0 ]; then
+  if [ -z "$last" ]; then echo "passed (exit 0) but printed nothing — log $log"
+  else echo "passed (exit 0): $last [$lines lines] — log $log"; fi
+  exit 0
+fi
+[ "$rc" -eq 124 ] && { echo "TIMED OUT (exit 124) after ${TEST_QUIET_SECS:-1800}s: last line: ${last:-none} — log $log"; exit 124; }
+first="$(first_failing_line < "$log")"
+echo "FAILED (exit $rc): first failure: ${first:-${last:-it printed nothing}} — log $log"
+exit "$rc"

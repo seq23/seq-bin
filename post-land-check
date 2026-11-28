@@ -51,6 +51,9 @@
 # banner once it is 2+ days past its by-day. One try per line per night (a replay posts nothing twice). Public
 # comments and Notices carry counts only (emails masked); the check's raw output stays in the local log.
 #
+# OPEN LOOPS "LANDED, NOT YET PROVEN": before any check, each nightly run (never --now) runs open-loops-proof.mjs
+# --sync on the list, so every PR with an OUTCOME-CHECK DUE line has its `proving` row (28 Nov 2026). A failed sync
+# never stops the checks; it is NAMED STOP [OPEN_LOOPS_SYNC_FAILED], a banner, and exit 1.
 # OPEN LOOPS "LANDED, WAITING ON PROOF" (her words 27 Nov 2026: "we need a new section on open loops for the not yet
 # proven stuff and move it off the main list"): after an outcome verdict for <repo>#<pr>, every open row in that
 # section whose proof_pr is exactly that PR is closed on PASS ("<repo> #<pr> live check passed <date>: <seen>") or
@@ -64,7 +67,8 @@
 # Env (tests): POST_LAND_DUE_FILE, POST_LAND_AI_RUN, POST_LAND_FREE_READ (stands in for free-read.mjs), POST_LAND_LOG, POST_LAND_NOTIFY (a command given the text),
 #   POST_LAND_TASKS (task sheets dir), POST_LAND_TODAY (YYYY-MM-DD), POST_LAND_OUTCOME_READ (the reader; tests),
 #   POST_LAND_NOTICE (a command given key and text; default: boss-os scripts/ops/outcome-notice.mjs via the vault),
-#   POST_LAND_LOCKS, POST_LAND_LOOPS (a command given pr, verdict, seen and day; default: open-loops-proof.mjs via the vault).
+#   POST_LAND_LOCKS, POST_LAND_LOOPS (a command given pr, verdict, seen and day; default: open-loops-proof.mjs via the vault),
+#   POST_LAND_SYNC (a command given the list's path; default: open-loops-proof.mjs --sync via the vault).
 set -uo pipefail
 
 DUE_FILE="${POST_LAND_DUE_FILE:-$HOME/Work/tasks/post-land-checks.md}"
@@ -94,6 +98,7 @@ fi
 # in a no-network, no-write sandbox). Anything else is refused, never run. `land` asks the same file
 # (`outcome-read --explain`) when the PR is opened, so a check that cannot run is caught before it lands.
 OUTCOME_READ="${POST_LAND_OUTCOME_READ:-$(cd "$(dirname "$0")" && pwd)/outcome-read}"
+PROOF_JS="$(cd "$(dirname "$0")" && pwd)/open-loops-proof.mjs"   # Open Loops: the rows' birth (--sync) and their verdicts
 TASKS="${POST_LAND_TASKS:-$HOME/Work/tasks}"
 NOW_KEY=""; DRY=""
 while [ $# -gt 0 ]; do
@@ -245,9 +250,28 @@ if [ -z "$NOW_KEY" ] && [ -z "$DRY" ]; then
 fi
 
 fails=0; unproved=0; ran=0
+# 0. THE ROWS' BIRTH (her words 28 Nov 2026: "there should be a fucking list on open loops … for landed not yet
+# proven"): every nightly run first gives each PR with an OUTCOME-CHECK DUE line its "Landed, not yet proven" row
+# (open-loops-proof.mjs --sync; idempotent). It fails alone: the checks still run, the night exits 1 and says why.
+SYNC_BAD=0
+if [ -z "$NOW_KEY" ]; then
+  if [ -n "$DRY" ]; then say "[dry-run] would give each DUE outcome check its Open Loops row (open-loops-proof.mjs --sync)"
+  else
+    if [ -n "${POST_LAND_SYNC:-}" ]; then sync_out="$("$POST_LAND_SYNC" "$DUE_FILE" </dev/null 2>&1)"; src=$?
+    else sync_out="$(cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node "$PROOF_JS" --sync "$DUE_FILE" </dev/null 2>&1)"; src=$?
+    fi
+    printf '%s\n' "$sync_out" | sed 's/^/  open-loops sync: /' >> "$LOG"
+    if [ "$src" -eq 0 ]; then say "open-loops sync: $(printf '%s\n' "$sync_out" | grep -E '^OPEN_LOOPS SYNC ' | tail -1 | sed 's/^OPEN_LOOPS SYNC //')"
+    else
+      SYNC_BAD=1
+      say "NAMED STOP [OPEN_LOOPS_SYNC_FAILED] the Landed, not yet proven rows were not all made (exit $src): $(printf '%s\n' "$sync_out" | grep -m1 'NAMED STOP' | cut -c1-200) (see $LOG)"
+      notify "Open Loops: the Landed, not yet proven rows could not all be made tonight (see $LOG)"
+    fi
+  fi
+fi
 LINES="$(due_lines)"
 [ -n "$NOW_KEY" ] && LINES="$(awk -F'\t' -v k="$NOW_KEY" '$1 == "FORM-PROOF" && $2 == k' <<<"$LINES")"
-if [ -z "$LINES" ] && { [ -n "$NOW_KEY" ] || ! grep -q '^- OUTCOME-CHECK DUE ' "$DUE_FILE"; }; then say "nothing due${NOW_KEY:+ for $NOW_KEY} in $DUE_FILE"; exit 0; fi
+if [ -z "$LINES" ] && { [ -n "$NOW_KEY" ] || ! grep -q '^- OUTCOME-CHECK DUE ' "$DUE_FILE"; }; then say "nothing due${NOW_KEY:+ for $NOW_KEY} in $DUE_FILE"; exit "$SYNC_BAD"; fi
 
 # 1. Each form on its own, first: a broken live form is the urgent one.
 while IFS=$'\t' read -r kind key sha rest; do
@@ -374,18 +398,34 @@ sheet_set() { # $1 slug  $2 key  $3 status line  $4 to-done(1|"") — only a she
 # The Notices line on her next morning email (boss-os morning "notices" section). One write per key: a key already
 # written (marker in $LOCKS) is never written twice; NOT CHECKED carries the day, so it shows again each morning.
 NOTICE_CMD="${POST_LAND_NOTICE:-}"
+# outcome-notice.mjs takes ONE line of 1 to 300 characters and refuses anything else, so a long or multi-line
+# COULDNT-CHECK reason was never written and she never heard of it (27 Nov 2026 log: NOTICE_UNWRITTEN on each).
+# One line, at most 300 characters (Unicode characters, as the reader counts them): the middle is cut with "…" and the
+# trailing "; look: <link>" kept, so where to look survives; the full text stays in the local log.
+notice_text() { # $1 text -> stdout the one line she is sent
+  python3 -c '
+import re, sys
+t = re.sub(r"\s+", " ", sys.argv[1]).strip()
+if len(t) > 300:
+    m = re.search(r"; look: \S+$", t)
+    tail = m.group(0) if m and len(m.group(0)) <= 120 else ""
+    head = t[: len(t) - len(tail)] if tail else t
+    t = head[: 300 - len(tail) - 1].rstrip() + "…" + tail
+print(t)' "$1"
+}
 notice() { # $1 key  $2 text -> rc 0 written (or already written)
-  local m="$LOCKS/notice-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+  local m="$LOCKS/notice-$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')" t
   [ -e "$m" ] && { say "  (Notices line $1 already written)"; return 0; }
-  [ -n "$DRY" ] && { say "[dry-run] would write Notices: $2"; return 0; }
-  if [ -n "$NOTICE_CMD" ]; then "$NOTICE_CMD" "$1" "$2" </dev/null
-  else (cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$2" </dev/null)
+  t="$(notice_text "$2")"
+  [ -n "$DRY" ] && { say "[dry-run] would write Notices: $t"; return 0; }
+  [ "$t" = "$2" ] || printf '%s Notices (full text, sent cut to one line of %s): %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "${#t}" "$2" >> "$LOG"
+  if [ -n "$NOTICE_CMD" ]; then "$NOTICE_CMD" "$1" "$t" </dev/null
+  else (cd "$HOME/.boss-os/runtime" && npm run --silent vault:run -- node scripts/ops/outcome-notice.mjs --key "$1" --text "$t" </dev/null)
   fi >>"$LOG" 2>&1 || { say "  NAMED STOP [NOTICE_UNWRITTEN] the Notices line for $1 could not be written (see $LOG); the line in the list and the PR comment stand"; return 1; }
-  printf '%s Notices: %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$2" >> "$LOG"   # the line she reads, kept in the local log
+  printf '%s Notices: %s\n' "$(TZ=America/Chicago date '+%d %b %H:%M CT')" "$t" >> "$LOG"   # the line she reads, kept in the local log
   : > "$m"
 }
 LOOPS_CMD="${POST_LAND_LOOPS:-}"
-PROOF_JS="$(cd "$(dirname "$0")" && pwd)/open-loops-proof.mjs"
 proof_rows() { # $1 key  $2 PASS|FAIL  $3 seen -> rc 0 rows updated (or none waiting) | 1 Open Loops not reached: rows unchanged
   [ -n "$DRY" ] && { say "[dry-run] would close or return the Open Loops rows waiting on $1 ($2)"; return 0; }
   local out rc
@@ -553,7 +593,7 @@ Judged by a model with no tools, from that output alone.")" || { url="(comment n
 done <<<"$OUTL"
 ran=$((ran + oruns)); fails=$((fails + ofails)); unproved=$((unproved + ounproved))
 
-[ "$ran" -gt 0 ] || { say "nothing due${NOW_KEY:+ for $NOW_KEY}"; exit 0; }
+[ "$ran" -gt 0 ] || { say "nothing due${NOW_KEY:+ for $NOW_KEY}"; exit "$SYNC_BAD"; }
 [ "$fails" -eq 0 ] || notify "Post-land check: $fails FAIL(s); each is marked FAIL in ~/Work/tasks/post-land-checks.md and has a fix sheet in ~/Work/tasks"
 if [ "$unproved" -gt 0 ]; then notify "Post-land check: $unproved line(s) got no verdict and stay DUE"; exit 1; fi
-exit 0
+exit "$SYNC_BAD"

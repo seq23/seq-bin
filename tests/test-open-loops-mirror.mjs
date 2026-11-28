@@ -1,7 +1,8 @@
-// open-loops-mirror.mjs against a fake Boss OS (27 Nov 2026, "Landed, waiting on proof").
-// Proves: a `proving` row is off the main list (not counted open, overdue or yours, even long past its date), sits in
-// its own folded section with its PR between the dated list and Parked, and the header says "N waiting on proof";
-// an unreadable list is a NAMED STOP, never an empty page.
+// open-loops-mirror.mjs against a fake Boss OS (27 Nov 2026 "Landed, waiting on proof"; 28 Nov 2026 the two lists).
+// Proves: directly under the summary line, before any dated heading and never folded, come "Landed, not yet proven
+// (N)" (each row's PR as "repo #n" and its check date) then "Parked, no date (N)" (no date, even when the row holds
+// one); a `proving` row is not counted open, overdue or yours, even long past its date, and appears in no dated
+// group; counts equal the rows sent; an unreadable list is a NAMED STOP, never an empty page.
 // Run: node --test tests/test-open-loops-mirror.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ const LOOPS = [
   L("main_soon", { section: "not_finished", next_date: "2999-01-01", owner: "sequoia" }),
   L("proof_late", { section: "proving", next_date: "2020-01-01", owner: "sequoia", proof_pr: "seq23/seq-bin#198", title: "TEST form keeps nothing" }),
   L("idea", { section: "parked", next_date: null }),
+  L("idea_dated", { section: "parked", next_date: "2026-12-25", title: "TEST parked but holding a date" }),
 ];
 
 async function mirror(status, loops) {
@@ -37,18 +39,29 @@ async function mirror(status, loops) {
   return { ...out, html: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "" };
 }
 
-test("a proving row is off the main list and out of every count but its own", async () => {
+test("both lists sit under the summary, open, in order, before any dated heading; proving is off the main list", async () => {
   const { code, html } = await mirror(200, LOOPS);
   assert.equal(code, 0);
-  assert.match(html, /<p class="sum">2 open · 1 overdue · 1 yours · 1 waiting on proof · 1 parked<\/p>/);
-  const overdue = html.slice(html.indexOf('<h2 class="late">'), html.indexOf("Landed, waiting on proof"));
-  assert.ok(!overdue.includes("form keeps nothing"), "the proving row is not in the dated list");
-  const proofAt = html.indexOf("Landed, waiting on proof <small>1</small>"), parkedAt = html.indexOf("<h2>Parked");
-  assert.ok(proofAt > 0 && proofAt < parkedAt, "its section sits before Parked");
-  const section = html.slice(proofAt, parkedAt);
-  assert.match(section, /TEST form keeps nothing/);
-  assert.match(section, /waiting on seq23\/seq-bin#198's live check/);
-  assert.match(html, /<details class="park"><summary><h2>Landed, waiting on proof/, "folded, like Parked");
+  assert.match(html, /<p class="sum">2 open · 1 overdue · 1 yours · 1 landed, not yet proven · 2 parked<\/p>/);
+  const sum = html.indexOf('<p class="sum">');
+  const proofAt = html.indexOf('<h2 class="list">Landed, not yet proven <small>1</small></h2>');
+  const parkAt = html.indexOf('<h2 class="list">Parked, no date <small>2</small></h2>');
+  const firstDated = html.indexOf('<h2 class="late">');
+  assert.ok(sum > 0 && sum < proofAt && proofAt < parkAt && parkAt < firstDated, `order: summary ${sum} < proving ${proofAt} < parked ${parkAt} < first dated ${firstDated}`);
+  assert.ok(!html.includes("<details class=\"park\">") && !/<summary><h2/.test(html), "neither list is folded");
+  const proving = html.slice(proofAt, parkAt), parked = html.slice(parkAt, firstDated), dated = html.slice(firstDated);
+  assert.match(proving, /TEST form keeps nothing<\/span><span class="s">seq-bin #198 · live check Wed 1 Jan<\/span>/);
+  assert.match(parked, /TEST idea<\/span>/); assert.match(parked, /TEST parked but holding a date<\/span><span class="s">Claude · Spry Labs<\/span>/);
+  assert.ok(!/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}\b/.test(parked), "no date printed in the parked list");
+  assert.ok(!dated.includes("form keeps nothing") && !dated.includes("TEST idea"), "no proving or parked row in the dated list");
+  assert.equal((proving.match(/<li /g) ?? []).length, 1); assert.equal((parked.match(/<li /g) ?? []).length, 2);
+});
+
+test("empty lists still show their heading with 0 and a plain line, never a missing section", async () => {
+  const { code, html } = await mirror(200, LOOPS.filter((l) => l.section === "not_finished"));
+  assert.equal(code, 0);
+  assert.match(html, /Landed, not yet proven <small>0<\/small><\/h2>[\s\S]*Nothing waiting on a live check\./);
+  assert.match(html, /Parked, no date <small>0<\/small><\/h2><ul><li class="none">Nothing parked\.<\/li>/);
 });
 
 test("an unreadable list is a NAMED STOP and writes no page", async () => {

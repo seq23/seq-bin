@@ -2917,7 +2917,7 @@ EXPECT="$DEPLOY_WF to run on #$PR's merge commit and finish green, so production
   DCEIL=$(( $(last_duration "$DEPLOY_WF") * 3 / 2 )); [ "$DCEIL" -ge "${LAND_WAIT_FLOOR_SECS:-360}" ] || DCEIL=${LAND_WAIT_FLOOR_SECS:-360}
   DAPPEAR=$((SECONDS + ${LAND_DEPLOY_APPEAR_SECS:-300})); DSEEN=""
   while :; do
-    DROWS="$(gh run list --workflow "$DEPLOY_WF" --limit 20 --json databaseId,headSha,status,conclusion \
+    DROWS="$(gh run list --workflow "$DEPLOY_WF" --branch main --limit 20 --json databaseId,headSha,status,conclusion \
               -q '.[] | "\(.databaseId)\t\(.headSha)\t\(.status)\t\(.conclusion // "")"' 2>/dev/null)"
     DPICK="$(deploy_wf_pick "$DMSHA" <<<"$DROWS")"
     if [ -z "$DPICK" ]; then

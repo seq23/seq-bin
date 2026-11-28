@@ -52,8 +52,27 @@ details" --arg u "$who" --arg t "$when" --arg url "https://github.com/$repo/pull
     '[{body: $b, user: {login: $u}, created_at: $t, html_url: $url}]' > "$f"
 done
 AI
-chmod +x "$W/bin/gh" "$W/bin/ai-run"
-export POST_LAND_SKIP="$W/no-skip-file" PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_LOG="$W/log" \
+# The shared free reader (boss-os scripts/ops/free-read.mjs), as the outcome checks reach it since 27 Nov 2026: the
+# instruction in a file, the source on stdin, the answer on stdout. Same scenario variables as the bare run had.
+cat > "$W/bin/free-read" <<'FR'
+#!/bin/bash
+S="$PLC_STORE"; echo x >> "$S/ai-calls"; n="$(wc -l < "$S/ai-calls" | tr -d ' ')"
+worker=""; ifile=""; req=""; a=("$@"); for ((i = 0; i < ${#a[@]}; i++)); do case "${a[i]}" in --worker) worker="${a[i+1]}";; --instruction-file) ifile="${a[i+1]}";; --require) req="${a[i+1]}";; esac; done
+src="$(timeout 5 cat)"; prompt="$(cat "$ifile")
+$src"
+printf '%s\n' "$prompt" > "$S/ai-prompt"; printf '%s\n' "$prompt" > "$S/ai-prompt-$n"
+echo "worker=$worker require=$req" >> "$S/ai-how"
+pr="$(grep -oE '[a-z0-9-]+/[a-z0-9-]+#[0-9]+' <<<"$prompt" | head -1)"; pr="${pr##*#}"
+if grep -q "write ONE check" <<<"$prompt"; then vn="INFER_${pr}"; else vn="VERDICT_${pr}"; fi
+[ -n "${!vn:-}" ] || { echo "NAMED STOP [FREE_READER_UNCERTAIN] no usable answer" >&2; exit 3; }
+printf '%s\nevidence line\n' "${!vn}"
+FR
+cat > "$W/bin/free-read-down" <<'FR'
+#!/bin/bash
+echo x >> "$PLC_STORE/ai-calls"; cat >/dev/null; echo "NAMED STOP [FREE_ALLOWANCE_EXHAUSTED] both free days spent" >&2; exit 3
+FR
+chmod +x "$W/bin/gh" "$W/bin/ai-run" "$W/bin/free-read" "$W/bin/free-read-down"
+export POST_LAND_SKIP="$W/no-skip-file" PATH="$W/bin:$PATH" PLC_STORE="$W/store" POST_LAND_AI_RUN="$W/bin/ai-run" POST_LAND_FREE_READ="$W/bin/free-read" POST_LAND_LOG="$W/log" \
   POST_LAND_DUE_FILE="$W/post-land-checks.md" POST_LAND_LOCKS="$W/locks" POST_LAND_NOTIFY="$W/bin/notify" POST_LAND_TASKS="$W/tasks"
 printf '#!/bin/bash\necho "$1" >> "%s/store/banners"\n' "$W" > "$W/bin/notify"; chmod +x "$W/bin/notify"
 # Open Loops (27 Nov 2026): a stand-in for open-loops-proof.mjs, so no run here ever reaches the live list.
@@ -170,7 +189,7 @@ calls() { if [ -f "$W/store/ai-calls" ]; then wc -l < "$W/store/ai-calls" | tr -
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on. all from today"
 check "outcome PASS: exit 0" [ "$(orun)" = 0 ]
 check "…ONE model run judged it" [ "$(calls)" = 1 ]
-check "…that model had NO tools: ai-run asked for a bare run, no --network, started in the lock folder (not her home)" eval 'grep -qx "bare=1 network=0 cwd=$W/locks" "$W/store/ai-how"'
+check "…that model was the shared free reader as Danielle, required to carry the verdict line (no tools, no ai-run)" eval 'grep -qx "worker=danielle require=Outcome check (live):" "$W/store/ai-how" && [ ! -s "$W/store/ai-env" ]'
 check "…it was handed the check's real output, the count, and the PR's text" eval 'grep -qx "4" "$W/store/ai-prompt" && grep -q "It counted 4" "$W/store/ai-prompt" && grep -q "PR body text" "$W/store/ai-prompt"'
 check "…CODE posted the model's verdict as the PR comment (first line exact)" eval '[ "$(comments)" = 1 ] && [ "$(first)" = "Outcome check (live): PASS — saw 4 of 4 decisions acted on; all from today" ]'
 check "…the line in the list is DONE with the comment's link" grep -q '^- OUTCOME-CHECK DONE o/app#5 aaa111 — task:job5 .* → https://github.com/o/app/pull/5#code$' "$W/post-land-checks.md"
@@ -217,7 +236,7 @@ check "…the line stays DUE and the Notices line says NOT CHECKED" eval 'grep -
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="I think it is probably fine. PASS"
 check "…a PASS that is not on the verdict line never counts: exit 1, DUE" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md"'
 reset; osheet; due_list "$(oline "$FOUR")"
-check "Rule 0, ai-run down or a usage limit: exit 1, line DUE, NOT CHECKED" eval '[ "$(POST_LAND_AI_RUN="$W/bin/ai-run-down" orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the checker gave no verdict (it was down, out of its usage limit, or answered nothing)" "$W/store/notices" && ! grep -qi "exit" "$W/store/notices"'
+check "Rule 0, the free reader down or its allowance spent: exit 1, line DUE, NOT CHECKED" eval '[ "$(POST_LAND_FREE_READ="$W/bin/free-read-down" orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE o/app#5 " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the checker gave no verdict (it was down, out of its usage limit, or answered nothing)" "$W/store/notices" && ! grep -qi "exit" "$W/store/notices"'
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): COULDNT-CHECK — the output does not say which day"
 check "the model says COULDNT-CHECK: exit 1, line DUE, NOT CHECKED with its words" eval '[ "$(orun)" = 1 ] && grep -q "^- OUTCOME-CHECK DUE " "$W/post-land-checks.md" && grep -q "NOT CHECKED — the check never gave a reading: the output does not say which day" "$W/store/notices"'
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4" GH_COMMENT_FAIL=1
@@ -279,8 +298,10 @@ check "…and POST_LAND_FORCE=1 runs one anyway" eval '! POST_LAND_FORCE=1 POST_
 echo 2000-01-01 > "$W/skip"
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4"
 check "…an expired skip date runs the checks as usual" eval '[ "$(POST_LAND_SKIP="$W/skip" orun)" = 0 ] && ! grep -q "PAUSED" "$W/out" && grep -q "^- OUTCOME-CHECK DONE " "$W/post-land-checks.md"'
-# USAGE SAVER (27 Nov 2026): every checker run is the cheap kind: Sonnet, 15 minutes, 200 a day; no connectors, or no tools at all.
-check "every checker run asks ai-run for Sonnet, its caps, and no connectors (or no tools)" eval '[ -s "$PLC_STORE/ai-env" ] && ! grep -vE "^model=sonnet (mcp=none bare=|mcp= bare=1) secs=900 runs=200 ignore=1$" "$PLC_STORE/ai-env" | grep -q .'
+# USAGE SAVER (27 Nov 2026): every ai-run checker is the cheap kind: Sonnet, 15 minutes, 200 a day, no connectors; outcome verdicts use the free reader.
+reset; due_list "$F1
+$E2"; export VERDICT_1="Form proof (production): PASS — contact form received" VERDICT_2="Engineering check: PASS — fine"; run >/dev/null
+check "every ai-run checker (engineering checks, form proofs) asks for Sonnet, its caps, and no connectors" eval '[ -s "$PLC_STORE/ai-env" ] && ! grep -vE "^model=sonnet mcp=none bare= secs=900 runs=200 ignore=1$" "$PLC_STORE/ai-env" | grep -q .'
 echo "=== Open Loops 'Landed, waiting on proof' (27 Nov 2026): PASS closes, FAIL returns, unknown or an outage touches nothing ==="
 reset; osheet; due_list "$(oline "$FOUR")"; export VERDICT_5="Outcome check (live): PASS — saw 4 of 4 decisions acted on"
 check "PASS: the rows waiting on o/app#5 are handed PASS, what it saw and the day" eval '[ "$(orun)" = 0 ] && grep -qx "o/app#5|PASS|saw 4 of 4 decisions acted on|2026-11-25" "$W/store/loops"'

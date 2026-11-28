@@ -390,6 +390,7 @@ check "control: a normal PR's sha-less owner PASS posted after its head arrived 
 gate "$(at_comment "$(meta 'Tweaks the page.' "$SITE" | noelle)" 2026-01-03T00:00:00Z)"
 check "a protected PR's sha-less PASS -> refused STALE_PASS (it must name the head)" eval '[ "$RC" -eq 1 ] && code_is STALE_PASS && grep -q "no commit on this PR" <<<"$MSG"'
 echo "=== protected: --owner (body_gates' 4th argument) never clears it, and its forms/outcome leniency is off ==="
+# shellcheck disable=SC2034 # BP and BRC are read by the eval'd check lines below
 bg() { # PR-view JSON, owner flag -> BRC, BP: body_gates' problems
   BP="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''body_gates 9 "$1" "$2" "$3"; rc=$?; printf "%s" "$BODY_PROBLEMS"; exit "$rc"' _ "$PR_HEAD" "${1//@HEAD@/$(sha_name "$PR_HEAD")}" "$2")"; BRC=$?
 }
@@ -401,6 +402,7 @@ check "…with no Outcome or Not built line, --owner does not record them UNDECL
 bg "$(FAST=1 NOREVIEW=1 meta 'Fixes a page.' "$SITE" | jq -c '.body += "\nOutcome: none — a fixture change that runs nothing"')" 1
 check "control: a normal PR under --owner: no problems (rc 0)" [ "$BRC" -eq 0 ]
 echo "=== protected: the exact git diff of the head (verified_workflow_paths), deletes and renames included ==="
+# shellcheck disable=SC2034 # VW and VRC are read by the eval'd check lines below
 vwp() { # head -> VRC, VW (from_git_github, or empty)
   VW="$(cd "$W/r" && PATH="$W/bin:$PATH" bash -c "$BLOCK"$'\n''verified_workflow_paths 9 "$1" <<<"{\"files\":[]}" | jq -r .from_git_github; exit "${PIPESTATUS[0]}"' _ "$1")"; VRC=$?
 }

@@ -541,16 +541,18 @@ check "…its environment is the first run's, name for name, plus CLAUDE_CODE_OA
 check "…and that comparison saw real environments (PATH and HOME are in both)" [ "$(names_of 1 | grep -cxE 'PATH|HOME')$(names_of 2 | grep -cxE 'PATH|HOME')" = "22" ]
 check "…the same prompt both times" [ "$(grep -c '^plan the week$' "$TMP/claude-stdins.log")" -eq 2 ]
 check "the usage log has ONE line for it, signin=vault" grep -qE $'\tengine=claude\tcaller=[^\t]+\texit=0\tsignin=vault\tbytes=[1-9][0-9]*\tsecs=[0-9]+$' <<<"$(last_log)"
-check "…and stdout and stderr are empty (the answer went to --out)" [ ! -s "$TMP/so" ] && [ ! -s "$TMP/se" ]
+check "…and stdout and stderr are empty (the answer went to --out)" [ "$(cat "$TMP/so" "$TMP/se")" = "" ]
 reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"
 out="$(run "$AI" --role brain -- "x")"; rc=$?
 check "without --out, stdout is the answer alone (rc=$rc)" [ "$rc|$out" = "0|BRAIN-DONE" ]
 reset; echo open > "$TMP/vault-mode"
 out="$(run "$AI" --role brain -- "x")"; rc=$?
-check "the Mac's sign-in works: one run as today, NO token, the vault never opened" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|unset" ] && no_vault
+check "the Mac's sign-in works: one run as today, NO token" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|unset" ]
+check "…and the vault never opened" no_vault
 reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"
 out="$(run env CLAUDE_CODE_OAUTH_TOKEN="caller-token-1234567890abc" "$AI" --role brain -- "x")"; rc=$?
-check "a token the caller set wins: one run on it, the vault never opened (rc=$rc)" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|$(printf '%s' caller-token-1234567890abc | cksum | tr ' ' '-')" ] && no_vault
+check "a token the caller set is used first: one run on it (rc=$rc)" [ "$rc|$out|$(claude_calls)|$(token_of 1)" = "0|BRAIN-DONE|1|$(printf '%s' caller-token-1234567890abc | cksum | tr ' ' '-')" ]
+check "…and the vault never opened" no_vault
 reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; echo hour5 > "$TMP/claude-mode"
 out="$(run "$AI" --role brain -- "x")"; rc=$?
 check "the token's run hits the plan's limit: then ONE run on the free credit, as for any plan limit (rc=$rc)" [ "$rc|$out|$(claude_calls)" = "$(printf '0|CREDIT-DONE line one\nline two|3')" ]
@@ -562,7 +564,8 @@ signin_fails() { # signin_fails <label> <vault-mode> <log code> <why regex>
   run env AI_RUN_VAULT_SECS=1 "$AI" --role brain --out "$TMP/out.log" -- "x" > "$TMP/so" 2> "$TMP/se"; rc=$?
   check "$1: the run ends as it did, exit 1, never success (rc=$rc)" [ "$rc" -eq 1 ]
   check "…claude ran once, with no token and no key ($(token_of 1), $(env_of 1))" [ "$(claude_calls)|$(token_of 1)|$(env_of 1)" = "1|unset|key=unset other= npm= path=own" ]
-  check "…--out keeps Claude's notice and one line saying why" grep -qE "^Not logged in · Please run /login$" "$TMP/out.log" && grep -qE "^The Mac's Claude sign-in has ended and the vault's one-year sign-in was not used: $4\.$" "$TMP/out.log"
+  check "…--out keeps Claude's notice" grep -qE "^Not logged in · Please run /login$" "$TMP/out.log"
+  check "…and one line saying why" grep -qE "^The Mac's Claude sign-in has ended and the vault's one-year sign-in was not used: $4\.$" "$TMP/out.log"
   check "…the usage log says signin=$3" grep -qE $'\texit=1\tsignin='"$3"$'\tbytes=' <<<"$(last_log)"
 }
 reset; echo ended > "$TMP/mac-login"
@@ -580,7 +583,8 @@ reset; echo ended > "$TMP/mac-login"
 AI_RUN_VAULT_REPO="$TMP/no-such-checkout" signin_fails "no vault checkout on this machine" none VAULT_UNREADABLE 'the Boss OS vault cannot be run on this machine \(it needs [^)]*\)'
 check "…and nothing was run in its place" no_vault
 out="$(run env ANTHROPIC_CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" "$AI" --signin-child extra 2>&1)"; rc=$?
-check "the sign-in child is internal: refused with any argument, and says nothing of the token (rc=$rc)" [ "$rc" -eq 64 ] && ! grep -qF -- "$TOKEN" <<<"$out"
+check "the sign-in child is internal: refused with any argument (rc=$rc)" [ "$rc" -eq 64 ]
+absent "…and says nothing of the token" grep -qF -- "$TOKEN" <<<"$out"
 reset; echo open > "$TMP/vault-mode"; echo ended > "$TMP/mac-login"; echo slow > "$TMP/claude-mode"
 env PATH="$BIN:$PATH" "$AI" --role brain --out "$TMP/out.log" -- "long" > /dev/null 2>&1 & AIPID=$!
 for _ in $(seq 1 100); do grep -q STARTED "$TMP/out.log" 2>/dev/null && break; sleep 0.1; done

@@ -26,11 +26,13 @@ ctx() { python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOut
 run "git status" "CHANGED /x/index.html (3 open)"
 check "an unrelated command: no rebuild, no output" eval '[ "$RC" -eq 0 ] && ! calls && [ -z "$OUT" ]'
 run "curl -s https://boss/api/boss/open-loops" "CHANGED /x/index.html (3 open)"
-check "an Open Loops API call that changed the page: rebuilt, told to republish" eval 'calls && grep -q "open-loops-mirror.mjs" "$W/npm.calls" && ctx | grep -q "^Open Loops changed. Republish the mirror now"'
+check "an Open Loops API call that changed the page: rebuilt, told to republish" eval 'calls && grep -q "open-loops-mirror.mjs" "$W/npm.calls" && ctx | grep -q "^Open Loops changed. Republish: copy"'
 run "curl -s https://boss/api/boss/open-loops" "UNCHANGED 3 open"
 check "an Open Loops call that changed nothing: rebuilt, silent" eval '[ "$RC" -eq 0 ] && calls && [ -z "$OUT" ]'
 run "node close-loop.mjs 42" "CHANGED /x/index.html (2 open)"
 check "a script that calls the Open Loops API counts too" eval 'calls && ctx | grep -q "^Open Loops changed"'
+run "grep -n api/boss/open-loops ~/bin/close-loop.mjs" "CHANGED /x/index.html (2 open)"
+check "reading a file about Open Loops: no rebuild" eval '! calls && [ -z "$OUT" ]'
 run "node other.mjs" "CHANGED /x/index.html (2 open)"
 check "a script that never touches Open Loops: no rebuild" eval '! calls && [ -z "$OUT" ]'
 run "node ~/bin/open-loops-mirror.mjs" "CHANGED /x/index.html (2 open)"

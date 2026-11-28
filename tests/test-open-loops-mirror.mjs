@@ -39,27 +39,34 @@ async function mirror(status, loops) {
   return { ...out, html: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "" };
 }
 
-test("both lists sit under the summary, open, in order, before any dated heading; proving is off the main list", async () => {
-  const { code, html } = await mirror(200, LOOPS);
+test("yours first with 🟡/🔴, then open by date, parked, and proving last; counts equal the rows sent", async () => {
+  const loops = [...LOOPS, L("yes_row", { section: "not_finished", owner: "sequoia", title: "TEST Decide: keep it", next_date: "2999-01-02" }),
+    L("dollar", { section: "proving", next_date: "2020-01-02", proof_pr: "seq23/x#1", title: "TEST check $' and $& stay text" })];
+  const { code, html } = await mirror(200, loops);
   assert.equal(code, 0);
-  assert.match(html, /<p class="sum">2 open · 1 overdue · 1 yours · 1 landed, not yet proven · 2 parked<\/p>/);
-  const sum = html.indexOf('<p class="sum">');
-  const proofAt = html.indexOf('<h2 class="list">Landed, not yet proven <small>1</small></h2>');
-  const parkAt = html.indexOf('<h2 class="list">Parked, no date <small>2</small></h2>');
-  const firstDated = html.indexOf('<h2 class="late">');
-  assert.ok(sum > 0 && sum < proofAt && proofAt < parkAt && parkAt < firstDated, `order: summary ${sum} < proving ${proofAt} < parked ${parkAt} < first dated ${firstDated}`);
-  assert.ok(!html.includes("<details class=\"park\">") && !/<summary><h2/.test(html), "neither list is folded");
-  const proving = html.slice(proofAt, parkAt), parked = html.slice(parkAt, firstDated), dated = html.slice(firstDated);
-  assert.match(proving, /TEST form keeps nothing<\/span><span class="s">seq-bin #198 · live check Wed 1 Jan<\/span>/);
-  assert.match(parked, /TEST idea<\/span>/); assert.match(parked, /TEST parked but holding a date<\/span><span class="s">Claude · Spry Labs<\/span>/);
-  assert.ok(!/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}\b/.test(parked), "no date printed in the parked list");
-  assert.ok(!dated.includes("form keeps nothing") && !dated.includes("TEST idea"), "no proving or parked row in the dated list");
-  assert.equal((proving.match(/<li /g) ?? []).length, 1); assert.equal((parked.match(/<li /g) ?? []).length, 2);
+  assert.match(html, /<p class="sum">3 open · 1 overdue · 2 yours \(🟡 1 your yes · 🔴 1 only you\) · 2 landed, not yet proven · 2 parked<\/p>/);
+  const at = (s) => html.indexOf(s);
+  const yours = at('<h2 id="yours">'), open = at('<h2 id="open">'), parked = at('<h2 id="parked">'), proving = at('<h2 id="proving">');
+  assert.ok(at('<p class="sum">') < yours && yours < open && open < parked && parked < proving, "order");
+  const ys = html.slice(yours, open);
+  assert.ok(ys.indexOf("🟡 TEST Decide: keep it") > 0 && ys.indexOf("🟡 TEST Decide") < ys.indexOf("🔴 TEST main_soon"), "🟡 rows lead, 🔴 after");
+  assert.ok(!html.slice(open, parked).includes("main_soon"), "her rows are not repeated in Open");
+  assert.match(html.slice(open, parked), /<h3 class="late">Overdue <small>1<\/small><\/h3>[\s\S]*TEST main_late/);
+  const pk = html.slice(parked, proving);
+  assert.match(pk, /TEST parked but holding a date<\/span><span class="m">Claude · Spry Labs<\/span>/);
+  assert.ok(!/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}\b/.test(pk), "no date in parked");
+  const pv = html.slice(proving);
+  assert.match(pv, /Check Wed 1 Jan <small>1<\/small><\/h3><ul><li class="p"><span class="t">TEST form keeps nothing<\/span><span class="m">seq-bin #198<\/span>/);
+  assert.ok(pv.includes("TEST check $&#39; and $&amp; stay text") || pv.includes("TEST check $' and $&amp; stay text"), "row text with $' is kept as text");
+  assert.equal((html.match(/<h1>/g) ?? []).length, 1, "the page is not copied into itself");
+  assert.equal((html.match(/<li class="p">/g) ?? []).length, 2);
+  assert.ok(!html.includes("<details"), "nothing folded shut");
 });
 
 test("empty lists still show their heading with 0 and a plain line, never a missing section", async () => {
-  const { code, html } = await mirror(200, LOOPS.filter((l) => l.section === "not_finished"));
+  const { code, html } = await mirror(200, LOOPS.filter((l) => l.section === "not_finished" && l.owner !== "sequoia"));
   assert.equal(code, 0);
+  assert.match(html, /Yours <small>0<\/small><\/h2>[\s\S]*Nothing waiting on you\./);
   assert.match(html, /Landed, not yet proven <small>0<\/small><\/h2>[\s\S]*Nothing waiting on a live check\./);
   assert.match(html, /Parked, no date <small>0<\/small><\/h2><ul><li class="none">Nothing parked\.<\/li>/);
 });

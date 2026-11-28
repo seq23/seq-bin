@@ -220,6 +220,12 @@ jobs:
       - name: pr-watch picks up every PR quiet 30+ min, never none-stuck on an outage, read-only on GitHub
         run: ./tests/test-pr-watch.sh
 
+      # 28 Nov 2026 token cuts: token-report never prints message text, an email or a key (fixture holds both),
+      # stops by name on no transcripts or an unreadable format, reads a failed Boss OS read as "not read", and
+      # --compare calls a cut WORKING only at a third or more, on the baseline's mix of roles.
+      - name: token-report counts each call once, keeps private text out, and stops by name on nothing to read
+        run: ./tests/test-token-report.sh
+
       - name: a named job is tailed, her own replies included
         run: ./tests/test-scooter-watch-named.sh
       - name: a card a developer has taken over never launches a tail

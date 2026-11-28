@@ -510,6 +510,7 @@ case "$NAME" in
   # README's deploy is wrangler inside the Boss OS vault (CLOUDFLARE_API_TOKEN), as aplayer-mode does.
   # Added 23 Nov 2026 when land refused whisperalmanac-site #3 (d10-scan-protect).
   whisperalmanac-site)  DEPLOY='d="$PWD"; (cd "$HOME/GitHub/boss-os" && npm run --loglevel=error vault:run -- sh -c "cd \"$d\" && npx --yes wrangler@4 deploy")' ; SELF="" ;;
+  WKYS|wkys)            DEPLOY="" ; SELF="deploys itself through its own deploy.yml (production job, Cloudflare Pages project wkys) on push to main (wekeepyouspry.com)" ; DEPLOY_WF="deploy.yml" ; SMOKE="https://wekeepyouspry.com/" ;;
   *) [ "${MODE:-land}" = check ] || die "$NAME has no deploy route recorded in this script. Add one before landing." ;;   # land --check reads a description; it deploys nothing
 esac
 [ -z "$PROMOTE_VIA" ] || PROMOTE_WF="$PROMOTE_VIA"

@@ -1,0 +1,80 @@
+#!/bin/bash
+# ci-status — a PR's checks in ONE line, so an agent never pastes a check table or a CI log into its context
+# (28 Nov 2026, her "yes" to the token cuts: "short answers instead of whole logs").
+#
+#   ci-status <owner/repo> <pr>                 one line, now
+#   ci-status <owner/repo> <pr> --wait [secs]   the bounded wait (gh pr checks --watch --fail-fast, default 1200 s,
+#                                               its output thrown away), then the one line
+#   ci-status <owner/repo> <pr> --full          every check, and the failing job's whole failed log
+#   ci-status --self-test                       tests/test-quiet-helpers.sh
+#
+# The line, and the exit:
+#   0   "11/11 green"
+#   1   "first red: <check> — <first failing line> (<link>)"   a red always names its check and a line
+#   2   "pending: 3 of 11 still running (<names>); 8 green"
+#   75  "couldn't check: <why>"   gh down, signed out, rate-limited, no checks reported, an answer it cannot read.
+#       Never green: an unread PR is not a passing one.
+#   64  usage
+set -uo pipefail
+HERE="$(dirname "$(realpath "$0")")"
+# shellcheck source=quiet-lib.sh
+. "$HERE/quiet-lib.sh"
+
+[ "${1:-}" = "--self-test" ] && exec "$HERE/tests/test-quiet-helpers.sh"
+repo="${1:-}"; pr="${2:-}"; shift 2 2>/dev/null || true
+case "$repo/$pr" in */*/[0-9]*) : ;; *) echo "usage: ci-status <owner/repo> <pr> [--wait [secs]] [--full]" >&2; exit 64 ;; esac
+WAIT=""; FULL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --wait) WAIT=1200; case "${2:-}" in [0-9]*) WAIT="$2"; shift ;; esac ;;
+    --full) FULL=1 ;;
+    *) echo "usage: ci-status <owner/repo> <pr> [--wait [secs]] [--full]" >&2; exit 64 ;;
+  esac
+  shift
+done
+
+cant() { echo "couldn't check: $*"; exit 75; }
+
+if [ -n "$WAIT" ]; then
+  # The bounded wait her ruling names (23 Nov 2026); it stops at the first red. Its table never reaches the caller.
+  timeout "$WAIT" gh pr checks "$pr" -R "$repo" --watch --fail-fast >/dev/null 2>&1
+fi
+
+err="$(mktemp)"; trap 'rm -f "$err"' EXIT
+checks="$(timeout 60 gh pr checks "$pr" -R "$repo" --json name,bucket,link,workflow 2>"$err")"
+jq -e 'type == "array"' <<<"$checks" >/dev/null 2>&1 \
+  || cant "gh did not answer for $repo#$pr ($(head -c 160 "$err" | tr '\n' ' ' | sed 's/ *$//'))"
+n="$(jq length <<<"$checks")"
+[ "$n" -gt 0 ] || cant "no checks reported on $repo#$pr"
+
+if [ -n "$FULL" ]; then jq -r '.[] | "\(.bucket)\t\(.name)\t\(.link)"' <<<"$checks"; fi
+
+IFS=$'\t' read -r fname flink < <(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | first // {} | "\(.name // "")\t\(.link // "")"' <<<"$checks")
+green="$(jq '[.[] | select(.bucket == "pass" or .bucket == "skipping")] | length' <<<"$checks")"
+
+if [ -n "$fname" ]; then
+  job="$(grep -oE '/job/[0-9]+' <<<"$flink" | grep -oE '[0-9]+')"
+  line=""
+  if [ -n "$job" ]; then
+    log="$(timeout 90 gh run view --job "$job" -R "$repo" --log-failed 2>/dev/null | cut -f3-)"
+    [ -n "$FULL" ] && printf '%s\n' "$log"
+    line="$(first_failing_line <<<"$log")"
+    if [ -z "$line" ]; then
+      if [ -n "$log" ]; then line="its log named no failing line"; else line="its failed log could not be read"; fi
+    fi
+  else
+    line="no Actions log to read (an outside check)"
+  fi
+  echo "first red: $fname — $line (${flink:-no link})"
+  exit 1
+fi
+
+pend="$(jq -r '[.[] | select(.bucket == "pending") | .name]' <<<"$checks")"
+np="$(jq length <<<"$pend")"
+if [ "$np" -gt 0 ]; then
+  echo "pending: $np of $n still running ($(jq -r 'join(", ")' <<<"$pend" | cut -c1-160)); $green green"
+  exit 2
+fi
+# Every bucket is pass or skipping only here; anything else (a bucket gh adds later) is not green.
+[ "$green" -eq "$n" ] || cant "$((n - green)) of $n checks are in a state ci-status does not know"
+echo "$green/$n green"

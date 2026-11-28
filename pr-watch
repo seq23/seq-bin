@@ -77,6 +77,8 @@ ghr() {
   esac
 }
 
+# shellcheck source=quiet-lib.sh
+. "$(dirname "$(realpath "$0")")/quiet-lib.sh"   # first_failing_line: the one picker, shared with ci-status and test-quiet
 LINES=(); KEYS=(); UNK=0; STUCK=0; LANDS=0; OPEN=0; HELD=0; RED=0
 add() { LINES+=("$2"); KEYS+=("$1"); }   # $1 key (repo#n, for the banner), $2 the HANDOFF line
 unk() { UNK=$((UNK + 1)); LINES+=("- **couldn't check** $1"); KEYS+=(""); }
@@ -143,10 +145,9 @@ first_fail_line() { # repo job-link sha n -> the first failing test line from th
   cache="$STATE/fail-${repo//\//_}-$n-${sha:0:12}"
   [ -s "$cache" ] && { cat "$cache"; return; }
   local log; log="$(mktemp)"
-  ghr run view --job "$job" -R "$repo" --log-failed 2>/dev/null | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' | cut -f3- > "$log"
-  line="$(grep -m1 -E 'not ok |FAIL[: ]|✗|✖|×|AssertionError|Error: |error TS|FAILED' "$log" || grep -m1 '##\[error\]' "$log")"
+  ghr run view --job "$job" -R "$repo" --log-failed 2>/dev/null | cut -f3- > "$log"
+  line="$(first_failing_line < "$log")"
   rm -f "$log"
-  line="$(printf '%s' "$line" | sed -E 's/^[0-9T:.-]+Z //; s/^[[:space:]]+//' | cut -c1-220)"
   [ -n "$line" ] || { printf 'its log named no failing line'; return; }
   [ -n "$DRY" ] || printf '%s' "$line" > "$cache"
   printf '%s' "$line"

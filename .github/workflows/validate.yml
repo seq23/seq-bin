@@ -220,6 +220,11 @@ jobs:
       - name: pr-watch picks up every PR quiet 30+ min, never none-stuck on an outage, read-only on GitHub
         run: ./tests/test-pr-watch.sh
 
+      # 28 Nov 2026 token cuts: one-line answers for agents. A red names its check and first failing line; a gh
+      # outage, an empty or unknown check list is "couldn't check", never green; test-quiet keeps the exit code.
+      - name: quiet helpers (ci-status, test-quiet, pr-brief) never hide a failure
+        run: ./tests/test-quiet-helpers.sh
+
       - name: a named job is tailed, her own replies included
         run: ./tests/test-scooter-watch-named.sh
       - name: a card a developer has taken over never launches a tail

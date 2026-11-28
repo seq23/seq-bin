@@ -1,0 +1,30 @@
+#!/bin/bash
+# pr-brief — a PR in 5 lines, so an agent never reads a whole `gh pr view` or diff to know where it stands
+# (28 Nov 2026, token cuts). Read-only: only `gh pr view` and ci-status's own reads.
+#
+#   pr-brief <owner/repo> <pr>
+#     1  #<n> <title> — <state> by <author>, head <sha7>
+#     2  <head branch> → <base>: +<adds> −<dels> in <files> files; merge <mergeable>/<state>
+#     3  checks: <ci-status's line>
+#     4  review: <a Ship-ready PASS line naming this head | none for this head>; <N> comments, last by <who>
+#     5  files: the 5 biggest changes
+#   For what the description still lacks, run `land --check <pr>` (land's own gate; never copied here).
+# Exit 0 read; 75 "couldn't read <repo>#<pr>: <why>" (never a made-up line).
+set -uo pipefail
+HERE="$(dirname "$(realpath "$0")")"
+repo="${1:-}"; pr="${2:-}"
+case "$repo/$pr" in */*/[0-9]*) : ;; *) echo "usage: pr-brief <owner/repo> <pr>" >&2; exit 64 ;; esac
+err="$(mktemp)"; trap 'rm -f "$err"' EXIT
+v="$(timeout 60 gh pr view "$pr" -R "$repo" --json number,title,state,isDraft,author,headRefOid,headRefName,baseRefName,additions,deletions,changedFiles,mergeable,mergeStateStatus,comments,files 2>"$err")"
+jq -e '.headRefOid | type == "string"' <<<"$v" >/dev/null 2>&1 \
+  || { echo "couldn't read $repo#$pr: $(head -c 160 "$err" | tr '\n' ' ' | sed 's/ *$//')"; exit 75; }
+jq -r '
+  (.headRefOid[0:7]) as $h
+  | "#\(.number) \(.title[0:90]) — \(if .isDraft then "DRAFT" else .state end) by \(.author.login), head \($h)",
+    "\(.headRefName) → \(.baseRefName): +\(.additions) −\(.deletions) in \(.changedFiles) files; merge \(.mergeable)/\(.mergeStateStatus)"' <<<"$v"
+echo "checks: $("$HERE/ci-status" "$repo" "$pr")"
+jq -r '
+  (.headRefOid[0:7]) as $h
+  | ([.comments[] | select(.body | test("^(Ship|Launch)-ready: PASS"; "m")) | select(.body | contains($h))] | length) as $p
+  | "review: \(if $p > 0 then "a PASS line names head \($h)" else "no PASS line for head \($h)" end); \(.comments | length) comments\(if (.comments | length) > 0 then ", last by \(.comments | last | .author.login)" else "" end)",
+    "files: \([.files | sort_by(-(.additions + .deletions)) | .[0:5][] | "\(.path) (+\(.additions)/−\(.deletions))"] | join(", "))"' <<<"$v"
